@@ -128,6 +128,9 @@ export class RootedFileService {
 
   #currentRoot(root) {
     try {
+      const configured = fs.realpathSync(root.canonical);
+      const configuredStat = fs.statSync(configured);
+      if (configuredStat.dev !== root.device || configuredStat.ino !== root.inode) throw new Error('root identity changed');
       const current = fs.realpathSync(root.anchor);
       const stat = fs.statSync(current);
       if (stat.dev !== root.device || stat.ino !== root.inode) throw new Error('root identity changed');
@@ -138,6 +141,7 @@ export class RootedFileService {
   }
 
   #preflight(root, parts) {
+    this.#currentRoot(root);
     let current = root.anchor;
     let finalStat = fs.fstatSync(root.fd);
     for (const part of parts) {
@@ -165,7 +169,7 @@ export class RootedFileService {
       throw new WebSpiderError('WS_PATH_INVALID', 'Expected a directory.', 400);
     }
     const candidate = this.#candidate(root, parts);
-    const noFollow = root.symlinkPolicy === 'no_symlinks' ? O_NOFOLLOW : 0;
+    const noFollow = root.symlinkPolicy === 'no_symlinks' && parts.length ? O_NOFOLLOW : 0;
     const directoryFlag = expectedKind === 'directory' ? O_DIRECTORY : 0;
     let handle;
     try {
