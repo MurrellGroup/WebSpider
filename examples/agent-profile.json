@@ -1,0 +1,10 @@
+{
+  "name": "backend-shell",
+  "adapter_kind": "pty",
+  "executable": "/bin/bash",
+  "arguments": ["--noprofile", "--norc", "-i"],
+  "restart_policy": {
+    "mode": "on_failure",
+    "max_attempts": 3
+  }
+}

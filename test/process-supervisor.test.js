@@ -1,0 +1,160 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { NodeDatabase } from '../src/db/node-database.js';
+import { RootedFileService } from '../src/node/root-fs.js';
+import { ProcessSupervisor } from '../src/node/process-supervisor.js';
+
+const detachedPtyTest = process.platform === 'linux' ? test : test.skip;
+
+function waitForCompletion(supervisor, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for detached process')), timeoutMs);
+    const listener = (event) => {
+      if (event.type !== 'process.completed') return;
+      clearTimeout(timer);
+      supervisor.off('state', listener);
+      resolve(event);
+    };
+    supervisor.on('state', listener);
+  });
+}
+
+async function waitUntil(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
+detachedPtyTest('detached command writes a durable exit marker and terminal log', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-runtime-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_runtime', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const completion = waitForCompletion(supervisor);
+  const runtime = supervisor.launch({
+    id: 'run_test',
+    kind: 'task',
+    taskId: 'tsk_test',
+    terminalId: 'trm_test',
+    rootId: 'awr_runtime',
+    argv: ['/bin/sh', '-c', 'printf "detached-output\\n"; printf "artifact" > result.txt'],
+  });
+  const event = await completion;
+  assert.equal(event.exit_status, 0);
+  assert.equal(fs.readFileSync(path.join(workspace, 'result.txt'), 'utf8'), 'artifact');
+  assert.match(supervisor.snapshot('trm_test').text, /detached-output/);
+  assert.equal(database.getProcess(runtime.id).completionReported, true);
+});
+
+detachedPtyTest('a surviving PTY process is reconciled and controlled after node-daemon restart', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-reconcile-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  let database = new NodeDatabase(path.join(directory, 'node.db'));
+  let roots = new RootedFileService([{ id: 'awr_runtime', path: workspace }]);
+  let supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  const runtime = supervisor.launch({
+    id: 'run_survivor', kind: 'agent', agentInstanceId: 'agt_survivor', terminalId: 'trm_survivor',
+    rootId: 'awr_runtime', argv: ['/bin/sh'],
+  });
+  supervisor.input('trm_survivor', Buffer.from('echo before-restart\n'));
+  await waitUntil(() => supervisor.snapshot('trm_survivor').text.includes('before-restart'));
+
+  supervisor.stop();
+  roots.close();
+  database.close();
+
+  database = new NodeDatabase(path.join(directory, 'node.db'));
+  roots = new RootedFileService([{ id: 'awr_runtime', path: workspace }]);
+  supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  assert.equal(database.getProcess(runtime.id).state, 'running');
+  const completion = waitForCompletion(supervisor);
+  supervisor.input('trm_survivor', Buffer.from('echo after-restart\nexit\n'));
+  const event = await completion;
+  assert.equal(event.exit_status, 0);
+  const snapshot = supervisor.snapshot('trm_survivor').text;
+  assert.match(snapshot, /before-restart/);
+  assert.match(snapshot, /after-restart/);
+
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+});
+
+detachedPtyTest('agent launch materializes the inherited project agreement without workspace setup', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-agent-context-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const inheritedCodexHome = path.join(directory, 'original-codex-home');
+  fs.mkdirSync(inheritedCodexHome);
+  fs.writeFileSync(path.join(inheritedCodexHome, 'AGENTS.md'), '# User defaults\nPreserve the user rule.');
+  const fakeCodex = path.join(directory, 'codex');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test"\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_context', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const completion = waitForCompletion(supervisor);
+  const runtime = supervisor.launch({
+    id: 'run_context', kind: 'agent', agentInstanceId: 'agt_context', terminalId: 'trm_context',
+    rootId: 'awr_context', argv: [fakeCodex], environment: { CODEX_HOME: inheritedCodexHome },
+    policySnapshot: {
+      id: 'pol_context', project_id: 'prj_context', agent_role: 'main', system_policy_revision: 2,
+      policy_revision: 3, content_hash: 'abc', policy: {},
+      rendered_instructions: '# Agreement\n## Reduce user burden\nProceed with safe defaults.',
+    },
+    agentControl: {
+      url: 'http://127.0.0.1:7340/api/v1/agent-control',
+      token: 'wsa_test', scopes: ['policy:read', 'usage:read', 'usage:write'],
+    },
+  });
+  const event = await completion;
+  assert.equal(event.exit_status, 0);
+  assert.equal(runtime.policySnapshotId, 'pol_context');
+  assert.match(fs.readFileSync(path.join(directory, 'agent-context', 'agt_context', 'PROJECT_RULES.md'), 'utf8'), /Reduce user burden/);
+  const managedAgents = fs.readFileSync(path.join(directory, 'agent-context', 'agt_context', 'codex-home', 'AGENTS.md'), 'utf8');
+  assert.match(managedAgents, /Preserve the user rule/);
+  assert.match(managedAgents, /Reduce user burden/);
+  const controlScriptPath = path.join(directory, 'agent-context', 'agt_context', 'webspider-control');
+  const controlScript = fs.readFileSync(controlScriptPath, 'utf8');
+  assert.equal(spawnSync(process.execPath, ['--check', controlScriptPath]).status, 0);
+  assert.match(controlScript, /expected_revision/);
+  assert.match(controlScript, /usage report --weekly-remaining PERCENT/);
+  assert.match(controlScript, /request\('usage', 'POST', body\)/);
+  assert.doesNotMatch(controlScript, /billing|subscription|api.?key|reset.?credit|add.?credit/i);
+  assert.doesNotMatch(controlScript, /wsa_test/);
+});

@@ -1,0 +1,19 @@
+{
+  "name": "webspider-fabric",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Distributed, persistent LLM-agent orchestration control plane",
+  "type": "module",
+  "bin": {
+    "webspider": "./bin/webspider.js"
+  },
+  "scripts": {
+    "start": "node ./bin/webspider.js up",
+    "test": "node --test --test-concurrency=1",
+    "doctor": "node ./bin/webspider.js doctor"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "Apache-2.0"
+}

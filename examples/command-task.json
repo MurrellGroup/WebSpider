@@ -1,0 +1,14 @@
+{
+  "project_id": "prj_local",
+  "type": "command",
+  "title": "Run verification",
+  "assigned_agent_instance_id": "agt_master",
+  "specification": {
+    "root_id": "awr_workspace",
+    "argv": ["/bin/sh", "-c", "node --test --test-concurrency=1"],
+    "notify_master": true
+  },
+  "retry_policy": {
+    "max_attempts": 2
+  }
+}
