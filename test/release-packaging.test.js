@@ -61,10 +61,7 @@ test('release bootstrap is rendered with a fixed repository and version', (t) =>
   assert.match(source, /version='9\.8\.7'/);
   assert.doesNotMatch(source, /@GITHUB_REPOSITORY@|@WEBSPIDER_VERSION@/);
   assert.match(source, /SHA256SUMS/);
-  assert.match(source, /GH_TOKEN/);
-  assert.match(source, /Authorization: Bearer/);
-  assert.match(source, /Accept: application\/octet-stream/);
-  assert.match(source, /api\.github\.com\/repos\/\$repository\/releases\/tags\/v\$version/);
+  assert.doesNotMatch(source, /GH_TOKEN|GITHUB_TOKEN|Authorization: Bearer|api\.github\.com/);
   assert.match(source, /curl --http1\.1/);
   assert.match(source, /actual.*expected|expected.*actual/s);
   assert.equal(spawnSync('sh', ['-n', output]).status, 0);

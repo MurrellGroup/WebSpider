@@ -3,7 +3,6 @@ set -eu
 
 repository='@GITHUB_REPOSITORY@'
 version='@WEBSPIDER_VERSION@'
-github_token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
 
 case "$repository:$version" in
   *@*)
@@ -32,52 +31,6 @@ trap cleanup EXIT HUP INT TERM
 download() {
   source_url=$1
   destination=$2
-  if [ -n "$github_token" ] && [ -z "${WEBSPIDER_RELEASE_BASE_URL:-}" ]; then
-    release_json="$temporary/release.json"
-    if [ ! -s "$release_json" ]; then
-      metadata_url="https://api.github.com/repos/$repository/releases/tags/v$version"
-      if command -v curl >/dev/null 2>&1; then
-        curl --http1.1 -fsSL --retry 5 --retry-delay 2 \
-          --header "Accept: application/vnd.github+json" \
-          --header "Authorization: Bearer $github_token" \
-          --output "$release_json" "$metadata_url"
-      elif command -v wget >/dev/null 2>&1; then
-        wget -q \
-          --header="Accept: application/vnd.github+json" \
-          --header="Authorization: Bearer $github_token" \
-          -O "$release_json" "$metadata_url"
-      else
-        echo "Downloading WebSpider requires curl or wget." >&2
-        exit 1
-      fi
-    fi
-    asset_name=$(basename "$source_url")
-    asset_api_url=$(awk -v wanted="$asset_name" '
-      $1 == "\"url\":" && $2 ~ /^\"https:\/\/api.github.com\/repos\/.*\/releases\/assets\// {
-        candidate=$2; gsub(/[\",]/, "", candidate)
-      }
-      $1 == "\"name\":" {
-        name=$2; gsub(/[\",]/, "", name)
-        if (name == wanted) { print candidate; exit }
-      }
-    ' "$release_json")
-    if [ -z "$asset_api_url" ]; then
-      echo "The private release asset $asset_name was not found." >&2
-      exit 1
-    fi
-    if command -v curl >/dev/null 2>&1; then
-      curl --http1.1 -fL --retry 5 --retry-delay 2 \
-        --header "Accept: application/octet-stream" \
-        --header "Authorization: Bearer $github_token" \
-        --output "$destination" "$asset_api_url"
-    else
-      wget \
-        --header="Accept: application/octet-stream" \
-        --header="Authorization: Bearer $github_token" \
-        -O "$destination" "$asset_api_url"
-    fi
-    return
-  fi
   if command -v curl >/dev/null 2>&1; then
     curl --http1.1 -fL --retry 5 --retry-delay 2 --output "$destination" "$source_url"
   elif command -v wget >/dev/null 2>&1; then
