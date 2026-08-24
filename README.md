@@ -8,25 +8,29 @@ User distributions are versioned GitHub Release assets built on native GitHub-ho
 
 ## Quick start
 
-The normal install is one command. The release bootstrap detects the machine, downloads the matching immutable release asset from `MurrellGroup/WebSpider`, verifies it against `SHA256SUMS`, installs the native per-user boot service, and starts WebSpider:
+The release bootstrap detects the machine, downloads the matching immutable release asset from `MurrellGroup/WebSpider`, verifies it against `SHA256SUMS`, installs the native per-user boot service, and starts WebSpider. Because the repository is private, use an authenticated GitHub CLI to obtain the bootstrap and export a token with read access for its two authenticated asset downloads:
 
 ```bash
-curl -fsSL https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run | sh -s -- --workspace "$PWD"
+export GH_TOKEN="$(gh auth token)"
+gh release download --repo MurrellGroup/WebSpider --pattern WebSpider_Install.run --clobber
+sh WebSpider_Install.run --workspace "$PWD"
 ```
+
+The bootstrap inherits `GH_TOKEN` and uses GitHub's authenticated release-asset API for the versioned installer and checksum downloads. If the repository is later made public, the bootstrap can instead be downloaded from `https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run` and run without a token.
 
 The same release also contains fully self-contained installers for direct or offline use:
 
 | Machine | Release asset |
 | --- | --- |
-| Linux x86-64 | `WebSpider_Install_0.4.0_linux_x64.run` |
-| Linux ARM64 | `WebSpider_Install_0.4.0_linux_arm64.run` |
-| macOS Intel | `WebSpider_Install_0.4.0_macos_x64.run` |
-| macOS Apple silicon | `WebSpider_Install_0.4.0_macos_arm64.run` |
+| Linux x86-64 | `WebSpider_Install_0.4.1_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.4.1_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.4.1_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.4.1_macos_arm64.run` |
 
 Run the downloaded asset directly through the system shell:
 
 ```bash
-sh ~/Downloads/WebSpider_Install_0.4.0_linux_x64.run --workspace /path/to/project
+sh ~/Downloads/WebSpider_Install_0.4.1_linux_x64.run --workspace /path/to/project
 ```
 
 No separate runtime or package-manager setup is part of either user workflow.
@@ -63,7 +67,7 @@ The repository owns the build recipe; GitHub Releases own the binaries. `.github
 - `darwin-x64` on `macos-15-intel`;
 - `darwin-arm64` on `macos-15`.
 
-Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.0` additionally:
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.1` additionally:
 
 1. requires the tag to equal the version in `package.json`;
 2. gathers exactly four native installers;
@@ -74,8 +78,8 @@ Pull requests, `main` pushes, and manual runs produce short-lived Actions artifa
 Create a release by pushing its annotated tag:
 
 ```bash
-git tag -a v0.4.0 -m "WebSpider 0.4.0"
-git push origin v0.4.0
+git tag -a v0.4.1 -m "WebSpider 0.4.1"
+git push origin v0.4.1
 ```
 
 For a native development build on the current machine:

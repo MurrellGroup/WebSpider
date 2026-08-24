@@ -186,7 +186,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.0', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.1', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);

@@ -24,7 +24,8 @@ test('GitHub Actions builds every supported native target before publishing a ta
   assert.match(workflow, /gh release create "\$GITHUB_REF_NAME"/);
   assert.match(workflow, /release\/SHA256SUMS/);
   assert.match(workflow, /release\/WebSpider_Install\.run/);
-  assert.match(readme, /https:\/\/github\.com\/MurrellGroup\/WebSpider\/releases\/latest\/download\/WebSpider_Install\.run/);
+  assert.match(readme, /gh release download --repo MurrellGroup\/WebSpider --pattern WebSpider_Install\.run/);
+  assert.match(readme, /export GH_TOKEN=/);
   assert.doesNotMatch(readme, /OWNER\/REPOSITORY/);
   assert.match(fs.readFileSync(path.join(repository, '.gitignore'), 'utf8'), /^dist\/$/m);
 });
@@ -57,6 +58,10 @@ test('release bootstrap is rendered with a fixed repository and version', (t) =>
   assert.match(source, /version='9\.8\.7'/);
   assert.doesNotMatch(source, /@GITHUB_REPOSITORY@|@WEBSPIDER_VERSION@/);
   assert.match(source, /SHA256SUMS/);
+  assert.match(source, /GH_TOKEN/);
+  assert.match(source, /Authorization: Bearer/);
+  assert.match(source, /Accept: application\/octet-stream/);
+  assert.match(source, /api\.github\.com\/repos\/\$repository\/releases\/tags\/v\$version/);
   assert.match(source, /actual.*expected|expected.*actual/s);
   assert.equal(spawnSync('sh', ['-n', output]).status, 0);
 });
