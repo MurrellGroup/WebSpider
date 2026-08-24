@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+
+set timeout -1
+if {$argc != 1} {
+  puts stderr "WebSpider PTY bridge requires one shell command."
+  exit 2
+}
+
+spawn -noecho /bin/sh -c [lindex $argv 0]
+interact
+set result [wait]
+if {[lindex $result 2] != 0} {
+  exit 255
+}
+exit [lindex $result 3]

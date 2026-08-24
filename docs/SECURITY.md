@@ -16,6 +16,8 @@ The implementation protects the following boundaries:
 
 Loopback CLI starts print an optional quick-access URL with the owner token in the fragment. Fragments are not sent in HTTP requests; the portal removes it from the address bar before exchanging it for the normal HttpOnly session. Remote/public-base deployments print no quick-access link and retain manual token entry.
 
+The self-installer writes only under the invoking user's configuration, data, executable, and application directories. Linux boot persistence uses `systemd --user` plus lingering; macOS uses a user LaunchAgent. Service definitions contain absolute executable, workspace, and state paths and never embed the owner token. Every platform-specific asset contains the native runtime that its filename declares and refuses to run on a different target. Tag builds run and smoke-test on the corresponding native GitHub-hosted runner. The small release bootstrap downloads only the matching versioned asset and executes it only after its SHA-256 digest matches that Release's `SHA256SUMS`.
+
 ## Rooted file algorithm
 
 At registration, the node canonicalizes a trusted configured directory, opens it, and records its device/inode identity. Browser data never participates in that step.
@@ -52,7 +54,7 @@ Directory listings may show symlink metadata, but a blocked target is not follow
 - Agent control tokens are denied on every ordinary authenticated route, and issuance rejects unknown scopes. `usage:write` means writing a timestamped observation record; it confers no provider-account mutation authority. Independent WebSpider worker instances receive neither the helper environment nor a token. Harness-native subagent threads inherit the parent runtime permission mode and may share its process environment; the compiled role-scope instruction forbids child-thread control use, but the PTY adapter cannot enforce a separate cryptographic identity for an internal harness thread.
 - The current browser portal has one owner role. Schema boundaries support later project RBAC, but multi-user role bindings are not implemented.
 - Tailscale Serve supplies private reachability; it does not replace WebSpider authentication or authorization.
-- The detached `script` PTY fallback reports best-effort semantic delivery. It cannot prove a third-party full-screen CLI is waiting at a prompt.
+- The detached PTY fallback (`script` on Linux and `expect` on macOS) reports best-effort semantic delivery. It cannot prove a third-party full-screen CLI is waiting at a prompt.
 - Artifact and file transfers are bounded to 64 MiB per current command. A chunked/range transport is required for larger files.
 - Raw provider secrets and ACP credentials are not managed because ACP/native adapters are not included in this slice.
 

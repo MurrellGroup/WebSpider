@@ -138,6 +138,15 @@ export class NodeDaemon extends EventEmitter {
         signature: signNodeHello(this.privateKey, this.nodeId, timestamp, nonce),
         capabilities: this.#capabilities(),
         adapter_inventory: this.#adapterInventory(),
+        runtime_inventory: this.database.listProcesses().map((runtime) => ({
+          id: runtime.id,
+          kind: runtime.kind,
+          agent_instance_id: runtime.agentInstanceId,
+          task_id: runtime.taskId,
+          terminal_id: runtime.terminalId,
+          state: runtime.state,
+          created_at: runtime.createdAt,
+        })),
       }));
     });
     socket.addEventListener('message', (message) => {

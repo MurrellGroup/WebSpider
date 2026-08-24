@@ -83,10 +83,22 @@ export class NodeBroker extends EventEmitter {
       connection_epoch: state.epoch,
       heartbeat_interval_ms: 5_000,
     });
+    const runtimeInventory = Array.isArray(frame.runtime_inventory)
+      ? frame.runtime_inventory.slice(0, 1_000).filter((runtime) => runtime && typeof runtime === 'object').map((runtime) => ({
+        id: String(runtime.id || '').slice(0, 160),
+        kind: runtime.kind === 'task' ? 'task' : 'agent',
+        agent_instance_id: runtime.agent_instance_id ? String(runtime.agent_instance_id).slice(0, 160) : null,
+        task_id: runtime.task_id ? String(runtime.task_id).slice(0, 160) : null,
+        terminal_id: runtime.terminal_id ? String(runtime.terminal_id).slice(0, 160) : null,
+        state: ['running', 'stopping', 'exited', 'failed', 'lost'].includes(runtime.state) ? runtime.state : 'lost',
+        created_at: runtime.created_at || null,
+      }))
+      : [];
     this.database.appendEvent('node', nodeId, 'node.online.v1', `node:${nodeId}`, nodeId, {
       node_id: nodeId,
       connection_epoch: state.epoch,
       capabilities: frame.capabilities || {},
+      runtime_inventory: runtimeInventory,
     });
     this.#replay(nodeId).catch((error) => this.emit('error', error));
     return state;

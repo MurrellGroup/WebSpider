@@ -7,6 +7,7 @@ import { NodeDaemon } from './node/node-daemon.js';
 import { ensurePrivateFile, generateNodeIdentity } from './lib/security.js';
 import { makeId } from './lib/ids.js';
 import { inferProjectContext } from './lib/project-policy.js';
+import { installUserService, uninstallUserService, userServiceStatus } from './lib/service-manager.js';
 
 function parseArgs(argv) {
   const positional = [];
@@ -274,7 +275,10 @@ function doctor(options) {
   const stateDir = path.resolve(options['state-dir'] || defaultStateDir());
   const checks = [];
   checks.push({ name: 'node_runtime', ok: Number(process.versions.node.split('.')[0]) >= 24, detail: process.version });
-  for (const executable of ['git', 'script', 'mkfifo']) {
+  const git = process.platform === 'win32' ? { status: 1 } : BunLikeSpawn('git');
+  checks.push({ name: 'git', ok: git.status === 0, required: false });
+  const runtimeExecutables = [process.platform === 'darwin' ? 'expect' : 'script', 'mkfifo'];
+  for (const executable of runtimeExecutables) {
     const result = process.platform === 'win32' ? { status: 1 } : BunLikeSpawn(executable);
     checks.push({ name: executable, ok: result.status === 0 });
   }
@@ -285,23 +289,43 @@ function doctor(options) {
     checks.push({ name: 'hub_database', ok: Object.values(integrity)[0] === 'ok', detail: Object.values(integrity)[0] });
     database.close();
   } else checks.push({ name: 'hub_database', ok: true, detail: 'not initialized' });
-  logJSON({ ok: checks.every((check) => check.ok), state_dir: stateDir, checks });
-  if (!checks.every((check) => check.ok)) process.exitCode = 1;
+  const ok = checks.every((check) => check.ok || check.required === false);
+  logJSON({ ok, state_dir: stateDir, checks });
+  if (!ok) process.exitCode = 1;
+}
+
+function serviceCommand(action, options) {
+  const executable = path.resolve(options.executable || process.env.WEBSPIDER_EXECUTABLE || process.argv[1]);
+  const stateDir = path.resolve(options['state-dir'] || defaultStateDir());
+  const workspace = path.resolve(options.workspace || process.cwd());
+  if (action === 'install') {
+    if (!options.user) throw new Error('service install requires --user');
+    return logJSON(installUserService({ executable, workspace, stateDir }));
+  }
+  if (action === 'status') return logJSON(userServiceStatus());
+  if (action === 'uninstall') {
+    if (!options.user) throw new Error('service uninstall requires --user');
+    return logJSON(uninstallUserService());
+  }
+  throw new Error('service requires install --user, status, or uninstall --user');
 }
 
 function BunLikeSpawn(executable) {
-  const result = fs.existsSync(`/usr/bin/${executable}`) || fs.existsSync(`/bin/${executable}`);
+  const result = Boolean(findExecutable(executable));
   return { status: result ? 0 : 1 };
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.3.1\n\n`);
+  process.stdout.write(`WebSpider 0.4.0\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);
   process.stdout.write(`  webspider node join --hub URL --token TOKEN [--root ID=PATH]\n`);
   process.stdout.write(`  webspider node [--state-dir PATH]\n`);
   process.stdout.write(`  webspider token create --hub URL --owner-token TOKEN [--name NAME]\n`);
+  process.stdout.write(`  webspider service install --user [--workspace PATH] [--state-dir PATH]\n`);
+  process.stdout.write(`  webspider service status\n`);
+  process.stdout.write(`  webspider service uninstall --user\n`);
   process.stdout.write(`  webspider doctor [--state-dir PATH]\n`);
 }
 
@@ -313,6 +337,7 @@ export async function main(argv) {
   if (command === 'node' && positional[1] === 'join') return joinNode(options);
   if (command === 'node') return runNode(options);
   if (command === 'token' && positional[1] === 'create') return createJoinToken(options);
+  if (command === 'service') return serviceCommand(positional[1], options);
   if (command === 'doctor') return doctor(options);
   if (['help', '--help', '-h'].includes(command)) return help();
   throw new Error(`Unknown command: ${positional.join(' ')}`);

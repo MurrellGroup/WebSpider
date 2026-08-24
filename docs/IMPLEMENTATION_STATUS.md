@@ -6,10 +6,13 @@ The current repository is an executable secure vertical slice, not a claim that 
 
 | Capability | Status | Notes |
 |---|---:|---|
+| One-command installation | Complete for Linux/macOS x64/ARM64 releases | A tagged GitHub Actions matrix builds and clean-install-tests four native `.run` assets, each with its matching runtime embedded. The Release also contains a stable platform-selecting bootstrap and `SHA256SUMS`; users install without Node.js or a package manager. Generated binaries remain Release assets rather than source-controlled files. |
+| Boot service | Complete for Linux/macOS user services | `systemd --user` with lingering on Linux and LaunchAgent on macOS; both use restart-on-failure semantics and the persisted workspace/state paths. |
 | Hub and node roles | Complete | One CLI entry point; nodes connect outbound. |
 | Node enrollment | Complete | Hashed one-time token, expiry, Ed25519 identity, replay window, epoch fencing. |
 | Project and agent roots | Complete | Hub stores logical root metadata; node alone maps root IDs to host paths. |
-| Detached terminal process | Complete with substitute | `script` PTY + FIFO + detached process group replaces tmux in this runtime. State/log/exit markers reconcile after daemon restart. |
+| Detached terminal process | Complete with substitute | Native PTY bridge (`script` on Linux, `expect` on macOS) + FIFO + detached process group replaces tmux in this runtime. State/log/exit markers reconcile after daemon restart. |
+| Machine-reboot agent recovery | Complete for PTY fallback reconstruction | Reconnected nodes send runtime inventory. Missing previously-running main or worker agents restart under their profile policy, receive the tail of the prior terminal log through `WEBSPIDER_RECOVERY_CONTEXT`, and receive one durable recovery message. Native third-party in-flight turns are reconstructed, not magically resumed. |
 | Multi-view terminal | Complete | Live/snapshot watch path with one controller lease and stale-epoch rejection. |
 | SQLite persistence | Complete | WAL, foreign keys, synchronous FULL, busy timeout, hub and node schemas. |
 | Durable event replay | Complete | Global and scope sequences; replay-then-live WebSocket. |
@@ -61,6 +64,6 @@ The product specification recommends a Go 1.24 binary with React and xterm.js. T
 - Node.js 24 built-in SQLite instead of Go + a bundled driver;
 - a self-contained DOM application instead of React;
 - a safe raw-text terminal plus sanitized Markdown/MathML reading view instead of xterm.js;
-- `script` + detached process groups instead of tmux.
+- native `script`/`expect` PTY bridges + detached process groups instead of tmux.
 
 The API shapes, object identities, hub/node boundary, event semantics, node spool, lease model, and root-capability model follow the specification so these runtime substitutions can be replaced module by module.

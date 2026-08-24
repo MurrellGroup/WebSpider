@@ -1,26 +1,43 @@
 # WebSpider Fabric
 
-WebSpider Fabric is a working vertical-slice implementation of the distributed persistent-agent orchestrator described in the accompanying specification. It runs an authoritative hub, outbound-connected worker nodes, a durable browser portal, root-confined files, detached terminal processes, messages, tasks, artifacts, events, leases, role-aware project agreements, and audit history.
+WebSpider Fabric is a working vertical-slice implementation of the distributed persistent-agent orchestrator described in the [product specification](docs/SPECIFICATION.md). It runs an authoritative hub, outbound-connected worker nodes, a durable browser portal, root-confined files, detached terminal processes, messages, tasks, artifacts, events, leases, role-aware project agreements, and audit history.
 
 The primary interaction principle is that the user steers outcomes while WebSpider and its agents resolve routine detail. A normal local project does not begin with a setup questionnaire: WebSpider inspects bounded workspace signals, applies academic-first safe defaults, finds Codex on `PATH` when available, and opens on the most recently active project conversation.
 
-This repository is dependency-free at runtime and uses Node.js 24's built-in SQLite support. The specification's final distribution calls for Go 1.24, `os.Root`, React, xterm.js, ACP, and tmux. Those production substitutions are explicitly tracked in [Implementation status](docs/IMPLEMENTATION_STATUS.md); the current code is executable and testable without fetching third-party packages.
+User distributions are versioned GitHub Release assets built on native GitHub-hosted runners. Each platform installer contains its own runtime; Node.js is an internal implementation detail, not a prerequisite the user installs or manages. Generated binaries are not committed to the source tree. The specification's final architecture calls for Go 1.24, `os.Root`, React, xterm.js, ACP, and tmux; current substitutions are tracked in [Implementation status](docs/IMPLEMENTATION_STATUS.md).
 
 ## Quick start
 
-Requirements:
+The normal install is one command. The release bootstrap detects the machine, downloads the matching immutable release asset from `MurrellGroup/WebSpider`, verifies it against `SHA256SUMS`, installs the native per-user boot service, and starts WebSpider:
 
-- Node.js 24+
-- Linux or macOS for the hub
-- Linux with `script` and `mkfifo` for detached PTY workers
+```bash
+curl -fsSL https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run | sh -s -- --workspace "$PWD"
+```
 
-Start a local hub and node against the current workspace:
+The same release also contains fully self-contained installers for direct or offline use:
+
+| Machine | Release asset |
+| --- | --- |
+| Linux x86-64 | `WebSpider_Install_0.4.0_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.4.0_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.4.0_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.4.0_macos_arm64.run` |
+
+Run the downloaded asset directly through the system shell:
+
+```bash
+sh ~/Downloads/WebSpider_Install_0.4.0_linux_x64.run --workspace /path/to/project
+```
+
+No separate runtime or package-manager setup is part of either user workflow.
+
+Open `http://127.0.0.1:7340`. Closing the browser does not stop the managed agent or detached tasks.
+
+For source development only, contributors can run the repository with Node.js 24:
 
 ```bash
 node ./bin/webspider.js up --workspace .
 ```
-
-Open the printed quick-access portal link. On a loopback start, its token stays in the URL fragment, is exchanged for an HTTP-only session, and is removed from the address bar immediately. The separately printed owner token remains a manual fallback. Closing the browser does not stop the managed agent or detached tasks.
 
 If Codex is installed on `PATH`, `webspider up` selects it automatically. Otherwise it starts the compatibility shell. An unusual executable can be selected explicitly without defining a full agent profile:
 
@@ -36,6 +53,38 @@ Run verification:
 node --test --test-concurrency=1
 node ./bin/webspider.js doctor
 ```
+
+## Release engineering
+
+The repository owns the build recipe; GitHub Releases own the binaries. `.github/workflows/ci-release.yml` tests and builds these native targets independently:
+
+- `linux-x64` on `ubuntu-24.04`;
+- `linux-arm64` on `ubuntu-24.04-arm`;
+- `darwin-x64` on `macos-15-intel`;
+- `darwin-arm64` on `macos-15`.
+
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.0` additionally:
+
+1. requires the tag to equal the version in `package.json`;
+2. gathers exactly four native installers;
+3. renders the platform-selecting `WebSpider_Install.run` bootstrap;
+4. generates `SHA256SUMS`;
+5. creates the matching GitHub Release and attaches those six files.
+
+Create a release by pushing its annotated tag:
+
+```bash
+git tag -a v0.4.0 -m "WebSpider 0.4.0"
+git push origin v0.4.0
+```
+
+For a native development build on the current machine:
+
+```bash
+npm run build:installer
+```
+
+That command writes a generated, Git-ignored platform installer under `dist/`. It refuses to label a runtime as a different OS or architecture.
 
 ## Add another worker
 
@@ -86,8 +135,9 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - Account management is always human-only. Agents cannot redeem token refreshes or rate-limit resets, buy/add/switch credits, change billing, plan, or authentication, move work to API-funded usage, or request entitlements—even if a provider surface happens to expose those actions.
 - The portal defaults to the active conversation, reduces routine sending to one decision, and keeps delivery timing, process controls, policy detail, and operational metadata behind progressive disclosure.
 - Conversations, Markdown-family files, and the terminal's Readable view render sanitized Markdown and browser-native MathML. Raw terminal text remains available beside it and remains the source of truth.
-- Managed commands use an isolated `script` PTY, named input FIFO, detached process group, append-only terminal log, and atomic exit-status marker.
+- Managed commands use an isolated native PTY bridge (`script` on Linux and `expect` on macOS), named input FIFO, detached process group, append-only terminal log, and atomic exit-status marker.
 - A node restart reconciles persisted process IDs, log offsets, FIFOs, and exit markers. A hub outage does not terminate a detached process.
+- Every node reconnect reports its reconciled runtime inventory. Previously-running agents missing after a machine reboot are restarted according to policy, receive a bounded copy of their prior terminal context, and get a durable recovery message instructing them to continue without requiring the user to restate the project.
 - Browser event clients replay from a durable global sequence before receiving live events.
 - Any number of terminal viewers may watch; only a valid, current lease holder can send input.
 - Messages are accepted transactionally before dispatch and use immutable idempotency keys.
@@ -121,6 +171,10 @@ web/                         responsive browser portal and PWA manifest
 test/                        persistence, security, runtime, and integration tests
 docs/                        implementation and security notes
 examples/                    API/configuration examples
+install/                     single-file installer and installed-command launcher
+scripts/                     native installer and release-bootstrap builders
+.github/workflows/           native CI matrix and tag-to-Release publication
+dist/                        generated local output (Git-ignored)
 ```
 
 The completed cognitive-overhead audit and the product invariants it establishes are recorded in [User-burden audit](docs/USER_BURDEN_AUDIT.md). The main/worker authority split, sparse instruction compiler, and editable-default workflow are specified in [Behavior control and agent autonomy](docs/BEHAVIOR_CONTROL.md).

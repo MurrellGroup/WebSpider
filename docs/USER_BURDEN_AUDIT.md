@@ -21,7 +21,8 @@ A second invariant applies to delegation: central coordination must not become r
 
 | Surface | Previous burden | Correction |
 | --- | --- | --- |
-| Local start | Always booted a generic shell and required later profile work | Detect Codex on `PATH`; infer bounded project context; retain a one-command fallback |
+| Installation and local start | Required extraction, a separately installed runtime, a platform choice, and a foreground development command | Publish native tagged-release installers plus one platform-detecting, checksum-verifying bootstrap; record the workspace, install and enable the native user service, and start immediately |
+| Reboot recovery | Durable records existed, but the user had to restart services and reconstruct a lost PTY agent manually | Reconcile node runtime inventory before dispatch, restart missing previously-running agents, attach bounded prior terminal context, and inject one durable continuation message |
 | Local sign-in | Required copying a long owner token into the portal | Print a loopback-only fragment URL that exchanges the token and removes it before routing; retain manual entry as fallback |
 | Project setup | Project record contained only a name and free-form labels | Create an academic-first working agreement automatically, with structured policy and human-readable rendering |
 | Agent spawn | No durable record of the defaults an agent received | Resolve and persist an immutable policy snapshot for every launch |

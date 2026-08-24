@@ -96,7 +96,11 @@ export class Hub {
     this.broker.on('node.event', (envelope) => this.#handleNodeEvent(envelope).catch((error) => this.#logError(error)));
     this.broker.on('error', (error) => this.#logError(error));
     this.database.on('event', (event) => {
-      if (event.type === 'node.online.v1') this.#drainDeliveries(event.scope_id).catch((error) => this.#logError(error));
+      if (event.type === 'node.online.v1') {
+        this.#reconcileNode(event.scope_id, event.payload?.runtime_inventory || [], event.payload?.connection_epoch)
+          .then(() => this.#drainDeliveries(event.scope_id))
+          .catch((error) => this.#logError(error));
+      }
     });
   }
 
@@ -182,7 +186,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.3.1', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.0', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -865,6 +869,52 @@ export class Hub {
     agent = this.database.setAgentState(agentId, 'stopped', `node:${agent.node_id}`);
     this.database.audit({ actorId: actor, action: 'agent.stop', targetType: 'agent_instance', targetId: agentId, projectId: agent.project_id });
     return agent;
+  }
+
+  async #reconcileNode(nodeId, runtimeInventory, connectionEpoch) {
+    const runningAgents = new Set(runtimeInventory
+      .filter((runtime) => runtime.kind === 'agent' && runtime.state === 'running' && runtime.agent_instance_id)
+      .map((runtime) => runtime.agent_instance_id));
+    const agents = this.database.listAgents().filter((agent) => agent.node_id === nodeId);
+    for (let agent of agents) {
+      if (runningAgents.has(agent.id)) {
+        if (!['ready', 'busy'].includes(agent.state)) {
+          agent = this.database.setAgentState(agent.id, 'ready', `node:${nodeId}`, {
+            recovered: true,
+            connection_epoch: connectionEpoch,
+          });
+        }
+        continue;
+      }
+      if (!['ready', 'busy', 'starting'].includes(agent.state)) continue;
+      const previousState = agent.state;
+      agent = this.database.setAgentState(agent.id, 'failed', 'hub:reconciler', {
+        reason: 'runtime_missing_after_node_reconnect',
+        connection_epoch: connectionEpoch,
+      });
+      const profile = this.database.getProfile(agent.profile_id);
+      if (!['always', 'on_failure'].includes(profile.restart_policy?.mode)) continue;
+      try {
+        agent = await this.#wakeAgent(agent.id, 'hub:reconciler');
+        const recovery = this.database.createMessage({
+          threadId: agent.active_thread_id,
+          actorId: `trigger:runtime-recovery:${agent.id}`,
+          deliveryRole: 'user',
+          displaySender: 'WebSpider recovery',
+          contentParts: [{
+            type: 'text',
+            text: `WebSpider restarted this agent after the machine or runtime went down. The prior WebSpider thread and project state are durable. Read $WEBSPIDER_RECOVERY_CONTEXT if it is available, reconcile unfinished work from the prior ${previousState} runtime, and continue without asking the user to restate the project. Re-delegate only work that did not complete.`,
+          }],
+          wakePolicy: 'ensure_running',
+          idempotencyKey: `runtime-recovery:${agent.id}:${connectionEpoch || nowISO()}`,
+          traceId: makeId('trc'),
+          hopCount: 1,
+        });
+        if (!recovery.duplicate) await this.#dispatchMessage(recovery.message.id);
+      } catch (error) {
+        this.#logError(error);
+      }
+    }
   }
 
   async #dispatchMessage(messageId) {

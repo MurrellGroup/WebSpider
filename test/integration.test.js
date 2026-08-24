@@ -14,6 +14,15 @@ function onceWithTimeout(emitter, event, timeoutMs = 5_000) {
   });
 }
 
+async function waitUntil(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 async function jsonFetch(url, ownerToken, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -49,6 +58,52 @@ test('inbound agent messages include source, UTC time, elapsed context, and obse
   assert.match(formatted, /Weekly account allowance: 60% remaining/);
   assert.match(formatted, /observed 2026-08-24T10:00:00\.000Z via codex-status; fresh/);
   assert.match(formatted, /Analysis completed\./);
+});
+
+test('a missing previously-running agent is restarted and receives a durable recovery message', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-reboot-recovery-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  const hubState = path.join(directory, 'hub');
+  let hub = new Hub({ stateDir: hubState, listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_recovery', publicKey: identity.publicKey, workspace, rootId: 'awr_recovery',
+  });
+  hub.database.setAgentState(bootstrap.agent.id, 'ready', 'test:pre-reboot');
+  await hub.listen();
+  await hub.close();
+  hub = new Hub({ stateDir: hubState, listenPort: 0 });
+  const listening = await hub.listen();
+  const node = new NodeDaemon({
+    stateDir: path.join(directory, 'node'), hubURL: listening.url,
+    nodeId: 'nod_recovery', displayName: 'Recovery node',
+    publicKey: identity.publicKey, privateKey: identity.privateKey,
+    roots: [{ id: 'awr_recovery', path: workspace, symlink_policy: 'no_symlinks' }],
+    reconnect: false,
+  });
+  node.on('error', () => {});
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+  t.after(async () => {
+    const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
+    if (runtime?.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await node.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  await waitUntil(() => {
+    const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
+    return hub.database.getAgent(bootstrap.agent.id).state === 'ready' && runtime?.state === 'running';
+  });
+  const messages = hub.database.listMessages(bootstrap.agent.active_thread_id);
+  const recovery = messages.find((message) => message.display_sender === 'WebSpider recovery');
+  assert(recovery);
+  assert.match(recovery.content_parts[0].text, /continue without asking the user to restate the project/i);
+  assert(hub.database.listEvents(0).some((event) => event.payload?.reason === 'runtime_missing_after_node_reconnect'));
 });
 
 test('hub and outbound node provide a root-confined end-to-end API', async (t) => {

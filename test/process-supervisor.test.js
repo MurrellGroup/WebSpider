@@ -8,8 +8,6 @@ import { NodeDatabase } from '../src/db/node-database.js';
 import { RootedFileService } from '../src/node/root-fs.js';
 import { ProcessSupervisor } from '../src/node/process-supervisor.js';
 
-const detachedPtyTest = process.platform === 'linux' ? test : test.skip;
-
 function waitForCompletion(supervisor, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Timed out waiting for detached process')), timeoutMs);
@@ -32,7 +30,7 @@ async function waitUntil(predicate, timeoutMs = 5_000) {
   throw new Error('Timed out waiting for condition');
 }
 
-detachedPtyTest('detached command writes a durable exit marker and terminal log', async (t) => {
+test('detached command writes a durable exit marker and terminal log', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-runtime-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
@@ -64,7 +62,7 @@ detachedPtyTest('detached command writes a durable exit marker and terminal log'
   assert.equal(database.getProcess(runtime.id).completionReported, true);
 });
 
-detachedPtyTest('a surviving PTY process is reconciled and controlled after node-daemon restart', async (t) => {
+test('a surviving PTY process is reconciled and controlled after node-daemon restart', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-reconcile-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
@@ -106,7 +104,50 @@ detachedPtyTest('a surviving PTY process is reconciled and controlled after node
   });
 });
 
-detachedPtyTest('agent launch materializes the inherited project agreement without workspace setup', async (t) => {
+test('a replacement agent receives bounded recovery context from its prior runtime', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-recovery-context-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_recovery', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  let completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_prior', kind: 'agent', agentInstanceId: 'agt_recovery', terminalId: 'trm_recovery',
+    rootId: 'awr_recovery', argv: ['/bin/sh', '-c', 'echo prior-session-marker'],
+    policySnapshot: {
+      id: 'pol_prior', project_id: 'prj_recovery', agent_role: 'main', policy_revision: 1,
+      content_hash: 'prior', policy: {}, rendered_instructions: '# Recovery test',
+    },
+  });
+  assert.equal((await completion).exit_status, 0);
+
+  completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_replacement', kind: 'agent', agentInstanceId: 'agt_recovery', terminalId: 'trm_recovery',
+    rootId: 'awr_recovery',
+    argv: ['/bin/sh', '-c', 'test -f "$WEBSPIDER_RECOVERY_CONTEXT" && grep -q prior-session-marker "$WEBSPIDER_RECOVERY_CONTEXT"'],
+    policySnapshot: {
+      id: 'pol_replacement', project_id: 'prj_recovery', agent_role: 'main', policy_revision: 1,
+      content_hash: 'replacement', policy: {}, rendered_instructions: '# Recovery test',
+    },
+  });
+  assert.equal((await completion).exit_status, 0);
+  const recovery = fs.readFileSync(path.join(directory, 'agent-context', 'agt_recovery', 'RECOVERY_CONTEXT.txt'), 'utf8');
+  assert.match(recovery, /prior-session-marker/);
+  assert.match(recovery, /Previous WebSpider runtime: run_prior/);
+});
+
+test('agent launch materializes the inherited project agreement without workspace setup', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-agent-context-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);

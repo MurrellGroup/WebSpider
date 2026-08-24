@@ -1,0 +1,140 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: darwin-arm64
+            runner: macos-15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up the embedded runtime
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Verify native target
+        env:
+          WEBSPIDER_TARGET: ${{ matrix.target }}
+        run: node -e 'if (process.platform + "-" + process.arch !== process.env.WEBSPIDER_TARGET) process.exit(1)'
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build native self-installer
+        env:
+          WEBSPIDER_TARGET: ${{ matrix.target }}
+        run: npm run build:installer
+
+      - name: Smoke-test clean installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          installers=(dist/WebSpider_Install_*.run)
+          test "${#installers[@]}" = 1
+          installer=${installers[0]}
+          sh "$installer" --help
+          smoke="$RUNNER_TEMP/webspider-installer-smoke"
+          mkdir -p "$smoke/home" "$smoke/workspace"
+          HOME="$smoke/home" \
+          XDG_CONFIG_HOME="$smoke/home/config" \
+          XDG_DATA_HOME="$smoke/home/data" \
+            sh "$installer" \
+              --workspace "$smoke/workspace" \
+              --install-dir "$smoke/install" \
+              --bin-dir "$smoke/bin" \
+              --state-dir "$smoke/state" \
+              --no-service
+          HOME="$smoke/home" \
+          XDG_CONFIG_HOME="$smoke/home/config" \
+            "$smoke/bin/webspider" --version > "$smoke/version.txt"
+          HOME="$smoke/home" \
+          XDG_CONFIG_HOME="$smoke/home/config" \
+            "$smoke/bin/webspider" doctor --state-dir "$smoke/state"
+          version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",/\1/p' package.json)
+          grep -F "WebSpider $version" "$smoke/version.txt"
+
+      - name: Keep build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-${{ matrix.target }}
+          path: dist/*.run
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Download native installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: installer-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify release and create bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",/\1/p' package.json)
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$(find release -maxdepth 1 -type f -name 'WebSpider_Install_*.run' | wc -l | tr -d ' ')" = 4
+          sh ./scripts/render-release-bootstrap.sh "$GITHUB_REPOSITORY" "$version" release/WebSpider_Install.run
+          cd release
+          sha256sum WebSpider_Install_*.run WebSpider_Install.run > SHA256SUMS
+
+      - name: Create immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_kind=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_kind+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            release/WebSpider_Install_*.run \
+            release/WebSpider_Install.run \
+            release/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            "${release_kind[@]}" \
+            --title "WebSpider ${GITHUB_REF_NAME#v}"

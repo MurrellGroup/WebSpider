@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
+
+const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
@@ -189,7 +192,7 @@ function materializeControl(directory, control) {
 }
 
 function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
-  argv = [], environment = {}, agentControl = null,
+  argv = [], environment = {}, agentControl = null, recoveryContext = null,
 } = {}) {
   if (!agentInstanceId || !snapshot?.rendered_instructions) return {};
   const directory = path.join(stateDir, 'agent-context', agentInstanceId);
@@ -215,6 +218,11 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
     WEBSPIDER_POLICY_REVISION: String(snapshot.policy_revision),
     ...materializeControl(directory, agentControl),
   };
+  if (recoveryContext) {
+    const recoveryPath = path.join(directory, 'RECOVERY_CONTEXT.txt');
+    fs.writeFileSync(recoveryPath, recoveryContext, { mode: 0o600 });
+    output.WEBSPIDER_RECOVERY_CONTEXT = recoveryPath;
+  }
   if (/^codex(?:$|[-.])/i.test(path.basename(argv[0] || ''))) {
     output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment);
   }
@@ -287,12 +295,37 @@ export class ProcessSupervisor extends EventEmitter {
     keeper.unref();
     const inputFd = fs.openSync(inputFifo, fs.constants.O_RDONLY);
     const outputFd = fs.openSync(outputLog, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
+    const previousRuntime = kind === 'agent' ? this.database.getProcessByAgent(agentInstanceId) : null;
+    let recoveryContext = null;
+    if (previousRuntime && previousRuntime.id !== id && fs.existsSync(previousRuntime.outputLog)) {
+      const stat = fs.statSync(previousRuntime.outputLog);
+      const start = Math.max(0, stat.size - 200_000);
+      const prior = fs.openSync(previousRuntime.outputLog, 'r');
+      try {
+        const bytes = Buffer.alloc(stat.size - start);
+        fs.readSync(prior, bytes, 0, bytes.length, start);
+        recoveryContext = [
+          `Previous WebSpider runtime: ${previousRuntime.id}`,
+          `Previous runtime state: ${previousRuntime.state}`,
+          `Captured at: ${nowISO()}`,
+          '',
+          bytes.toString('utf8'),
+        ].join('\n');
+      } finally {
+        fs.closeSync(prior);
+      }
+    }
     const policyEnvironment = kind === 'agent'
-      ? materializePolicyContext(this.stateDir, agentInstanceId, policySnapshot, { argv, environment, agentControl })
+      ? materializePolicyContext(this.stateDir, agentInstanceId, policySnapshot, {
+        argv, environment, agentControl, recoveryContext,
+      })
       : {};
     const wrappedCommand = commandString(argv);
-    const wrapper = 'script -qefc "$1" /dev/null; code=$?; /bin/kill -TERM -- "-$3" 2>/dev/null || /bin/kill -TERM "$3" 2>/dev/null || true; printf "%s" "$code" > "$2"; exit "$code"';
-    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid)], {
+    const scriptCommand = process.platform === 'darwin'
+      ? 'expect -f "$4" "$1"'
+      : 'script -qefc "$1" /dev/null';
+    const wrapper = `${scriptCommand}; code=$?; /bin/kill -TERM -- "-$3" 2>/dev/null || /bin/kill -TERM "$3" 2>/dev/null || true; printf "%s" "$code" > "$2"; exit "$code"`;
+    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid), EXPECT_BRIDGE], {
       cwd: root.canonical,
       detached: true,
       stdio: [inputFd, outputFd, outputFd],
