@@ -210,7 +210,11 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
 
   const portal = await fetch(listening.url);
   assert.equal(portal.status, 200);
-  assert.match(portal.headers.get('content-security-policy'), /object-src 'none'/);
+  const contentSecurityPolicy = portal.headers.get('content-security-policy');
+  assert.match(contentSecurityPolicy, /object-src 'none'/);
+  assert.match(contentSecurityPolicy, /style-src 'self' 'unsafe-inline'/);
+  assert.match(contentSecurityPolicy, /script-src 'self';/);
+  assert.doesNotMatch(contentSecurityPolicy, /script-src[^;]*'unsafe-inline'/);
   assert.match(await portal.text(), /WebSpider/);
   const markdownModule = await fetch(`${listening.url}/markdown.js`);
   assert.equal(markdownModule.status, 200);

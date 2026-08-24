@@ -37,7 +37,13 @@ export class WebSocketConnection extends EventEmitter {
         this.emit('close');
       }
     });
-    this.socket.on('error', (error) => this.emit('error', error));
+    this.socket.on('error', (error) => {
+      if (this.listenerCount('error') > 0) this.emit('error', error);
+      if (!this.closed) {
+        this.closed = true;
+        this.emit('close');
+      }
+    });
     if (head.length) this.#consume(head);
   }
 

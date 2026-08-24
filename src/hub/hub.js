@@ -187,7 +187,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.6', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.7', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -687,7 +687,7 @@ export class Hub {
     response.setHeader('referrer-policy', 'no-referrer');
     response.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
     response.setHeader('cross-origin-resource-policy', 'same-origin');
-    response.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    response.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
   }
 
   #serveStatic(pathname, response) {
