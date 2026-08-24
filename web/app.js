@@ -1,5 +1,6 @@
 import { renderMarkdown, stripTerminalFormatting } from './markdown.js';
 import { randomIdentifier } from './random.js';
+import { Terminal } from './vendor/xterm.mjs';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -20,8 +21,11 @@ const state = {
   terminalLease: null,
   terminalSequence: 0,
   terminalHeartbeat: null,
+  terminalEmulator: null,
+  terminalInputSubscription: null,
+  terminalPendingInput: [],
   terminalText: '',
-  terminalView: localStorage.getItem('webspider_terminal_view') || 'reading',
+  terminalView: 'terminal',
   terminalRenderTimer: null,
   filePath: '',
   activeRoot: null,
@@ -117,6 +121,19 @@ function showApp() {
   $('#app-shell').classList.remove('hidden');
 }
 
+function closeTerminal() {
+  state.terminalSocket?.close();
+  state.terminalSocket = null;
+  if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
+  state.terminalHeartbeat = null;
+  state.terminalLease = null;
+  state.terminalPendingInput = [];
+  state.terminalInputSubscription?.dispose();
+  state.terminalInputSubscription = null;
+  state.terminalEmulator?.dispose();
+  state.terminalEmulator = null;
+}
+
 function consumeAccessToken() {
   const match = location.hash.match(/^#access_token=(.+)$/);
   if (!match) return null;
@@ -184,7 +201,7 @@ function summaryItem(value, label) {
 async function renderHome() {
   state.selectedProject = null;
   state.selectedAgent = null;
-  state.terminalSocket?.close();
+  closeTerminal();
   renderSidebar();
   history.replaceState(null, '', '#/home');
   $('#main-view').innerHTML = `<div class="page">
@@ -220,7 +237,7 @@ async function renderProject(projectId) {
   const project = state.projects.find((item) => item.id === projectId) || await api(`/api/v1/projects/${encodeURIComponent(projectId)}`);
   state.selectedProject = project;
   state.selectedAgent = null;
-  state.terminalSocket?.close();
+  closeTerminal();
   renderSidebar();
   const agents = state.agents
     .filter((agent) => agent.project_id === project.id)
@@ -289,10 +306,7 @@ async function renderAgent(agentId, tab = state.tab) {
 async function renderAgentTab() {
   const agent = state.selectedAgent;
   if (!agent) return;
-  state.terminalSocket?.close();
-  if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
-  state.terminalHeartbeat = null;
-  state.terminalSocket = null;
+  closeTerminal();
   if (state.tab === 'conversation') return renderConversation(agent);
   if (state.tab === 'activity') return renderActivity(agent);
   if (state.tab === 'terminal') return renderTerminal(agent);
@@ -367,15 +381,54 @@ function updateTerminalReading(immediate = false) {
   else state.terminalRenderTimer = setTimeout(render, 120);
 }
 
+function transmitTerminalInput(data) {
+  if (!data) return;
+  if (!state.terminalLease || state.terminalSocket?.readyState !== WebSocket.OPEN) {
+    state.terminalPendingInput.push(data);
+    return;
+  }
+  state.terminalSocket.send(JSON.stringify({
+    type: 'INPUT',
+    lease_id: state.terminalLease.id,
+    lease_epoch: state.terminalLease.lease_epoch,
+    data: bytesToBase64(new TextEncoder().encode(data)),
+  }));
+}
+
+function flushTerminalInput() {
+  const pending = state.terminalPendingInput;
+  state.terminalPendingInput = [];
+  for (const data of pending) transmitTerminalInput(data);
+}
+
 async function renderTerminal(agent) {
   state.terminalText = '';
-  if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'reading';
+  if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(agent.terminal_id)}</span><div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="reading">Readable</button><button data-terminal-view="terminal">Raw</button><button data-terminal-view="split">Split</button></div><button class="secondary" id="terminal-control" data-action="take-control">Take control</button></div>
-    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><pre id="terminal-output" class="terminal-output" aria-label="Raw terminal output"></pre><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
-    <textarea id="terminal-input" class="terminal-input" disabled aria-label="Terminal input" placeholder="Control lease required"></textarea>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(agent.terminal_id)}</span><div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div><button class="secondary" id="terminal-control" data-action="take-control">Connecting</button></div>
+    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
   </section>`;
   applyTerminalView();
+  const emulator = new Terminal({
+    cols: 120,
+    rows: 36,
+    cursorBlink: true,
+    convertEol: false,
+    scrollback: 10_000,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 12,
+    lineHeight: 1.15,
+    theme: {
+      background: '#07090d',
+      foreground: '#d7e0e3',
+      cursor: '#8ef0c7',
+      selectionBackground: '#28483f',
+    },
+  });
+  state.terminalEmulator = emulator;
+  emulator.open($('#terminal-output'));
+  state.terminalInputSubscription = emulator.onData(transmitTerminalInput);
+  emulator.focus();
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
@@ -384,11 +437,12 @@ async function renderTerminal(agent) {
   state.terminalSocket = socket;
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
-    const output = $('#terminal-output');
-    if (!output) return;
+    if (!state.terminalEmulator) return;
+    if (frame.type === 'ATTACHED') socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
     if (frame.type === 'SNAPSHOT' && Number(frame.sequence || 0) >= state.terminalSequence) {
       state.terminalText = frame.text || '';
-      output.textContent = state.terminalText;
+      state.terminalEmulator.reset();
+      state.terminalEmulator.write(state.terminalText);
       state.terminalSequence = Number(frame.sequence || 0);
       updateTerminalReading(true);
     }
@@ -397,16 +451,15 @@ async function renderTerminal(agent) {
       const overlap = Math.max(0, state.terminalSequence - Number(frame.sequence_start));
       const addition = new TextDecoder().decode(overlap ? bytes.slice(overlap) : bytes);
       state.terminalText += addition;
-      output.textContent += addition;
+      state.terminalEmulator.write(overlap ? bytes.slice(overlap) : bytes);
       state.terminalSequence = Number(frame.sequence_end);
       updateTerminalReading();
     }
     if (frame.type === 'LEASE_GRANTED') {
       state.terminalLease = frame.lease;
-      $('#terminal-input').disabled = false;
-      $('#terminal-input').placeholder = 'Type here only when direct terminal input is needed';
       $('#terminal-control').textContent = 'In Control';
-      $('#terminal-input').focus();
+      flushTerminalInput();
+      state.terminalEmulator.focus();
       if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
       state.terminalHeartbeat = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN && state.terminalLease) socket.send(JSON.stringify({
@@ -417,7 +470,6 @@ async function renderTerminal(agent) {
       }, 5_000);
     }
     if (frame.type === 'ERROR') toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
-    output.scrollTop = output.scrollHeight;
   });
   socket.addEventListener('close', () => {
     if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
@@ -720,18 +772,6 @@ document.addEventListener('keydown', (event) => {
     else loadDirectory().catch((error) => toast(friendlyError(error), true));
     return;
   }
-  if (event.target.id !== 'terminal-input' || event.key !== 'Enter' || event.shiftKey) return;
-  event.preventDefault();
-  const value = event.target.value;
-  if (!value || !state.terminalLease || state.terminalSocket?.readyState !== WebSocket.OPEN) return;
-  const bytes = new TextEncoder().encode(`${value}\n`);
-  state.terminalSocket.send(JSON.stringify({
-    type: 'INPUT',
-    lease_id: state.terminalLease.id,
-    lease_epoch: state.terminalLease.lease_epoch,
-    data: bytesToBase64(bytes),
-  }));
-  event.target.value = '';
 });
 
 window.addEventListener('hashchange', () => routeFromHash().catch((error) => toast(friendlyError(error), true)));

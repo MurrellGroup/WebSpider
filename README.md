@@ -18,15 +18,15 @@ The same release also contains fully self-contained installers for direct or off
 
 | Machine | Release asset |
 | --- | --- |
-| Linux x86-64 | `WebSpider_Install_0.4.5_linux_x64.run` |
-| Linux ARM64 | `WebSpider_Install_0.4.5_linux_arm64.run` |
-| macOS Intel | `WebSpider_Install_0.4.5_macos_x64.run` |
-| macOS Apple silicon | `WebSpider_Install_0.4.5_macos_arm64.run` |
+| Linux x86-64 | `WebSpider_Install_0.4.6_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.4.6_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.4.6_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.4.6_macos_arm64.run` |
 
 Run the downloaded asset directly through the system shell:
 
 ```bash
-sh ~/Downloads/WebSpider_Install_0.4.5_linux_x64.run --workspace /path/to/project
+sh ~/Downloads/WebSpider_Install_0.4.6_linux_x64.run --workspace /path/to/project
 ```
 
 No separate runtime or package-manager setup is part of either user workflow.
@@ -75,7 +75,7 @@ The repository owns the build recipe; GitHub Releases own the binaries. `.github
 - `darwin-x64` on `macos-15-intel`;
 - `darwin-arm64` on `macos-15`.
 
-Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.5` additionally:
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.6` additionally:
 
 1. requires the tag to equal the version in `package.json`;
 2. gathers exactly four native installers;
@@ -86,8 +86,8 @@ Pull requests, `main` pushes, and manual runs produce short-lived Actions artifa
 Create a release by pushing its annotated tag:
 
 ```bash
-git tag -a v0.4.5 -m "WebSpider 0.4.5"
-git push origin v0.4.5
+git tag -a v0.4.6 -m "WebSpider 0.4.6"
+git push origin v0.4.6
 ```
 
 For a native development build on the current machine:
@@ -146,7 +146,7 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - The main agent treats session context and account allowance as different budgets. It uses `/status` at natural breakpoints for context and the reported weekly rate-limit percentage; `/usage weekly` is optional supporting token activity, never a substitute for percent remaining. Read-only observations are timestamped and shown in later inbound envelopes and the portal.
 - Account management is always human-only. Agents cannot redeem token refreshes or rate-limit resets, buy/add/switch credits, change billing, plan, or authentication, move work to API-funded usage, or request entitlements—even if a provider surface happens to expose those actions.
 - The portal defaults to the active conversation, reduces routine sending to one decision, and keeps delivery timing, process controls, policy detail, and operational metadata behind progressive disclosure.
-- Conversations, Markdown-family files, and the terminal's Readable view render sanitized Markdown and browser-native MathML. Raw terminal text remains available beside it and remains the source of truth.
+- Conversations, Markdown-family files, and the terminal's Readable view render sanitized Markdown and browser-native MathML. The primary terminal view uses a bundled xterm.js emulator for ANSI/VT rendering and direct keyboard input.
 - Managed commands use an isolated native PTY bridge (`script` on Linux and `expect` on macOS), named input FIFO, detached process group, append-only terminal log, and atomic exit-status marker.
 - A node restart reconciles persisted process IDs, log offsets, FIFOs, and exit markers. A hub outage does not terminate a detached process.
 - Every node reconnect reports its reconciled runtime inventory. Previously-running agents missing after a machine reboot are restarted according to policy, receive a bounded copy of their prior terminal context, and get a durable recovery message instructing them to continue without requiring the user to restate the project.

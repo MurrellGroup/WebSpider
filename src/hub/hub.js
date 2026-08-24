@@ -26,6 +26,7 @@ const MAIN_AGENT_CONTROL_SCOPES = [
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
   ['.css', 'text/css; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.webmanifest', 'application/manifest+json'],
@@ -186,7 +187,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.5', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.6', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -691,7 +692,7 @@ export class Hub {
 
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);

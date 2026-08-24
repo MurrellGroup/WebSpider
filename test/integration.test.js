@@ -220,6 +220,13 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(randomModule.status, 200);
   assert.match(randomModule.headers.get('content-type'), /javascript/);
   assert.doesNotMatch(await randomModule.text(), /randomUUID/);
+  const terminalModule = await fetch(`${listening.url}/vendor/xterm.mjs`);
+  assert.equal(terminalModule.status, 200);
+  assert.match(terminalModule.headers.get('content-type'), /javascript/);
+  assert.match(await terminalModule.text(), /export\{.*Terminal/);
+  const terminalStyles = await fetch(`${listening.url}/vendor/xterm.css`);
+  assert.equal(terminalStyles.status, 200);
+  assert.match(terminalStyles.headers.get('content-type'), /css/);
 
   const login = await fetch(`${listening.url}/api/v1/auth/login`, {
     method: 'POST',

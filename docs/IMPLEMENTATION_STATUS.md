@@ -13,7 +13,7 @@ The current repository is an executable secure vertical slice, not a claim that 
 | Project and agent roots | Complete | Hub stores logical root metadata; node alone maps root IDs to host paths. |
 | Detached terminal process | Complete with substitute | Native PTY bridge (`script` on Linux, `expect` on macOS) + FIFO + detached process group replaces tmux in this runtime. State/log/exit markers reconcile after daemon restart. |
 | Machine-reboot agent recovery | Complete for PTY fallback reconstruction | Reconnected nodes send runtime inventory. Missing previously-running main or worker agents restart under their profile policy, receive the tail of the prior terminal log through `WEBSPIDER_RECOVERY_CONTEXT`, and receive one durable recovery message. Native third-party in-flight turns are reconstructed, not magically resumed. |
-| Multi-view terminal | Complete | Live/snapshot watch path with one controller lease and stale-epoch rejection. |
+| Multi-view terminal | Complete | Bundled xterm.js ANSI/VT rendering, direct browser keyboard input, live/snapshot watch path, and one controller lease with stale-epoch rejection. |
 | SQLite persistence | Complete | WAL, foreign keys, synchronous FULL, busy timeout, hub and node schemas. |
 | Durable event replay | Complete | Global and scope sequences; replay-then-live WebSocket. |
 | Root-safe files | Complete for implemented platform | List, stat, text preview, download, search, Git status; no absolute-path API. See security notes. |
@@ -63,7 +63,7 @@ The product specification recommends a Go 1.24 binary with React and xterm.js. T
 
 - Node.js 24 built-in SQLite instead of Go + a bundled driver;
 - a self-contained DOM application instead of React;
-- a safe raw-text terminal plus sanitized Markdown/MathML reading view instead of xterm.js;
+- a bundled xterm.js interactive terminal plus a sanitized Markdown/MathML reading view;
 - native `script`/`expect` PTY bridges + detached process groups instead of tmux.
 
 The API shapes, object identities, hub/node boundary, event semantics, node spool, lease model, and root-capability model follow the specification so these runtime substitutions can be replaced module by module.

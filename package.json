@@ -1,6 +1,6 @@
 {
   "name": "webspider-fabric",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "description": "Distributed, persistent LLM-agent orchestration control plane",
   "type": "module",
