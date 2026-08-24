@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown, renderMath, stripTerminalFormatting } from '../web/markdown.js';
+import { randomIdentifier } from '../web/random.js';
+
+test('browser identifiers work without crypto.randomUUID', () => {
+  const identifier = randomIdentifier({
+    getRandomValues(bytes) {
+      bytes.fill(0xab);
+      return bytes;
+    },
+  });
+  assert.equal(identifier, 'ab'.repeat(16));
+  assert.match(randomIdentifier(null), /^[0-9a-f]{32}$/);
+});
 
 test('readable rendering supports technical markdown, tables, and MathML', () => {
   const output = renderMarkdown(`# Result

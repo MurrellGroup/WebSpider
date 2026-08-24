@@ -1,4 +1,5 @@
 import { renderMarkdown, stripTerminalFormatting } from './markdown.js';
+import { randomIdentifier } from './random.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -376,7 +377,7 @@ async function renderTerminal(agent) {
   </section>`;
   applyTerminalView();
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const attachment = sessionStorage.getItem('webspider_attachment') || crypto.randomUUID().replaceAll('-', '');
+  const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
   state.terminalSequence = 0;
   const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(agent.terminal_id)}?attachment=${encodeURIComponent(attachment)}`);
@@ -685,7 +686,7 @@ document.addEventListener('submit', async (event) => {
     try {
       await api(`/api/v1/threads/${encodeURIComponent(state.selectedAgent.active_thread_id)}/messages`, {
         method: 'POST',
-        headers: { 'idempotency-key': crypto.randomUUID() },
+        headers: { 'idempotency-key': randomIdentifier() },
         body: { parts: [{ type: 'text', text: form.get('message') }], delivery_role: 'user', wake_policy: form.get('wake') },
       });
       event.target.reset();
@@ -701,7 +702,7 @@ document.addEventListener('submit', async (event) => {
     try {
       await api(`/api/v1/threads/${encodeURIComponent(event.target.dataset.threadId)}/messages`, {
         method: 'POST',
-        headers: { 'idempotency-key': crypto.randomUUID() },
+        headers: { 'idempotency-key': randomIdentifier() },
         body: { parts: [{ type: 'text', text: form.get('message') }], delivery_role: 'user', wake_policy: 'ensure_running' },
       });
       await loadData();

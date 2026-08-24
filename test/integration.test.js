@@ -216,6 +216,10 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(markdownModule.status, 200);
   assert.match(markdownModule.headers.get('content-type'), /javascript/);
   assert.match(await markdownModule.text(), /renderMarkdown/);
+  const randomModule = await fetch(`${listening.url}/random.js`);
+  assert.equal(randomModule.status, 200);
+  assert.match(randomModule.headers.get('content-type'), /javascript/);
+  assert.doesNotMatch(await randomModule.text(), /randomUUID/);
 
   const login = await fetch(`${listening.url}/api/v1/auth/login`, {
     method: 'POST',

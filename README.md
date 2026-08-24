@@ -18,15 +18,15 @@ The same release also contains fully self-contained installers for direct or off
 
 | Machine | Release asset |
 | --- | --- |
-| Linux x86-64 | `WebSpider_Install_0.4.4_linux_x64.run` |
-| Linux ARM64 | `WebSpider_Install_0.4.4_linux_arm64.run` |
-| macOS Intel | `WebSpider_Install_0.4.4_macos_x64.run` |
-| macOS Apple silicon | `WebSpider_Install_0.4.4_macos_arm64.run` |
+| Linux x86-64 | `WebSpider_Install_0.4.5_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.4.5_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.4.5_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.4.5_macos_arm64.run` |
 
 Run the downloaded asset directly through the system shell:
 
 ```bash
-sh ~/Downloads/WebSpider_Install_0.4.4_linux_x64.run --workspace /path/to/project
+sh ~/Downloads/WebSpider_Install_0.4.5_linux_x64.run --workspace /path/to/project
 ```
 
 No separate runtime or package-manager setup is part of either user workflow.
@@ -75,7 +75,7 @@ The repository owns the build recipe; GitHub Releases own the binaries. `.github
 - `darwin-x64` on `macos-15-intel`;
 - `darwin-arm64` on `macos-15`.
 
-Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.4` additionally:
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.5` additionally:
 
 1. requires the tag to equal the version in `package.json`;
 2. gathers exactly four native installers;
@@ -86,8 +86,8 @@ Pull requests, `main` pushes, and manual runs produce short-lived Actions artifa
 Create a release by pushing its annotated tag:
 
 ```bash
-git tag -a v0.4.4 -m "WebSpider 0.4.4"
-git push origin v0.4.4
+git tag -a v0.4.5 -m "WebSpider 0.4.5"
+git push origin v0.4.5
 ```
 
 For a native development build on the current machine:

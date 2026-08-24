@@ -186,7 +186,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.4', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.5', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -691,7 +691,7 @@ export class Hub {
 
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-    if (!['index.html', 'app.js', 'markdown.js', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
