@@ -60,6 +60,58 @@ test('inbound agent messages include source, UTC time, elapsed context, and obse
   assert.match(formatted, /Analysis completed\./);
 });
 
+test('hub notes are disk-backed and only explicitly visible notes reach the main agent', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-notes-'));
+  const workspace = path.join(directory, 'workspace');
+  const hubState = path.join(directory, 'hub');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: hubState, listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_notes', publicKey: identity.publicKey, workspace });
+  const listening = await hub.listen();
+  t.after(async () => {
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const created = await jsonFetch(`${listening.url}/api/v1/notes`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Private thought', content: 'not for agents' }),
+  });
+  assert.equal(created.response.status, 200);
+  assert.equal(created.body.visibility, 'private');
+  const notePath = path.join(hubState, 'notes', created.body.filename);
+  assert.equal(fs.readFileSync(notePath, 'utf8'), 'not for agents');
+  assert.equal(fs.statSync(notePath).mode & 0o777, 0o600);
+
+  hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_notes_master', ['notes:read:visible']);
+  const hidden = await jsonFetch(`${listening.url}/api/v1/agent-control/notes`, 'wsa_notes_master');
+  assert.deepEqual(hidden.body.notes, []);
+
+  const updated = await jsonFetch(`${listening.url}/api/v1/notes/${created.body.id}`, listening.ownerToken, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Shared plan', content: 'master may read this', visibility: 'master' }),
+  });
+  assert.equal(updated.body.visibility, 'master');
+  assert.equal(fs.readFileSync(notePath, 'utf8'), 'master may read this');
+  const visible = await jsonFetch(`${listening.url}/api/v1/agent-control/notes`, 'wsa_notes_master');
+  assert.equal(visible.body.notes.length, 1);
+  assert.equal(visible.body.notes[0].content, 'master may read this');
+
+  const worker = hub.database.createAgent({
+    id: 'agt_notes_worker', profileId: bootstrap.agent.profile_id, projectId: bootstrap.project.id,
+    nodeId: bootstrap.agent.node_id, orchestrationRole: 'worker',
+  });
+  assert.throws(
+    () => hub.database.issueAgentControlToken(worker.id, 'wsa_notes_worker', ['notes:read:visible']),
+    (error) => error.code === 'WS_FORBIDDEN',
+  );
+
+  const deleted = await jsonFetch(`${listening.url}/api/v1/notes/${created.body.id}`, listening.ownerToken, { method: 'DELETE' });
+  assert.equal(deleted.body.deleted, true);
+  assert.equal(fs.existsSync(notePath), false);
+});
+
 test('a missing previously-running agent is restarted and receives a durable recovery message', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-reboot-recovery-'));
   const workspace = path.join(directory, 'workspace');
@@ -86,6 +138,9 @@ test('a missing previously-running agent is restarted and receives a durable rec
   const online = onceWithTimeout(node, 'online');
   node.start();
   await online;
+  const connectionStatus = JSON.parse(fs.readFileSync(path.join(directory, 'node', 'connection-status.json'), 'utf8'));
+  assert.equal(connectionStatus.connection_state, 'online');
+  assert(connectionStatus.connection_epoch > 0);
   t.after(async () => {
     const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
     if (runtime?.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
@@ -414,6 +469,21 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   assert.equal(shellTab.body.kind, 'shell_tab');
   assert.equal(node.database.getProcessByTerminal(shellTab.body.id)?.kind, 'shell');
   assert.equal(node.database.getProcessByAgent(worker.id)?.kind, 'agent');
+
+  const stopped = await jsonFetch(`${listening.url}/api/v1/agent-instances/${worker.id}:stop`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+  });
+  assert.equal(stopped.response.status, 200);
+  assert.equal(stopped.body.state, 'stopped');
+  const exitedRuntime = node.database.getProcessByAgent(worker.id);
+  assert.notEqual(exitedRuntime.state, 'running');
+  const restarted = await jsonFetch(`${listening.url}/api/v1/agent-instances/${worker.id}:wake`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+  });
+  assert.equal(restarted.response.status, 200);
+  assert.equal(restarted.body.state, 'ready');
+  assert.equal(node.database.getProcessByAgent(worker.id).state, 'running');
+  assert.notEqual(node.database.getProcessByAgent(worker.id).id, exitedRuntime.id);
 
   const secondProject = await jsonFetch(`${listening.url}/api/v1/projects/onboard`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' },

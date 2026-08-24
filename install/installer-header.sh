@@ -137,6 +137,26 @@ if [ -n "$node_hub" ]; then
   fi
   if [ "$install_service" -eq 1 ]; then
     "$bin_dir/webspider" service install-node --user --state-dir "$node_state_dir" --executable "$bin_dir/webspider"
+    attempt=0
+    worker_status=
+    while [ "$attempt" -lt 120 ]; do
+      worker_status=$("$bin_dir/webspider" service status-node --state-dir "$node_state_dir" 2>&1 || true)
+      if printf '%s\n' "$worker_status" | grep -F '"connection_state": "online"' >/dev/null 2>&1; then
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep 0.25
+    done
+    if ! printf '%s\n' "$worker_status" | grep -F '"connection_state": "online"' >/dev/null 2>&1; then
+      echo "The worker service started but did not authenticate with the hub:" >&2
+      printf '%s\n' "$worker_status" >&2
+      if [ "$platform" = linux ]; then
+        echo "Logs: journalctl --user -u webspider-node.service -n 100 --no-pager" >&2
+      else
+        echo "Logs: $node_state_dir/logs/webspider-node.error.log" >&2
+      fi
+      exit 1
+    fi
   fi
 elif [ "$install_service" -eq 1 ]; then
   set -- service install --user \

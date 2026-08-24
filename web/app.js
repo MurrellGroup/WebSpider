@@ -14,6 +14,8 @@ const state = {
   nodes: [],
   tasks: [],
   attention: [],
+  notes: [],
+  selectedNoteId: null,
   selectedProject: null,
   selectedAgent: null,
   terminals: [],
@@ -30,12 +32,14 @@ const state = {
   terminalResizeObserver: null,
   terminalDimensions: null,
   terminalKeyboardProtocol: false,
+  terminalBracketedPaste: false,
   terminalProtocolTail: '',
   terminalPendingInput: [],
   terminalInputBuffer: '',
   terminalInputTimer: null,
   terminalText: '',
   terminalView: 'terminal',
+  terminalInputMode: 'direct',
   terminalRenderTimer: null,
   filePath: '',
   activeRoot: null,
@@ -185,6 +189,7 @@ function closeTerminal() {
   state.terminalFitAddon = null;
   state.terminalDimensions = null;
   state.terminalKeyboardProtocol = false;
+  state.terminalBracketedPaste = false;
   state.terminalProtocolTail = '';
   state.terminalEmulator?.dispose();
   state.terminalEmulator = null;
@@ -200,13 +205,14 @@ function consumeAccessToken() {
 }
 
 async function loadData() {
-  const [summary, projects, agents, nodes, tasks, attention] = await Promise.all([
+  const [summary, projects, agents, nodes, tasks, attention, notes] = await Promise.all([
     api('/api/v1/summary'),
     api('/api/v1/projects'),
     api('/api/v1/agent-instances'),
     api('/api/v1/nodes'),
     api('/api/v1/tasks'),
     api('/api/v1/attention'),
+    api('/api/v1/notes'),
   ]);
   Object.assign(state, {
     summary,
@@ -215,6 +221,7 @@ async function loadData() {
     nodes: nodes.nodes,
     tasks: tasks.tasks,
     attention: attention.items,
+    notes: notes.notes,
   });
   if (state.selectedProject) state.selectedProject = state.projects.find((project) => project.id === state.selectedProject.id) || null;
   if (state.selectedAgent) state.selectedAgent = state.agents.find((agent) => agent.id === state.selectedAgent.id) || null;
@@ -434,6 +441,26 @@ function applyTerminalView() {
   localStorage.setItem('webspider_terminal_view', state.terminalView);
 }
 
+function applyTerminalInputMode() {
+  const form = $('#terminal-compose-form');
+  if (!form) return;
+  const composing = state.terminalInputMode === 'compose';
+  form.classList.toggle('hidden', !composing);
+  $$('[data-terminal-input-mode]').forEach((button) => {
+    button.classList.toggle('selected', button.dataset.terminalInputMode === state.terminalInputMode);
+  });
+  if (composing) $('#terminal-compose')?.focus();
+  else state.terminalEmulator?.focus();
+}
+
+function submitTerminalComposition(text) {
+  const normalized = String(text || '').replace(/\r\n?/g, '\n');
+  if (!normalized) return;
+  const enter = state.terminalKeyboardProtocol ? kittySequence(13) : '\r';
+  const payload = state.terminalBracketedPaste ? `\u001b[200~${normalized}\u001b[201~` : normalized;
+  transmitTerminalInput(`${payload}${enter}`);
+}
+
 function updateTerminalReading(immediate = false) {
   clearTimeout(state.terminalRenderTimer);
   const render = () => {
@@ -518,6 +545,9 @@ function observeTerminalProtocol(text) {
   for (const match of combined.matchAll(/\u001b\[(>|<)\d*u/g)) {
     state.terminalKeyboardProtocol = match[1] === '>';
   }
+  for (const match of combined.matchAll(/\u001b\[\?2004([hl])/g)) {
+    state.terminalBracketedPaste = match[1] === 'h';
+  }
   state.terminalProtocolTail = combined.slice(-16);
   const output = $('#terminal-output');
   if (output) output.dataset.keyboardProtocol = String(state.terminalKeyboardProtocol);
@@ -567,13 +597,17 @@ async function renderTerminal(agent) {
     return;
   }
   state.selectedTerminalId = terminal.id;
+  const agentEnded = ['stopped', 'failed', 'hibernated'].includes(agent.state);
+  const interactive = terminal.state === 'attached' && !(terminal.kind === 'primary_agent' && agentEnded);
   if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
     <div class="terminal-session-tabs">${state.terminals.map((item) => `<button class="${item.id === terminal.id ? 'selected' : ''}" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i>${h(item.kind === 'primary_agent' ? agent.title || 'Agent' : item.label)}</button>`).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal">+</button>${terminal.kind === 'shell_tab' ? '<button class="terminal-close" data-action="close-terminal" title="Close terminal">×</button>' : ''}</div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span><div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div><button class="secondary" id="terminal-control" data-action="take-control">Connecting</button></div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Connecting' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
+    ${interactive ? '<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="Write before sending to the terminal"></textarea><button class="primary" type="submit">Send</button></form>' : ''}
   </section>`;
   applyTerminalView();
+  applyTerminalInputMode();
   const emulator = new Terminal({
     cols: 120,
     rows: 36,
@@ -599,8 +633,8 @@ async function renderTerminal(agent) {
   fitTerminal();
   state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(fitTerminal));
   state.terminalResizeObserver.observe($('#terminal-output'));
-  state.terminalInputSubscription = emulator.onData(queueTerminalInput);
-  emulator.focus();
+  if (interactive) state.terminalInputSubscription = emulator.onData(queueTerminalInput);
+  if (state.terminalInputMode === 'direct') emulator.focus();
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
@@ -610,7 +644,7 @@ async function renderTerminal(agent) {
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
-    if (frame.type === 'ATTACHED') socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
+    if (frame.type === 'ATTACHED' && interactive) socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
     if (frame.type === 'SNAPSHOT') {
       observeTerminalProtocol(frame.text || '');
       if (Number(frame.sequence || 0) >= state.terminalSequence) {
@@ -640,7 +674,7 @@ async function renderTerminal(agent) {
       $('#terminal-control').textContent = 'In Control';
       flushTerminalInput();
       transmitTerminalResize();
-      state.terminalEmulator.focus();
+      if (state.terminalInputMode === 'direct') state.terminalEmulator.focus();
       if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
       state.terminalHeartbeat = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN && state.terminalLease) socket.send(JSON.stringify({
@@ -796,6 +830,29 @@ async function renderAllTasks() {
   $('#main-view').innerHTML = `<div class="page">${pageHeader('Tasks', 'Durable scheduling and detached execution')}<div class="page-content"><section class="panel"><div class="panel-header"><h2>Task registry</h2><span>${state.tasks.length} total</span></div><div class="panel-body task-list">${renderTaskRows(state.tasks)}</div></section></div></div>`;
 }
 
+async function refreshNotes() {
+  const data = await api('/api/v1/notes');
+  state.notes = data.notes;
+}
+
+async function renderNotes(noteId = state.selectedNoteId) {
+  state.selectedProject = null;
+  state.selectedAgent = null;
+  closeTerminal();
+  renderSidebar();
+  const selected = noteId && state.notes.some((note) => note.id === noteId) ? noteId : state.notes[0]?.id || null;
+  state.selectedNoteId = selected;
+  const note = selected ? await api(`/api/v1/notes/${encodeURIComponent(selected)}`) : null;
+  $('#main-view').innerHTML = `<div class="page">
+    ${pageHeader('Notes', 'Plaintext notes stored on this hub machine', '<button class="primary mobile-primary" data-action="new-note">New note</button>')}
+    <div class="page-content notes-page">
+      <aside class="notes-list" aria-label="Notes">${state.notes.length ? state.notes.map((item) => `<button class="note-row ${item.id === selected ? 'selected' : ''}" data-note-id="${h(item.id)}"><strong>${h(item.title)}</strong><span>${item.visibility === 'master' ? 'Visible to Master' : 'Just for me'} · ${h(formatTime(item.updated_at, true))}</span></button>`).join('') : '<div class="empty compact"><div><strong>No notes yet</strong><p>Create a plaintext note on the hub.</p></div></div>'}</aside>
+      <section class="note-editor">${note ? `<form id="note-form" data-note-id="${h(note.id)}"><div class="note-editor-head"><input name="title" aria-label="Note title" maxlength="120" value="${h(note.title)}" required><label class="note-visibility"><input type="checkbox" name="master_visible" ${note.visibility === 'master' ? 'checked' : ''}><span>Visible to Master</span></label></div><textarea name="content" aria-label="Note text" maxlength="1048576" spellcheck="true">${h(note.content)}</textarea><div class="note-editor-actions"><span>${h(note.filename)}</span><button type="button" class="danger" data-action="delete-note">Delete</button><button type="submit" class="primary">Save</button></div></form>` : '<div class="empty"><div><strong>Select or create a note</strong><p>Notes are private unless you explicitly make one visible to the Master Spider.</p></div></div>'}</section>
+    </div>
+  </div>`;
+  history.replaceState(null, '', selected ? `#/notes/${encodeURIComponent(selected)}` : '#/notes');
+}
+
 function connectEvents() {
   state.eventSocket?.close();
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -809,9 +866,14 @@ function connectEvents() {
   socket.addEventListener('message', (message) => {
     const frame = JSON.parse(message.data);
     if (frame.type !== 'EVENT') return;
+    const previousAgentState = state.selectedAgent?.state;
     clearTimeout(connectEvents.refreshTimer);
     connectEvents.refreshTimer = setTimeout(() => loadData().then(() => {
       if (state.selectedAgent) {
+        if (state.tab === 'terminal' && state.selectedAgent.state !== previousAgentState) {
+          renderAgent(state.selectedAgent.id, state.tab);
+          return;
+        }
         if (['conversation', 'activity', 'tasks', 'artifacts'].includes(state.tab)) renderAgent(state.selectedAgent.id, state.tab);
         return;
       }
@@ -823,6 +885,7 @@ function connectEvents() {
 async function routeFromHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (parts[0] === 'home') return renderHome();
+  if (parts[0] === 'notes') return renderNotes(parts[1] ? decodeURIComponent(parts[1]) : null);
   const agentIndex = parts.indexOf('agents');
   if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
   if (parts[0] === 'projects' && parts[1]) return renderProject(decodeURIComponent(parts[1]));
@@ -852,12 +915,20 @@ document.addEventListener('click', async (event) => {
     closeTerminal();
     return renderTerminal(state.selectedAgent);
   }
+  const noteButton = event.target.closest('[data-note-id]');
+  if (noteButton) return renderNotes(noteButton.dataset.noteId);
   const terminalView = event.target.closest('[data-terminal-view]');
   if (terminalView) {
     state.terminalView = terminalView.dataset.terminalView;
     applyTerminalView();
     updateTerminalReading(true);
     requestAnimationFrame(fitTerminal);
+    return;
+  }
+  const terminalInputMode = event.target.closest('[data-terminal-input-mode]');
+  if (terminalInputMode) {
+    state.terminalInputMode = terminalInputMode.dataset.terminalInputMode;
+    applyTerminalInputMode();
     return;
   }
   const previewMode = event.target.closest('[data-preview-mode]');
@@ -898,11 +969,25 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
     if (action === 'show-nodes') return renderNodes();
+    if (action === 'show-notes') return renderNotes();
     if (action === 'show-audit') return renderAudit();
     if (action === 'show-tasks') return renderAllTasks();
     if (action === 'mobile-agents') return $('.sidebar').classList.toggle('mobile-open');
     if (action === 'show-attention') return $('#attention-panel').classList.toggle('mobile-open');
     if (action === 'show-more') return renderNodes();
+    if (action === 'new-note') {
+      const note = await api('/api/v1/notes', { method: 'POST', body: { title: 'Untitled note', content: '', visibility: 'private' } });
+      await refreshNotes();
+      return renderNotes(note.id);
+    }
+    if (action === 'delete-note') {
+      if (!state.selectedNoteId || !confirm('Delete this note permanently?')) return;
+      await api(`/api/v1/notes/${encodeURIComponent(state.selectedNoteId)}`, { method: 'DELETE' });
+      state.selectedNoteId = null;
+      await refreshNotes();
+      toast('Note deleted');
+      return renderNotes();
+    }
     if (action === 'logout') { await api('/api/v1/auth/logout', { method: 'POST' }); state.session = null; return showLogin(); }
     if (action === 'wake-agent') { await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}:wake`, { method: 'POST' }); toast('Agent is ready'); await loadData(); return renderAgent(state.selectedAgent.id, state.tab); }
     if (action === 'stop-agent') { await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}:stop`, { method: 'POST' }); toast('Stop requested'); await loadData(); return renderAgent(state.selectedAgent.id, state.tab); }
@@ -922,6 +1007,34 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'terminal-compose-form') {
+    event.preventDefault();
+    const textarea = $('#terminal-compose');
+    submitTerminalComposition(textarea?.value || '');
+    if (textarea) {
+      textarea.value = '';
+      textarea.focus();
+    }
+    return;
+  }
+  if (event.target.id === 'note-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    try {
+      await api(`/api/v1/notes/${encodeURIComponent(event.target.dataset.noteId)}`, {
+        method: 'PATCH',
+        body: {
+          title: form.get('title'),
+          content: form.get('content'),
+          visibility: form.get('master_visible') ? 'master' : 'private',
+        },
+      });
+      await refreshNotes();
+      toast('Note saved');
+      return renderNotes(event.target.dataset.noteId);
+    } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
   if (event.target.id === 'onboard-project-form') {
     event.preventDefault();
     const form = new FormData(event.target);

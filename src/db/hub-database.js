@@ -16,6 +16,7 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'agents:read',
   'messages:write',
   'portfolio:read',
+  'notes:read:visible',
   'status:write:self',
 ]);
 
@@ -209,6 +210,18 @@ function accountUsageRow(row) {
     rate_limits: decode(row.rate_limits_json, []),
     token_activity: decode(row.token_activity_json, null),
     created_at: row.created_at,
+  };
+}
+
+function noteRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    filename: row.filename,
+    visibility: row.visibility,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -549,6 +562,15 @@ export class HubDatabase extends EventEmitter {
         last_seen_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         revoked_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        filename TEXT NOT NULL UNIQUE,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS idempotency (
@@ -947,6 +969,46 @@ export class HubDatabase extends EventEmitter {
   listProjects() {
     const systemPolicy = this.getSystemPolicy();
     return this.db.prepare('SELECT * FROM projects ORDER BY name').all().map((row) => projectRow(row, systemPolicy));
+  }
+
+  createNote({ id = makeId('nte'), title, filename, visibility = 'private' }) {
+    invariant(title?.trim(), 'WS_VALIDATION', 'Note title is required.');
+    invariant(filename?.trim(), 'WS_VALIDATION', 'Note filename is required.');
+    invariant(['private', 'master'].includes(visibility), 'WS_VALIDATION', 'Note visibility must be private or master.');
+    const now = nowISO();
+    this.db.prepare(`INSERT INTO notes (id, title, filename, visibility, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(id, title.trim(), filename, visibility, now, now);
+    return this.getNote(id);
+  }
+
+  getNote(id) {
+    return noteRow(this.db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
+  }
+
+  listNotes({ visibility = null } = {}) {
+    const rows = visibility
+      ? this.db.prepare('SELECT * FROM notes WHERE visibility = ? ORDER BY updated_at DESC').all(visibility)
+      : this.db.prepare('SELECT * FROM notes ORDER BY updated_at DESC').all();
+    return rows.map(noteRow);
+  }
+
+  updateNote(id, { title, visibility }) {
+    const previous = this.getNote(id);
+    invariant(previous, 'WS_NOT_FOUND', 'Note not found.', 404);
+    const nextTitle = title == null ? previous.title : String(title).trim();
+    const nextVisibility = visibility == null ? previous.visibility : visibility;
+    invariant(nextTitle, 'WS_VALIDATION', 'Note title is required.');
+    invariant(['private', 'master'].includes(nextVisibility), 'WS_VALIDATION', 'Note visibility must be private or master.');
+    this.db.prepare('UPDATE notes SET title = ?, visibility = ?, updated_at = ? WHERE id = ?')
+      .run(nextTitle, nextVisibility, nowISO(), id);
+    return this.getNote(id);
+  }
+
+  deleteNote(id) {
+    const note = this.getNote(id);
+    invariant(note, 'WS_NOT_FOUND', 'Note not found.', 404);
+    this.db.prepare('DELETE FROM notes WHERE id = ?').run(id);
+    return note;
   }
 
   updateProjectPolicy(id, patch, actor = 'owner:local', { expectedRevision = null, reason = '' } = {}) {

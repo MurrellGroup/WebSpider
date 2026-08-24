@@ -299,17 +299,23 @@ export function userServiceStatus({
 export function nodeUserServiceStatus({
   platform = process.platform,
   uid = process.getuid?.(),
+  stateDir = null,
   run = defaultRun,
 } = {}) {
+  let connection = null;
+  if (stateDir) {
+    try { connection = JSON.parse(fs.readFileSync(path.join(path.resolve(stateDir), 'connection-status.json'), 'utf8')); }
+    catch { connection = { connection_state: 'unknown', updated_at: null }; }
+  }
   if (platform === 'linux') {
     const result = run('systemctl', ['--user', 'is-active', NODE_SYSTEMD_NAME]);
-    return { manager: 'systemd-user', active: result.status === 0, detail: String(result.stdout || '').trim(), role: 'node' };
+    return { manager: 'systemd-user', active: result.status === 0, detail: String(result.stdout || '').trim(), role: 'node', connection };
   }
   if (platform === 'darwin') {
     const result = run('launchctl', ['print', `gui/${uid}/${NODE_LAUNCHD_LABEL}`]);
-    return { manager: 'launchd', active: result.status === 0, role: 'node' };
+    return { manager: 'launchd', active: result.status === 0, role: 'node', connection };
   }
-  return { manager: null, active: false, detail: `Unsupported platform: ${platform}`, role: 'node' };
+  return { manager: null, active: false, detail: `Unsupported platform: ${platform}`, role: 'node', connection };
 }
 
 export function uninstallUserService({

@@ -148,13 +148,27 @@ async function main() {
     || (resource === 'usage' && ['show', 'report'].includes(action))
     || (resource === 'agents' && ['list', 'send'].includes(action))
     || (resource === 'portfolio' && action === 'list')
+    || (resource === 'notes' && ['list', 'show'].includes(action))
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
     console.log(JSON.stringify(await request('portfolio'), null, 2));
+    return;
+  }
+  if (resource === 'notes') {
+    if (action === 'list') {
+      console.log(JSON.stringify(await request('notes'), null, 2));
+      return;
+    }
+    const note = option('--note');
+    if (!note) {
+      console.error('notes show requires --note ID');
+      process.exit(2);
+    }
+    console.log(JSON.stringify(await request('notes/' + encodeURIComponent(note)), null, 2));
     return;
   }
   if (resource === 'report') {

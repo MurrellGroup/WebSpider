@@ -24,6 +24,7 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'agents:read',
   'messages:write',
   'portfolio:read',
+  'notes:read:visible',
 ];
 const WORKER_AGENT_CONTROL_SCOPES = ['status:write:self'];
 
@@ -89,6 +90,8 @@ export class Hub {
     this.webDir = webDir;
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(stateDir, 'artifacts'), { recursive: true, mode: 0o700 });
+    this.notesDir = path.join(stateDir, 'notes');
+    fs.mkdirSync(this.notesDir, { recursive: true, mode: 0o700 });
     this.ownerTokenPath = path.join(stateDir, 'owner.token');
     ensurePrivateFile(this.ownerTokenPath, ownerToken || randomToken('wso'));
     this.ownerToken = fs.readFileSync(this.ownerTokenPath, 'utf8').trim();
@@ -191,7 +194,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.5.0', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.6.0', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -241,6 +244,47 @@ export class Hub {
       return policy;
     });
     route('GET', '/api/v1/projects', async () => ({ projects: this.database.listProjects() }));
+    route('GET', '/api/v1/notes', async () => ({ notes: this.database.listNotes() }));
+    route('POST', '/api/v1/notes', async (ctx) => {
+      const body = await readJSON(ctx.request, 1_100_000);
+      const id = makeId('nte');
+      const filename = `${id}.txt`;
+      const title = this.#noteTitle(body.title);
+      const visibility = this.#noteVisibility(body.visibility);
+      const content = this.#noteContent(body.content);
+      this.#writeNoteFile(filename, content);
+      let note;
+      try {
+        note = this.database.createNote({ id, title, filename, visibility });
+      } catch (error) {
+        fs.rmSync(this.#notePath(filename), { force: true });
+        throw error;
+      }
+      this.database.audit({ actorId: ctx.principal.principal_id, action: 'note.create', targetType: 'note', targetId: note.id, newState: { title, visibility } });
+      return { ...note, content };
+    });
+    route('GET', '/api/v1/notes/:id', async (ctx) => this.#noteWithContent(ctx.params.id));
+    route('PATCH', '/api/v1/notes/:id', async (ctx) => {
+      const previous = this.database.getNote(ctx.params.id);
+      invariant(previous, 'WS_NOT_FOUND', 'Note not found.', 404);
+      const body = await readJSON(ctx.request, 1_100_000);
+      const title = Object.hasOwn(body, 'title') ? this.#noteTitle(body.title) : undefined;
+      const visibility = Object.hasOwn(body, 'visibility') ? this.#noteVisibility(body.visibility) : undefined;
+      const content = Object.hasOwn(body, 'content') ? this.#noteContent(body.content) : undefined;
+      if (content !== undefined) this.#writeNoteFile(previous.filename, content);
+      const note = this.database.updateNote(previous.id, {
+        title,
+        visibility,
+      });
+      this.database.audit({ actorId: ctx.principal.principal_id, action: 'note.update', targetType: 'note', targetId: note.id, previousState: { title: previous.title, visibility: previous.visibility }, newState: { title: note.title, visibility: note.visibility } });
+      return this.#noteWithContent(note.id);
+    });
+    route('DELETE', '/api/v1/notes/:id', async (ctx) => {
+      const note = this.database.deleteNote(ctx.params.id);
+      fs.rmSync(this.#notePath(note.filename), { force: true });
+      this.database.audit({ actorId: ctx.principal.principal_id, action: 'note.delete', targetType: 'note', targetId: note.id, previousState: { title: note.title, visibility: note.visibility } });
+      return { deleted: true, id: note.id };
+    });
     route('POST', '/api/v1/projects/onboard', async (ctx) => {
       const body = await readJSON(ctx.request);
       const project = this.database.createProject({
@@ -451,6 +495,19 @@ export class Hub {
         })),
       })),
     }), { agentOnly: true, agentScopes: ['portfolio:read'] });
+
+    route('GET', '/api/v1/agent-control/notes', async () => ({
+      notes: this.database.listNotes({ visibility: 'master' }).map((note) => ({
+        ...note,
+        content: this.#readNoteFile(note.filename),
+      })),
+    }), { agentOnly: true, agentScopes: ['notes:read:visible'] });
+
+    route('GET', '/api/v1/agent-control/notes/:id', async (ctx) => {
+      const note = this.database.getNote(ctx.params.id);
+      invariant(note?.visibility === 'master', 'WS_NOT_FOUND', 'Visible note not found.', 404);
+      return { ...note, content: this.#readNoteFile(note.filename) };
+    }, { agentOnly: true, agentScopes: ['notes:read:visible'] });
 
     route('POST', '/api/v1/agent-control/report', async (ctx) => {
       const body = await readJSON(ctx.request, 65_536);
@@ -1378,6 +1435,54 @@ export class Hub {
       this.database.audit({ actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id, projectId: root.project_id, decision, newState: { relative_path: payload.path || '', error: error.code } });
       throw error;
     }
+  }
+
+  #noteTitle(value) {
+    const title = String(value || '').trim();
+    invariant(title.length > 0 && title.length <= 120, 'WS_VALIDATION', 'Note title must be between 1 and 120 characters.');
+    return title;
+  }
+
+  #noteVisibility(value = 'private') {
+    invariant(['private', 'master'].includes(value), 'WS_VALIDATION', 'Note visibility must be private or master.');
+    return value;
+  }
+
+  #noteContent(value = '') {
+    invariant(typeof value === 'string', 'WS_VALIDATION', 'Note content must be plain text.');
+    invariant(Buffer.byteLength(value, 'utf8') <= 1_048_576, 'WS_REQUEST_TOO_LARGE', 'A note cannot exceed 1 MiB.', 413);
+    return value;
+  }
+
+  #notePath(filename) {
+    invariant(/^nte_[A-Za-z0-9_-]+\.txt$/.test(filename), 'WS_NOTE_STORAGE_INVALID', 'Note storage filename is invalid.', 500);
+    return path.join(this.notesDir, filename);
+  }
+
+  #writeNoteFile(filename, content) {
+    const destination = this.#notePath(filename);
+    const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    try {
+      fs.renameSync(temporary, destination);
+      fs.chmodSync(destination, 0o600);
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+  }
+
+  #readNoteFile(filename) {
+    const filenamePath = this.#notePath(filename);
+    const stat = fs.lstatSync(filenamePath, { throwIfNoEntry: false });
+    invariant(stat?.isFile() && !stat.isSymbolicLink(), 'WS_NOTE_STORAGE_MISSING', 'Note text file is missing or invalid.', 500);
+    invariant(stat.size <= 1_048_576, 'WS_REQUEST_TOO_LARGE', 'The note text file exceeds 1 MiB.', 413);
+    return fs.readFileSync(filenamePath, 'utf8');
+  }
+
+  #noteWithContent(id) {
+    const note = this.database.getNote(id);
+    invariant(note, 'WS_NOT_FOUND', 'Note not found.', 404);
+    return { ...note, content: this.#readNoteFile(note.filename) };
   }
 
   #logError(error) {

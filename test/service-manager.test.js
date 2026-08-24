@@ -10,6 +10,7 @@ import {
   renderLaunchAgent,
   renderSystemdNodeUnit,
   renderSystemdUserUnit,
+  nodeUserServiceStatus,
   uninstallNodeUserService,
   uninstallUserService,
 } from '../src/lib/service-manager.js';
@@ -104,4 +105,18 @@ test('Linux worker service installation is boot-persistent and separately remova
   const removed = uninstallNodeUserService({ platform: 'linux', home, run });
   assert.equal(removed.removed, true);
   assert.equal(fs.existsSync(result.service_file), false);
+});
+
+test('worker service status includes the last authenticated hub connection state', (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-node-status-'));
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(stateDir, 'connection-status.json'), JSON.stringify({
+    connection_state: 'online', node_id: 'nod_test', connection_epoch: 3,
+  }));
+  const result = nodeUserServiceStatus({
+    stateDir, platform: 'linux', run: () => ({ status: 0, stdout: 'active\n' }),
+  });
+  assert.equal(result.active, true);
+  assert.equal(result.connection.connection_state, 'online');
+  assert.equal(result.connection.connection_epoch, 3);
 });

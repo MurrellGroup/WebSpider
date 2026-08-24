@@ -389,7 +389,7 @@ function serviceCommand(action, options) {
     if (!options.user) throw new Error('service install-node requires --user');
     return logJSON(installNodeUserService({ executable, stateDir }));
   }
-  if (action === 'status-node') return logJSON(nodeUserServiceStatus());
+  if (action === 'status-node') return logJSON(nodeUserServiceStatus({ stateDir }));
   if (action === 'uninstall-node') {
     if (!options.user) throw new Error('service uninstall-node requires --user');
     return logJSON(uninstallNodeUserService());
@@ -403,7 +403,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.5.0\n\n`);
+  process.stdout.write(`WebSpider 0.6.0\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);

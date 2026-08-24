@@ -103,6 +103,8 @@ export class NodeDaemon extends EventEmitter {
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
     this.backoffMs = 500;
+    this.connectionStatusPath = path.join(stateDir, 'connection-status.json');
+    this.lastConnectionError = null;
 
     this.supervisor.on('output', (output) => this.#send({
       type: 'terminal_output',
@@ -120,6 +122,7 @@ export class NodeDaemon extends EventEmitter {
     if (!this.stopped) return;
     this.stopped = false;
     this.supervisor.start();
+    this.#recordConnection('connecting');
     this.#connect();
   }
 
@@ -168,10 +171,12 @@ export class NodeDaemon extends EventEmitter {
         this.emit('error', error);
       }
     });
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
       this.epoch = 0;
+      const reason = String(event?.reason || this.lastConnectionError || 'Connection closed').slice(0, 500);
+      this.#recordConnection('offline', { close_code: Number(event?.code || 0), last_error: reason });
       this.emit('offline');
       if (!this.stopped && this.reconnect) {
         this.reconnectTimer = setTimeout(() => this.#connect(), this.backoffMs);
@@ -179,7 +184,12 @@ export class NodeDaemon extends EventEmitter {
         this.backoffMs = Math.min(15_000, this.backoffMs * 2);
       }
     });
-    socket.addEventListener('error', (error) => this.emit('error', error.error || error));
+    socket.addEventListener('error', (error) => {
+      const value = error?.error || error;
+      this.lastConnectionError = value?.message || String(value || 'WebSocket connection failed');
+      this.#recordConnection('error', { last_error: this.lastConnectionError.slice(0, 500) });
+      this.emit('error', value);
+    });
   }
 
   #capabilities() {
@@ -214,6 +224,8 @@ export class NodeDaemon extends EventEmitter {
     if (frame.type === 'hello_ack') {
       this.epoch = Number(frame.connection_epoch);
       this.backoffMs = 500;
+      this.lastConnectionError = null;
+      this.#recordConnection('online', { connection_epoch: this.epoch, online_at: nowISO(), last_error: null });
       this.emit('online', { connection_epoch: this.epoch });
       this.heartbeatTimer = setInterval(() => this.#send({
         type: 'heartbeat',
@@ -356,5 +368,25 @@ export class NodeDaemon extends EventEmitter {
 
   #sendEvent(event) {
     this.#send({ type: 'node_event', connection_epoch: this.epoch, event: event.payload?.id ? event.payload : event });
+  }
+
+  #recordConnection(connectionState, extra = {}) {
+    const value = {
+      connection_state: connectionState,
+      hub_url: this.hubURL,
+      node_id: this.nodeId,
+      pid: process.pid,
+      updated_at: nowISO(),
+      ...extra,
+    };
+    const temporary = `${this.connectionStatusPath}.tmp-${process.pid}`;
+    try {
+      fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
+      fs.renameSync(temporary, this.connectionStatusPath);
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      this.lastConnectionError = error?.message || String(error);
+    }
   }
 }

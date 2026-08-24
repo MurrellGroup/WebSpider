@@ -18,15 +18,15 @@ The same release also contains fully self-contained installers for direct or off
 
 | Machine | Release asset |
 | --- | --- |
-| Linux x86-64 | `WebSpider_Install_0.5.0_linux_x64.run` |
-| Linux ARM64 | `WebSpider_Install_0.5.0_linux_arm64.run` |
-| macOS Intel | `WebSpider_Install_0.5.0_macos_x64.run` |
-| macOS Apple silicon | `WebSpider_Install_0.5.0_macos_arm64.run` |
+| Linux x86-64 | `WebSpider_Install_0.6.0_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.6.0_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.6.0_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.6.0_macos_arm64.run` |
 
 Run the downloaded asset directly through the system shell:
 
 ```bash
-sh ~/Downloads/WebSpider_Install_0.5.0_linux_x64.run --workspace /path/to/project
+sh ~/Downloads/WebSpider_Install_0.6.0_linux_x64.run --workspace /path/to/project
 ```
 
 No separate runtime or package-manager setup is part of either user workflow.
@@ -73,7 +73,7 @@ The repository owns the build recipe; GitHub Releases own the binaries. `.github
 - `darwin-x64` on `macos-15-intel`;
 - `darwin-arm64` on `macos-15`.
 
-Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.5.0` additionally:
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.6.0` additionally:
 
 1. requires the tag to equal the version in `package.json`;
 2. gathers exactly four native installers;
@@ -84,8 +84,8 @@ Pull requests, `main` pushes, and manual runs produce short-lived Actions artifa
 Create a release by pushing its annotated tag:
 
 ```bash
-git tag -a v0.5.0 -m "WebSpider 0.5.0"
-git push origin v0.5.0
+git tag -a v0.6.0 -m "WebSpider 0.6.0"
+git push origin v0.6.0
 ```
 
 For a native development build on the current machine:
@@ -100,7 +100,7 @@ That command writes a generated, Git-ignored platform installer under `dist/`. I
 
 Open the portal and select **Add project**. Enter a project name and the worker machine name. WebSpider creates the portfolio record and displays one single-line command. Run that command once from the project directory on the machine that owns the files.
 
-The command downloads the matching native installer, enrolls the machine with the project-bound one-time token, registers the current directory, installs a persistent per-user node service, and starts the project Codex. Node.js is not required. When the machine already runs a WebSpider node, the same command attaches the new project root to its existing signed identity and restarts that node service with all roots preserved.
+The command downloads the matching native installer, enrolls the machine with the project-bound one-time token, registers the current directory, installs a persistent per-user node service, and starts the project Codex. Node.js is not required. When the machine already runs a WebSpider node, the same command attaches the new project root to its existing signed identity and restarts that node service with all roots preserved. Installation now waits for the hub to authenticate the persistent node connection; it fails with the status and exact log command instead of claiming success while the node is offline.
 
 After enrollment, the project and worker appear in the portfolio automatically. Closing the browser, restarting the hub, or rebooting the worker machine does not discard their durable identity or status. A worker reports `working`, `blocked`, `completed`, or `idle`; reports update the portal and notify the master.
 
@@ -111,6 +111,18 @@ i=$(mktemp);curl --http1.1 -fL --retry 5 -o "$i" https://github.com/MurrellGroup
 ```
 
 The join token is stored hashed, expires after ten minutes, and is consumed atomically. The node generates an Ed25519 identity locally and thereafter authenticates outbound connections with signed, replay-bounded payloads. Worker machines require no inbound listener.
+
+Inspect both the OS service and its most recent authenticated hub connection with one command on a worker:
+
+```bash
+webspider service status-node --state-dir "${XDG_DATA_HOME:-$HOME/.local/share}/webspider/node"
+```
+
+## Terminal input and notes
+
+Terminal tabs open in **Direct** mode, where the browser keyboard talks straight to xterm and the PTY. Select **Text box** to draft or mouse-edit ordinary text in a native textarea, then send it to the same terminal. The composer observes the running program's terminal modes and uses bracketed paste only when that program has enabled it.
+
+**Notes** are small plaintext editors stored on the hub machine. Each note body is an actual mode-`0600` `.txt` file under `<hub-state-dir>/notes`; SQLite stores only its title, filename, timestamps, and visibility. New notes default to **Just for me**. A note is readable by the main agent only after the owner checks **Visible to Master**; workers cannot read either class of note, and the main agent has no note-write scope.
 
 ## Architecture
 
@@ -137,6 +149,8 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - The main agent treats session context and account allowance as different budgets. It uses `/status` at natural breakpoints for context and the reported weekly rate-limit percentage; `/usage weekly` is optional supporting token activity, never a substitute for percent remaining. Read-only observations are timestamped and shown in later inbound envelopes and the portal.
 - Account management is always human-only. Agents cannot redeem token refreshes or rate-limit resets, buy/add/switch credits, change billing, plan, or authentication, move work to API-funded usage, or request entitlements—even if a provider surface happens to expose those actions.
 - The portal defaults to the selected agent's live terminal. The login shell remains alive when the browser disconnects, and Codex runs inside it without a WebSpider conversation layer. Additional named shell tabs are independent processes for monitoring and ad hoc commands; only the primary agent process receives orchestration messages.
+- Terminal input defaults to direct xterm control. The optional text-box composer supports mouse editing before sending and negotiates bracketed-paste behavior with the active terminal program.
+- Hub notes remain private plaintext files by default. Only notes explicitly marked visible enter the main agent's read-only allowlist; worker agents have no notes scope.
 - Conversations, Markdown-family files, and the terminal's Readable view render sanitized Markdown and browser-native MathML. The primary terminal view uses a bundled xterm.js emulator for ANSI/VT rendering and direct keyboard input.
 - Managed commands use an isolated native PTY bridge (`script` on Linux and `expect` on macOS), named input FIFO, detached process group, append-only terminal log, and atomic exit-status marker.
 - A node restart reconciles persisted process IDs, log offsets, FIFOs, and exit markers. A hub outage does not terminate a detached process.
@@ -157,7 +171,7 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - Roots pin their initial filesystem identity. Strict mode blocks all symlinks; contained mode verifies the opened target remains under the pinned root. Special files are never previewed or downloaded.
 - Raw terminal bytes render through `textContent`; the optional readable representation strips terminal control sequences and passes only escaped Markdown, safe links, and generated MathML through the renderer. Terminal input remains size- and control-character-bounded.
 - Audit records preserve the actual actor separately from the role delivered to an agent.
-- Main-terminal control tokens are short-lived, revocable, and allowlisted to portfolio inspection, project/system policy edits, account-usage observations, agent discovery, and provenance-preserving messages to another registered agent. Worker tokens are restricted to updating their own status. Neither can authorize general project, file, task, artifact, terminal, administrative, billing, reset, credit, authentication, or funding APIs.
+- Main-terminal control tokens are short-lived, revocable, and allowlisted to portfolio inspection, explicitly visible note reads, project/system policy edits, account-usage observations, agent discovery, and provenance-preserving messages to another registered agent. Worker tokens are restricted to updating their own status. Neither can authorize general project, note writes, file, task, artifact, terminal, administrative, billing, reset, credit, authentication, or funding APIs.
 
 See [Security model](docs/SECURITY.md) for details and limitations.
 

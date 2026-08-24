@@ -77,6 +77,18 @@ test('task and event state survives database reopen', (t) => {
   assert.equal(database.listEvents(lastSequence - 1).at(-1).global_sequence, lastSequence);
 });
 
+test('note metadata is private by default and supports explicit master visibility', (t) => {
+  const { database } = databaseFixture(t);
+  const note = database.createNote({ title: 'Analysis ideas', filename: 'nte_test.txt' });
+  assert.equal(note.visibility, 'private');
+  assert.equal(database.listNotes({ visibility: 'master' }).length, 0);
+  const visible = database.updateNote(note.id, { visibility: 'master', title: 'Analysis plan' });
+  assert.equal(visible.visibility, 'master');
+  assert.equal(database.listNotes({ visibility: 'master' })[0].title, 'Analysis plan');
+  assert.equal(database.deleteNote(note.id).id, note.id);
+  assert.equal(database.getNote(note.id), null);
+});
+
 test('node join tokens are one-time and expire atomically', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-token-'));
   const database = new HubDatabase(path.join(directory, 'hub.db'));
