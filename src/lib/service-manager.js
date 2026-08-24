@@ -26,9 +26,18 @@ function requireSuccess(result, action) {
   throw new Error(`${action} failed${detail ? `: ${detail}` : ''}`);
 }
 
-export function renderSystemdUserUnit({ executable, workspace, stateDir, environmentPath }) {
+export function renderSystemdUserUnit({
+  executable,
+  workspace,
+  stateDir,
+  listen = '127.0.0.1:7340',
+  publicBaseURL = null,
+  environmentPath,
+}) {
   const command = [
-    executable, 'up', '--workspace', workspace, '--state-dir', stateDir,
+    executable, 'up', '--listen', listen,
+    ...(publicBaseURL ? ['--public-base-url', publicBaseURL] : []),
+    '--workspace', workspace, '--state-dir', stateDir,
   ].map(systemdQuote).join(' ');
   return `[Unit]
 Description=WebSpider persistent agent fabric
@@ -49,9 +58,20 @@ WantedBy=default.target
 `;
 }
 
-export function renderLaunchAgent({ executable, workspace, stateDir, environmentPath }) {
+export function renderLaunchAgent({
+  executable,
+  workspace,
+  stateDir,
+  listen = '127.0.0.1:7340',
+  publicBaseURL = null,
+  environmentPath,
+}) {
   const logDir = path.join(stateDir, 'logs');
-  const argumentsList = [executable, 'up', '--workspace', workspace, '--state-dir', stateDir]
+  const argumentsList = [
+    executable, 'up', '--listen', listen,
+    ...(publicBaseURL ? ['--public-base-url', publicBaseURL] : []),
+    '--workspace', workspace, '--state-dir', stateDir,
+  ]
     .map((item) => `      <string>${xml(item)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,6 +98,8 @@ export function installUserService({
   executable,
   workspace,
   stateDir,
+  listen = '127.0.0.1:7340',
+  publicBaseURL = null,
   platform = process.platform,
   home = os.homedir(),
   uid = process.getuid?.(),
@@ -98,6 +120,8 @@ export function installUserService({
       executable: resolvedExecutable,
       workspace: resolvedWorkspace,
       stateDir: resolvedState,
+      listen,
+      publicBaseURL,
       environmentPath,
     }), { mode: 0o600 });
     requireSuccess(run('loginctl', ['enable-linger', username]), 'Enabling boot-time user services');
@@ -122,6 +146,8 @@ export function installUserService({
       executable: resolvedExecutable,
       workspace: resolvedWorkspace,
       stateDir: resolvedState,
+      listen,
+      publicBaseURL,
       environmentPath,
     }), { mode: 0o600 });
     const domain = `gui/${uid}`;

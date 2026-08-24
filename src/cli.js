@@ -294,13 +294,26 @@ function doctor(options) {
   if (!ok) process.exitCode = 1;
 }
 
+function showOwnerToken(options) {
+  const stateDir = path.resolve(options['state-dir'] || defaultStateDir());
+  const tokenPath = path.join(stateDir, 'hub', 'owner.token');
+  if (!fs.existsSync(tokenPath)) throw new Error('Owner token not found; start WebSpider first');
+  process.stdout.write(`${fs.readFileSync(tokenPath, 'utf8').trim()}\n`);
+}
+
 function serviceCommand(action, options) {
   const executable = path.resolve(options.executable || process.env.WEBSPIDER_EXECUTABLE || process.argv[1]);
   const stateDir = path.resolve(options['state-dir'] || defaultStateDir());
   const workspace = path.resolve(options.workspace || process.cwd());
   if (action === 'install') {
     if (!options.user) throw new Error('service install requires --user');
-    return logJSON(installUserService({ executable, workspace, stateDir }));
+    return logJSON(installUserService({
+      executable,
+      workspace,
+      stateDir,
+      listen: options.listen || '127.0.0.1:7340',
+      publicBaseURL: options['public-base-url'] || null,
+    }));
   }
   if (action === 'status') return logJSON(userServiceStatus());
   if (action === 'uninstall') {
@@ -316,14 +329,15 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.4.3\n\n`);
+  process.stdout.write(`WebSpider 0.4.4\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);
   process.stdout.write(`  webspider node join --hub URL --token TOKEN [--root ID=PATH]\n`);
   process.stdout.write(`  webspider node [--state-dir PATH]\n`);
   process.stdout.write(`  webspider token create --hub URL --owner-token TOKEN [--name NAME]\n`);
-  process.stdout.write(`  webspider service install --user [--workspace PATH] [--state-dir PATH]\n`);
+  process.stdout.write(`  webspider auth token [--state-dir PATH]\n`);
+  process.stdout.write(`  webspider service install --user [--listen HOST:PORT] [--public-base-url URL] [--workspace PATH] [--state-dir PATH]\n`);
   process.stdout.write(`  webspider service status\n`);
   process.stdout.write(`  webspider service uninstall --user\n`);
   process.stdout.write(`  webspider doctor [--state-dir PATH]\n`);
@@ -337,6 +351,7 @@ export async function main(argv) {
   if (command === 'node' && positional[1] === 'join') return joinNode(options);
   if (command === 'node') return runNode(options);
   if (command === 'token' && positional[1] === 'create') return createJoinToken(options);
+  if (command === 'auth' && positional[1] === 'token') return showOwnerToken(options);
   if (command === 'service') return serviceCommand(positional[1], options);
   if (command === 'doctor') return doctor(options);
   if (['help', '--help', '-h'].includes(command)) return help();

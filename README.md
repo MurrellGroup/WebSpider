@@ -18,20 +18,32 @@ The same release also contains fully self-contained installers for direct or off
 
 | Machine | Release asset |
 | --- | --- |
-| Linux x86-64 | `WebSpider_Install_0.4.3_linux_x64.run` |
-| Linux ARM64 | `WebSpider_Install_0.4.3_linux_arm64.run` |
-| macOS Intel | `WebSpider_Install_0.4.3_macos_x64.run` |
-| macOS Apple silicon | `WebSpider_Install_0.4.3_macos_arm64.run` |
+| Linux x86-64 | `WebSpider_Install_0.4.4_linux_x64.run` |
+| Linux ARM64 | `WebSpider_Install_0.4.4_linux_arm64.run` |
+| macOS Intel | `WebSpider_Install_0.4.4_macos_x64.run` |
+| macOS Apple silicon | `WebSpider_Install_0.4.4_macos_arm64.run` |
 
 Run the downloaded asset directly through the system shell:
 
 ```bash
-sh ~/Downloads/WebSpider_Install_0.4.3_linux_x64.run --workspace /path/to/project
+sh ~/Downloads/WebSpider_Install_0.4.4_linux_x64.run --workspace /path/to/project
 ```
 
 No separate runtime or package-manager setup is part of either user workflow.
 
 Open `http://127.0.0.1:7340`. Closing the browser does not stop the managed agent or detached tasks.
+
+### Remote server
+
+On a trusted private network or VPN, bind the persistent service to the server's private address. A Tailscale address is preferable to `0.0.0.0` because WebSpider will then be reachable only through the tailnet:
+
+```bash
+installer="$(mktemp)" && curl --http1.1 -fL --retry 5 --retry-delay 2 --output "$installer" https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run && sh "$installer" --workspace "$PWD" --listen "$(tailscale ip -4):7340"
+```
+
+Open `http://<server-tailnet-name>:7340`, then enter the value printed by `webspider auth token`. Unauthenticated visitors can see the login screen and health status only; project data and control APIs require an authenticated session. Tailscale encrypts the connection end to end.
+
+For an institutional VPN without end-to-end host encryption, put an HTTPS reverse proxy in front of WebSpider and install the service with `--public-base-url https://your-webspider-host.example.edu`. This marks browser session cookies as secure. Do not expose WebSpider over plain HTTP on the public internet.
 
 For source development only, contributors can run the repository with Node.js 24:
 
@@ -63,7 +75,7 @@ The repository owns the build recipe; GitHub Releases own the binaries. `.github
 - `darwin-x64` on `macos-15-intel`;
 - `darwin-arm64` on `macos-15`.
 
-Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.3` additionally:
+Pull requests, `main` pushes, and manual runs produce short-lived Actions artifacts after a clean-install smoke test. A semantic version tag such as `v0.4.4` additionally:
 
 1. requires the tag to equal the version in `package.json`;
 2. gathers exactly four native installers;
@@ -74,8 +86,8 @@ Pull requests, `main` pushes, and manual runs produce short-lived Actions artifa
 Create a release by pushing its annotated tag:
 
 ```bash
-git tag -a v0.4.3 -m "WebSpider 0.4.3"
-git push origin v0.4.3
+git tag -a v0.4.4 -m "WebSpider 0.4.4"
+git push origin v0.4.4
 ```
 
 For a native development build on the current machine:

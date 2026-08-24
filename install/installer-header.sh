@@ -7,6 +7,8 @@ workspace=$(pwd)
 install_root=${WEBSPIDER_INSTALL_DIR:-"$HOME/.local/lib/webspider"}
 bin_dir=${WEBSPIDER_BIN_DIR:-"$HOME/.local/bin"}
 state_dir=${WEBSPIDER_STATE_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/webspider"}
+listen=${WEBSPIDER_LISTEN:-"127.0.0.1:7340"}
+public_base_url=${WEBSPIDER_PUBLIC_BASE_URL:-}
 install_service=1
 
 while [ "$#" -gt 0 ]; do
@@ -15,9 +17,11 @@ while [ "$#" -gt 0 ]; do
     --install-dir) install_root=$2; shift 2 ;;
     --bin-dir) bin_dir=$2; shift 2 ;;
     --state-dir) state_dir=$2; shift 2 ;;
+    --listen) listen=$2; shift 2 ;;
+    --public-base-url) public_base_url=$2; shift 2 ;;
     --no-service) install_service=0; shift ;;
     -h|--help)
-      echo "Usage: sh WebSpider_Install_${product_version}.run [--workspace PATH] [--no-service]"
+      echo "Usage: sh WebSpider_Install_${product_version}.run [--workspace PATH] [--listen HOST:PORT] [--public-base-url URL] [--no-service]"
       exit 0
       ;;
     *) echo "Unknown installer option: $1" >&2; exit 2 ;;
@@ -112,10 +116,15 @@ case ":$PATH:" in
 esac
 
 if [ "$install_service" -eq 1 ]; then
-  "$bin_dir/webspider" service install --user \
+  set -- service install --user \
+    --listen "$listen" \
     --workspace "$workspace" \
     --state-dir "$state_dir" \
     --executable "$bin_dir/webspider"
+  if [ -n "$public_base_url" ]; then
+    set -- "$@" --public-base-url "$public_base_url"
+  fi
+  "$bin_dir/webspider" "$@"
 fi
 
 if [ -d "$previous" ]; then rm -rf "$previous"; fi
@@ -125,10 +134,14 @@ echo "Command: $bin_dir/webspider"
 echo "Workspace: $workspace"
 if [ "$install_service" -eq 1 ]; then
   echo "Boot service: installed and running"
+  listen_host=${listen%:*}
+  listen_port=${listen##*:}
+  health_host=$listen_host
+  case "$health_host" in 0.0.0.0|::) health_host=127.0.0.1 ;; esac
   attempt=0
   while [ "$attempt" -lt 60 ]; do
     if [ -s "$state_dir/hub/owner.token" ] && "$install_root/runtime/bin/node" -e \
-      "fetch('http://127.0.0.1:7340/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+      "fetch('http://$health_host:$listen_port/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
       break
     fi
     attempt=$((attempt + 1))
@@ -136,9 +149,17 @@ if [ "$install_service" -eq 1 ]; then
   done
   if [ -s "$state_dir/hub/owner.token" ]; then
     owner_token=$(sed -n '1p' "$state_dir/hub/owner.token")
-    echo "Open portal: http://127.0.0.1:7340/#access_token=$owner_token"
+    if [ -n "$public_base_url" ]; then
+      portal_url=${public_base_url%/}
+    else
+      access_host=$listen_host
+      case "$access_host" in 0.0.0.0|::) access_host=$(hostname -f 2>/dev/null || hostname) ;; esac
+      portal_url="http://$access_host:$listen_port"
+    fi
+    echo "Open portal: $portal_url"
+    echo "Owner token: $owner_token"
   else
-    echo "Portal is starting at http://127.0.0.1:7340"
+    echo "Portal is starting on $listen"
   fi
 fi
 exit 0
