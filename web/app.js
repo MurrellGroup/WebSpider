@@ -28,6 +28,7 @@ const state = {
   terminalResizeObserver: null,
   terminalDimensions: null,
   terminalKeyboardProtocol: false,
+  terminalProtocolTail: '',
   terminalPendingInput: [],
   terminalInputBuffer: '',
   terminalInputTimer: null,
@@ -145,6 +146,7 @@ function closeTerminal() {
   state.terminalFitAddon = null;
   state.terminalDimensions = null;
   state.terminalKeyboardProtocol = false;
+  state.terminalProtocolTail = '';
   state.terminalEmulator?.dispose();
   state.terminalEmulator = null;
 }
@@ -412,39 +414,62 @@ function transmitTerminalInput(data) {
 
 function queueTerminalInput(data) {
   if (!data) return;
-  state.terminalInputBuffer += data;
+  let encoded = data;
+  let terminalEvent = false;
+  let delay = 8;
+  if (state.terminalKeyboardProtocol) {
+    const named = new Map([['\r', 13], ['\t', 9], ['\u007f', 127], ['\u001b', 27]]);
+    if (named.has(data)) {
+      encoded = kittySequence(named.get(data));
+      terminalEvent = true;
+    }
+    else if (data.length === 1 && data.charCodeAt(0) >= 1 && data.charCodeAt(0) <= 26) {
+      encoded = kittySequence(96 + data.charCodeAt(0), 5);
+      terminalEvent = true;
+    }
+  }
+  if (terminalEvent && state.terminalInputBuffer) {
+    clearTimeout(state.terminalInputTimer);
+    state.terminalInputTimer = null;
+    const pending = state.terminalInputBuffer;
+    state.terminalInputBuffer = '';
+    transmitTerminalInput(pending);
+    delay = 30;
+  }
+  state.terminalInputBuffer += encoded;
   clearTimeout(state.terminalInputTimer);
   state.terminalInputTimer = setTimeout(() => {
     const batch = state.terminalInputBuffer;
     state.terminalInputBuffer = '';
     state.terminalInputTimer = null;
     transmitTerminalInput(batch);
-  }, 8);
+  }, delay);
 }
 
-function kittyKey(codePoint, event) {
-  const modifiers = 1
-    + (event.shiftKey ? 1 : 0)
-    + (event.altKey ? 2 : 0)
-    + (event.ctrlKey ? 4 : 0)
-    + (event.metaKey ? 8 : 0);
+function kittySequence(codePoint, modifiers = 1) {
   return `\u001b[${codePoint}${modifiers === 1 ? '' : `;${modifiers}`}u`;
 }
 
 function handleTerminalKey(event) {
   if (!state.terminalKeyboardProtocol || event.type !== 'keydown') return true;
-  const named = { Enter: 13, Tab: 9, Backspace: 127, Escape: 27 };
-  const codePoint = named[event.key]
-    || ((event.ctrlKey || event.altKey || event.metaKey) && [...event.key].length === 1 ? event.key.codePointAt(0) : null);
-  if (codePoint == null) return true;
-  queueTerminalInput(kittyKey(codePoint, event));
+  if (!(event.ctrlKey || event.altKey || event.metaKey) || [...event.key].length !== 1) return true;
+  const modifiers = 1
+    + (event.shiftKey ? 1 : 0)
+    + (event.altKey ? 2 : 0)
+    + (event.ctrlKey ? 4 : 0)
+    + (event.metaKey ? 8 : 0);
+  queueTerminalInput(kittySequence(event.key.codePointAt(0), modifiers));
   return false;
 }
 
 function observeTerminalProtocol(text) {
-  for (const match of text.matchAll(/\u001b\[(>|<)\d*u/g)) {
+  const combined = state.terminalProtocolTail + text;
+  for (const match of combined.matchAll(/\u001b\[(>|<)\d*u/g)) {
     state.terminalKeyboardProtocol = match[1] === '>';
   }
+  state.terminalProtocolTail = combined.slice(-16);
+  const output = $('#terminal-output');
+  if (output) output.dataset.keyboardProtocol = String(state.terminalKeyboardProtocol);
 }
 
 function flushTerminalInput() {
@@ -524,13 +549,15 @@ async function renderTerminal(agent) {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
     if (frame.type === 'ATTACHED') socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
-    if (frame.type === 'SNAPSHOT' && Number(frame.sequence || 0) >= state.terminalSequence) {
-      state.terminalText = frame.text || '';
-      observeTerminalProtocol(state.terminalText);
-      state.terminalEmulator.reset();
-      state.terminalEmulator.write(state.terminalText);
-      state.terminalSequence = Number(frame.sequence || 0);
-      updateTerminalReading(true);
+    if (frame.type === 'SNAPSHOT') {
+      observeTerminalProtocol(frame.text || '');
+      if (Number(frame.sequence || 0) >= state.terminalSequence) {
+        state.terminalText = frame.text || '';
+        state.terminalEmulator.reset();
+        state.terminalEmulator.write(state.terminalText);
+        state.terminalSequence = Number(frame.sequence || 0);
+        updateTerminalReading(true);
+      }
     }
     if (frame.type === 'OUTPUT' && Number(frame.sequence_end) > state.terminalSequence) {
       const bytes = base64ToBytes(frame.data);
