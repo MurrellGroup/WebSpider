@@ -21,6 +21,8 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'policy:write:system',
   'usage:read',
   'usage:write',
+  'agents:read',
+  'messages:write',
 ];
 
 const MIME = new Map([
@@ -187,7 +189,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.7', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.8', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -380,6 +382,54 @@ export class Hub {
       });
       return this.database.accountUsageStatus();
     }, { agentOnly: true, agentScopes: ['usage:write'] });
+
+    route('GET', '/api/v1/agent-control/agents', async (ctx) => ({
+      agents: this.database.listAgents().map((agent) => ({
+        id: agent.id,
+        profile_name: agent.profile_name,
+        project_id: agent.project_id,
+        project_name: agent.project_name,
+        node_id: agent.node_id,
+        node_name: agent.node_name,
+        state: agent.state,
+        orchestration_role: agent.orchestration_role,
+        is_self: agent.id === ctx.principal.agent_instance_id,
+      })),
+    }), { agentOnly: true, agentScopes: ['agents:read'] });
+
+    route('POST', '/api/v1/agent-control/agents/:id/messages', async (ctx) => {
+      const body = await readJSON(ctx.request, 262_144);
+      const target = this.database.getAgent(ctx.params.id);
+      invariant(target, 'WS_NOT_FOUND', 'Target agent not found.', 404);
+      invariant(target.id !== ctx.principal.agent_instance_id, 'WS_FORBIDDEN', 'Use the current terminal to talk to this agent.', 403);
+      invariant(typeof body.message === 'string' && body.message.trim().length > 0 && body.message.length <= 200_000,
+        'WS_VALIDATION', 'A message of at most 200000 characters is required.');
+      const wakePolicy = body.wake_policy || 'ensure_running';
+      invariant(['ensure_running', 'queue_only', 'interrupt'].includes(wakePolicy), 'WS_VALIDATION', 'Invalid wake policy.');
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const result = this.database.createMessage({
+        threadId: target.active_thread_id,
+        actorId: ctx.principal.principal_id,
+        deliveryRole: 'user',
+        displaySender: `${source?.profile_name || 'WebSpider main agent'} via WebSpider`,
+        contentParts: [{ type: 'text', text: body.message }],
+        wakePolicy,
+        idempotencyKey: body.idempotency_key || makeId('idem'),
+        traceId: body.trace_id || makeId('trc'),
+        hopCount: 1,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.message.send',
+        targetType: 'agent_instance',
+        targetId: target.id,
+        projectId: target.project_id,
+        decision: 'allowed_scoped_orchestration',
+        newState: { message_id: result.message.id, wake_policy: wakePolicy },
+      });
+      if (!result.duplicate) queueMicrotask(() => this.#dispatchMessage(result.message.id).catch((error) => this.#logError(error)));
+      return result;
+    }, { agentOnly: true, agentScopes: ['messages:write'] });
 
     route('GET', '/api/v1/nodes', async () => ({ nodes: this.database.listNodes() }));
     route('POST', '/api/v1/nodes/join-tokens', async (ctx) => {
@@ -692,7 +742,7 @@ export class Hub {
 
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
@@ -772,10 +822,11 @@ export class Hub {
     };
     this.broker.on('terminal.output', outputListener);
     connection.on('close', () => this.broker.off('terminal.output', outputListener));
+    let terminalQueue = Promise.resolve();
     connection.on('text', (text) => {
       let frame;
       try { frame = JSON.parse(text); } catch { connection.sendJSON({ type: 'ERROR', code: 'WS_INVALID_JSON' }); return; }
-      Promise.resolve().then(async () => {
+      terminalQueue = terminalQueue.then(async () => {
         if (frame.type === 'LEASE_REQUEST') {
           const lease = this.database.acquireTerminalLease(terminalId, leasePrincipal);
           connection.sendJSON({ type: 'LEASE_GRANTED', lease });
@@ -785,6 +836,16 @@ export class Hub {
           const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
           const result = await this.broker.request(terminal.node_id, 'terminal.input', { terminal_id: terminalId, data: frame.data });
           connection.sendJSON({ type: 'INPUT_ACK', lease, result });
+          return;
+        }
+        if (frame.type === 'RESIZE') {
+          const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
+          const result = await this.broker.request(terminal.node_id, 'terminal.resize', {
+            terminal_id: terminalId,
+            columns: frame.columns,
+            rows: frame.rows,
+          });
+          connection.sendJSON({ type: 'RESIZE_ACK', lease, result });
           return;
         }
         if (frame.type === 'HEARTBEAT') {

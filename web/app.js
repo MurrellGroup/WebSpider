@@ -1,6 +1,7 @@
 import { renderMarkdown, stripTerminalFormatting } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { Terminal } from './vendor/xterm.mjs';
+import { FitAddon } from './vendor/addon-fit.mjs';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -15,15 +16,21 @@ const state = {
   attention: [],
   selectedProject: null,
   selectedAgent: null,
-  tab: 'conversation',
+  tab: 'terminal',
   eventSocket: null,
   terminalSocket: null,
   terminalLease: null,
   terminalSequence: 0,
   terminalHeartbeat: null,
   terminalEmulator: null,
+  terminalFitAddon: null,
   terminalInputSubscription: null,
+  terminalResizeObserver: null,
+  terminalDimensions: null,
+  terminalKeyboardProtocol: false,
   terminalPendingInput: [],
+  terminalInputBuffer: '',
+  terminalInputTimer: null,
   terminalText: '',
   terminalView: 'terminal',
   terminalRenderTimer: null,
@@ -128,8 +135,16 @@ function closeTerminal() {
   state.terminalHeartbeat = null;
   state.terminalLease = null;
   state.terminalPendingInput = [];
+  clearTimeout(state.terminalInputTimer);
+  state.terminalInputTimer = null;
+  state.terminalInputBuffer = '';
   state.terminalInputSubscription?.dispose();
   state.terminalInputSubscription = null;
+  state.terminalResizeObserver?.disconnect();
+  state.terminalResizeObserver = null;
+  state.terminalFitAddon = null;
+  state.terminalDimensions = null;
+  state.terminalKeyboardProtocol = false;
   state.terminalEmulator?.dispose();
   state.terminalEmulator = null;
 }
@@ -279,13 +294,13 @@ function renderEventRows(events) {
 }
 
 function agentTabs() {
-  const primary = ['conversation', 'files', 'terminal', 'artifacts'];
+  const primary = ['terminal', 'files', 'conversation', 'artifacts'];
   const secondary = ['activity', 'tasks', 'metadata'];
   const button = (tab) => `<button class="${state.tab === tab ? 'selected' : ''}" data-tab="${tab}">${tab[0].toUpperCase()}${tab.slice(1)}</button>`;
   return `${primary.map(button).join('')}<details class="tab-more" ${secondary.includes(state.tab) ? 'open' : ''}><summary>More</summary><div>${secondary.map(button).join('')}</div></details>`;
 }
 
-async function renderAgent(agentId, tab = state.tab) {
+async function renderAgent(agentId, tab = 'terminal') {
   state.selectedAgent = state.agents.find((agent) => agent.id === agentId) || (await api(`/api/v1/agent-instances/${encodeURIComponent(agentId)}`));
   state.selectedProject = state.projects.find((project) => project.id === state.selectedAgent.project_id) || null;
   state.tab = tab;
@@ -297,7 +312,7 @@ async function renderAgent(agentId, tab = state.tab) {
       <span class="status-pill ${h(agent.state)}">${h(agent.state)}</span>
       ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : `<details class="action-menu"><summary>Agent actions</summary><div><button class="danger" data-action="stop-agent">Stop agent</button></div></details>`}`)}
     <nav class="tabs">${agentTabs()}</nav>
-    <div id="agent-content" class="page-content"><div class="loading">Loading ${h(tab)}…</div></div>
+    <div id="agent-content" class="page-content ${tab === 'terminal' ? 'terminal-page-content' : ''}"><div class="loading">Loading ${h(tab)}…</div></div>
   </div>`;
   history.replaceState(null, '', `#/projects/${encodeURIComponent(agent.project_id)}/agents/${encodeURIComponent(agent.id)}/${tab}`);
   await renderAgentTab();
@@ -395,10 +410,73 @@ function transmitTerminalInput(data) {
   }));
 }
 
+function queueTerminalInput(data) {
+  if (!data) return;
+  state.terminalInputBuffer += data;
+  clearTimeout(state.terminalInputTimer);
+  state.terminalInputTimer = setTimeout(() => {
+    const batch = state.terminalInputBuffer;
+    state.terminalInputBuffer = '';
+    state.terminalInputTimer = null;
+    transmitTerminalInput(batch);
+  }, 8);
+}
+
+function kittyKey(codePoint, event) {
+  const modifiers = 1
+    + (event.shiftKey ? 1 : 0)
+    + (event.altKey ? 2 : 0)
+    + (event.ctrlKey ? 4 : 0)
+    + (event.metaKey ? 8 : 0);
+  return `\u001b[${codePoint}${modifiers === 1 ? '' : `;${modifiers}`}u`;
+}
+
+function handleTerminalKey(event) {
+  if (!state.terminalKeyboardProtocol || event.type !== 'keydown') return true;
+  const named = { Enter: 13, Tab: 9, Backspace: 127, Escape: 27 };
+  const codePoint = named[event.key]
+    || ((event.ctrlKey || event.altKey || event.metaKey) && [...event.key].length === 1 ? event.key.codePointAt(0) : null);
+  if (codePoint == null) return true;
+  queueTerminalInput(kittyKey(codePoint, event));
+  return false;
+}
+
+function observeTerminalProtocol(text) {
+  for (const match of text.matchAll(/\u001b\[(>|<)\d*u/g)) {
+    state.terminalKeyboardProtocol = match[1] === '>';
+  }
+}
+
 function flushTerminalInput() {
   const pending = state.terminalPendingInput;
   state.terminalPendingInput = [];
   for (const data of pending) transmitTerminalInput(data);
+}
+
+function transmitTerminalResize() {
+  const dimensions = state.terminalDimensions;
+  if (!dimensions || !state.terminalLease || state.terminalSocket?.readyState !== WebSocket.OPEN) return;
+  state.terminalSocket.send(JSON.stringify({
+    type: 'RESIZE',
+    lease_id: state.terminalLease.id,
+    lease_epoch: state.terminalLease.lease_epoch,
+    columns: dimensions.columns,
+    rows: dimensions.rows,
+  }));
+}
+
+function fitTerminal() {
+  if (!state.terminalEmulator || !state.terminalFitAddon || state.terminalView === 'reading') return;
+  state.terminalFitAddon.fit();
+  const dimensions = { columns: state.terminalEmulator.cols, rows: state.terminalEmulator.rows };
+  const output = $('#terminal-output');
+  if (output) {
+    output.dataset.columns = String(dimensions.columns);
+    output.dataset.rows = String(dimensions.rows);
+  }
+  if (dimensions.columns === state.terminalDimensions?.columns && dimensions.rows === state.terminalDimensions?.rows) return;
+  state.terminalDimensions = dimensions;
+  transmitTerminalResize();
 }
 
 async function renderTerminal(agent) {
@@ -425,9 +503,16 @@ async function renderTerminal(agent) {
       selectionBackground: '#28483f',
     },
   });
+  const fitAddon = new FitAddon();
+  emulator.loadAddon(fitAddon);
   state.terminalEmulator = emulator;
+  state.terminalFitAddon = fitAddon;
+  emulator.attachCustomKeyEventHandler(handleTerminalKey);
   emulator.open($('#terminal-output'));
-  state.terminalInputSubscription = emulator.onData(transmitTerminalInput);
+  fitTerminal();
+  state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(fitTerminal));
+  state.terminalResizeObserver.observe($('#terminal-output'));
+  state.terminalInputSubscription = emulator.onData(queueTerminalInput);
   emulator.focus();
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
@@ -441,6 +526,7 @@ async function renderTerminal(agent) {
     if (frame.type === 'ATTACHED') socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
     if (frame.type === 'SNAPSHOT' && Number(frame.sequence || 0) >= state.terminalSequence) {
       state.terminalText = frame.text || '';
+      observeTerminalProtocol(state.terminalText);
       state.terminalEmulator.reset();
       state.terminalEmulator.write(state.terminalText);
       state.terminalSequence = Number(frame.sequence || 0);
@@ -451,14 +537,20 @@ async function renderTerminal(agent) {
       const overlap = Math.max(0, state.terminalSequence - Number(frame.sequence_start));
       const addition = new TextDecoder().decode(overlap ? bytes.slice(overlap) : bytes);
       state.terminalText += addition;
+      observeTerminalProtocol(addition);
       state.terminalEmulator.write(overlap ? bytes.slice(overlap) : bytes);
       state.terminalSequence = Number(frame.sequence_end);
       updateTerminalReading();
+    }
+    if (frame.type === 'RESIZE_ACK') {
+      const output = $('#terminal-output');
+      if (output) output.dataset.ptyResized = String(frame.result?.resized === true);
     }
     if (frame.type === 'LEASE_GRANTED') {
       state.terminalLease = frame.lease;
       $('#terminal-control').textContent = 'In Control';
       flushTerminalInput();
+      transmitTerminalResize();
       state.terminalEmulator.focus();
       if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
       state.terminalHeartbeat = setInterval(() => {
@@ -630,8 +722,11 @@ function connectEvents() {
     if (frame.type !== 'EVENT') return;
     clearTimeout(connectEvents.refreshTimer);
     connectEvents.refreshTimer = setTimeout(() => loadData().then(() => {
-      if (state.selectedAgent && ['conversation', 'activity', 'tasks', 'artifacts'].includes(state.tab)) renderAgent(state.selectedAgent.id, state.tab);
-      else if (state.selectedProject) renderProject(state.selectedProject.id);
+      if (state.selectedAgent) {
+        if (['conversation', 'activity', 'tasks', 'artifacts'].includes(state.tab)) renderAgent(state.selectedAgent.id, state.tab);
+        return;
+      }
+      if (state.selectedProject) renderProject(state.selectedProject.id);
     }).catch(() => {}), 180);
   });
 }
@@ -640,10 +735,10 @@ async function routeFromHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (parts[0] === 'home') return renderHome();
   const agentIndex = parts.indexOf('agents');
-  if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'conversation');
+  if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
   if (parts[0] === 'projects' && parts[1]) return renderProject(decodeURIComponent(parts[1]));
   const mostRecentAgent = state.agents.slice().sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at))[0];
-  if (mostRecentAgent) return renderAgent(mostRecentAgent.id, 'conversation');
+  if (mostRecentAgent) return renderAgent(mostRecentAgent.id, 'terminal');
   if (state.projects[0]) return renderProject(state.projects[0].id);
   return renderHome();
 }
@@ -661,12 +756,13 @@ document.addEventListener('click', async (event) => {
   const projectButton = event.target.closest('[data-project-id]');
   if (projectButton) return renderProject(projectButton.dataset.projectId);
   const agentButton = event.target.closest('[data-agent-id]');
-  if (agentButton) return renderAgent(agentButton.dataset.agentId, 'conversation');
+  if (agentButton) return renderAgent(agentButton.dataset.agentId, 'terminal');
   const terminalView = event.target.closest('[data-terminal-view]');
   if (terminalView) {
     state.terminalView = terminalView.dataset.terminalView;
     applyTerminalView();
     updateTerminalReading(true);
+    requestAnimationFrame(fitTerminal);
     return;
   }
   const previewMode = event.target.closest('[data-preview-mode]');

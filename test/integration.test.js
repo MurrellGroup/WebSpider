@@ -157,8 +157,29 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(policyUpdate.body.policy.execution.validate_before_claiming_completion, true);
 
   hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_e2e_control', [
-    'policy:read', 'policy:write:project', 'policy:write:system', 'usage:read', 'usage:write',
+    'policy:read', 'policy:write:project', 'policy:write:system', 'usage:read', 'usage:write', 'agents:read', 'messages:write',
   ]);
+  const worker = hub.database.createAgent({
+    id: 'agt_e2e_worker',
+    profileId: bootstrap.agent.profile_id,
+    projectId: bootstrap.project.id,
+    nodeId: bootstrap.agent.node_id,
+    title: 'Remote worker',
+    orchestrationRole: 'worker',
+  });
+  const agentList = await jsonFetch(`${listening.url}/api/v1/agent-control/agents`, 'wsa_e2e_control');
+  assert.equal(agentList.response.status, 200);
+  assert.equal(agentList.body.agents.find((agent) => agent.id === bootstrap.agent.id).is_self, true);
+  assert.equal(agentList.body.agents.find((agent) => agent.id === worker.id).is_self, false);
+  const agentMessage = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${worker.id}/messages`, 'wsa_e2e_control', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'Check the remote result.', wake_policy: 'queue_only' }),
+  });
+  assert.equal(agentMessage.response.status, 200);
+  assert.equal(agentMessage.body.message.authenticated_actor_id, `agent:${bootstrap.agent.id}`);
+  assert.equal(agentMessage.body.message.delivery_role, 'user');
+  assert.match(agentMessage.body.message.display_sender, /via WebSpider/);
   const agentPolicy = await jsonFetch(`${listening.url}/api/v1/agent-control/policy`, 'wsa_e2e_control');
   assert.equal(agentPolicy.response.status, 200);
   assert.equal(agentPolicy.body.project.revision, 2);
@@ -228,6 +249,10 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(terminalModule.status, 200);
   assert.match(terminalModule.headers.get('content-type'), /javascript/);
   assert.match(await terminalModule.text(), /export\{.*Terminal/);
+  const fitModule = await fetch(`${listening.url}/vendor/addon-fit.mjs`);
+  assert.equal(fitModule.status, 200);
+  assert.match(fitModule.headers.get('content-type'), /javascript/);
+  assert.match(await fitModule.text(), /FitAddon/);
   const terminalStyles = await fetch(`${listening.url}/vendor/xterm.css`);
   assert.equal(terminalStyles.status, 200);
   assert.match(terminalStyles.headers.get('content-type'), /css/);

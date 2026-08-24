@@ -49,7 +49,16 @@ Running agents retain their immutable launch snapshot. The portal marks a snapsh
 
 ## Main-agent control workflow
 
-At launch, a main agent receives a short-lived, revocable bearer token and the path to a dependency-free helper. The token is accepted only by allowlisted policy and usage-observation endpoints and is rejected by ordinary WebSpider APIs.
+At launch, the main terminal receives a short-lived, revocable bearer token and the path to a dependency-free helper. A Codex process started inside that shell inherits both. The token is accepted only by allowlisted policy, usage-observation, agent-inventory, and cross-agent message endpoints and is rejected by ordinary WebSpider APIs.
+
+Discover and message another WebSpider-managed agent:
+
+```bash
+$WEBSPIDER_CONTROL agents list
+$WEBSPIDER_CONTROL agents send --agent AGENT_ID --message 'Check the benchmark and report the result.'
+```
+
+Use `--file PATH` instead of `--message` for a longer prompt. The hub records the main agent as the actual actor, delivers the target message in the user role, and queues or wakes the target through the normal durable delivery path.
 
 Inspect current values:
 

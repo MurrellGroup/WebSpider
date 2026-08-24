@@ -307,6 +307,8 @@ export class NodeDaemon extends EventEmitter {
       }
       case 'terminal.input':
         return this.supervisor.input(payload.terminal_id, Buffer.from(payload.data || '', 'base64'));
+      case 'terminal.resize':
+        return this.supervisor.resize(payload.terminal_id, payload.columns, payload.rows);
       case 'terminal.snapshot':
         return this.supervisor.snapshot(payload.terminal_id, payload.max_bytes);
       default:

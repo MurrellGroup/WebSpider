@@ -96,20 +96,20 @@ function parseAgentArguments(value) {
 
 export function resolveAgentProfile(options = {}) {
   const explicit = options['agent-command'];
-  const codex = explicit || findExecutable('codex');
-  if (codex) return {
-    id: explicit ? 'apf_primary' : 'apf_codex',
-    name: path.basename(codex).toLowerCase().includes('codex') ? 'Codex' : 'Primary agent',
+  if (explicit) return {
+    id: 'apf_primary',
+    name: path.basename(explicit).toLowerCase().includes('codex') ? 'Codex' : 'Primary terminal',
     adapterKind: 'pty',
-    executable: codex,
+    executable: explicit,
     arguments: parseAgentArguments(options['agent-args']),
   };
+  const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/bash';
   return {
     id: 'apf_shell',
-    name: 'Master Shell',
+    name: 'Main terminal',
     adapterKind: 'pty',
-    executable: '/bin/bash',
-    arguments: ['--noprofile', '--norc', '-i'],
+    executable: shell,
+    arguments: ['-l'],
   };
 }
 
@@ -181,7 +181,7 @@ async function runUp(options) {
   }
   process.stdout.write(`Owner token: ${listening.ownerToken}\n`);
   process.stdout.write(`Workspace: ${workspace}\n`);
-  process.stdout.write(`Primary agent: ${agentProfile.name}${agentProfile.id === 'apf_codex' ? ' (auto-detected)' : ''}\n`);
+  process.stdout.write(`Primary session: ${agentProfile.name}\n`);
   process.stdout.write(`Project defaults: academic-first, inferred from ${projectContext.inference}\n`);
   await waitForSignal(async () => {
     await node.stop();
@@ -329,7 +329,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.4.7\n\n`);
+  process.stdout.write(`WebSpider 0.4.8\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);

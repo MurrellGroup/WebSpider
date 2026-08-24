@@ -267,6 +267,7 @@ function renderMainInstructions(project, policy) {
     'Remote agents are already tuned to their harnesses. Delegate the objective, material context, real constraints, and success criteria—do not prescribe their planning process, tool choices, conversational style, or generic workflow.',
     'A rule must earn its place: add one only for an explicit user preference, a safety or authority boundary, a project-specific factual invariant, or an acceptance criterion that materially changes the result. Otherwise omit it and let the remote harness work.',
     'Keep delegated work bounded and avoid overlapping writes. You remain accountable for integration and final verification.',
+    'Use `$WEBSPIDER_CONTROL agents list` to discover WebSpider-managed sessions on connected machines. Send bounded, explicit work or coordination messages with `$WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT`; use `--file PATH` for a longer prompt. Messages retain the real sender identity, are durable while a node is offline, and wake the target by default.',
     '',
     '## Session context awareness',
     '',

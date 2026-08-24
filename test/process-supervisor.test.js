@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { NodeDatabase } from '../src/db/node-database.js';
 import { RootedFileService } from '../src/node/root-fs.js';
-import { ProcessSupervisor } from '../src/node/process-supervisor.js';
+import { ProcessSupervisor, sanitizeInput } from '../src/node/process-supervisor.js';
 
 function waitForCompletion(supervisor, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
@@ -29,6 +29,12 @@ async function waitUntil(predicate, timeoutMs = 5_000) {
   }
   throw new Error('Timed out waiting for condition');
 }
+
+test('terminal input preserves interactive control-key sequences', () => {
+  const input = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 127]);
+  assert.deepEqual(sanitizeInput(input), input);
+  assert.throws(() => sanitizeInput(Buffer.from([0])), (error) => error.code === 'WS_VALIDATION');
+});
 
 test('detached command writes a durable exit marker and terminal log', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-runtime-'));
@@ -102,6 +108,38 @@ test('a surviving PTY process is reconciled and controlled after node-daemon res
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
+});
+
+test('a browser terminal resize reaches the detached PTY', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-resize-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_resize', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_resize', kind: 'agent', agentInstanceId: 'agt_resize', terminalId: 'trm_resize',
+    rootId: 'awr_resize', argv: ['/bin/sh'],
+  });
+  let resized;
+  await waitUntil(() => {
+    resized = supervisor.resize('trm_resize', 101, 31);
+    return resized.resized;
+  });
+  assert.deepEqual(resized, { resized: true, columns: 101, rows: 31 });
+  supervisor.input('trm_resize', Buffer.from('stty size\nexit\n'));
+  assert.equal((await completion).exit_status, 0);
+  assert.match(supervisor.snapshot('trm_resize').text, /31 101/);
 });
 
 test('a replacement agent receives bounded recovery context from its prior runtime', async (t) => {
@@ -196,6 +234,8 @@ test('agent launch materializes the inherited project agreement without workspac
   assert.match(controlScript, /expected_revision/);
   assert.match(controlScript, /usage report --weekly-remaining PERCENT/);
   assert.match(controlScript, /request\('usage', 'POST', body\)/);
+  assert.match(controlScript, /agents list/);
+  assert.match(controlScript, /agents\/' \+ encodeURIComponent\(agent\) \+ '\/messages'/);
   assert.doesNotMatch(controlScript, /billing|subscription|api.?key|reset.?credit|add.?credit/i);
   assert.doesNotMatch(controlScript, /wsa_test/);
 });

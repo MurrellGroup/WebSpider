@@ -34,17 +34,33 @@ function stopGroup(pid, signal = 'SIGTERM') {
   }
 }
 
-function sanitizeInput(bytes, maxBytes = 64 * 1024) {
+export function sanitizeInput(bytes, maxBytes = 64 * 1024) {
   invariant(Buffer.isBuffer(bytes), 'WS_VALIDATION', 'Terminal input must be bytes.');
   invariant(bytes.length <= maxBytes, 'WS_REQUEST_TOO_LARGE', 'Terminal input exceeds the limit.', 413);
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  for (const character of text) {
-    const code = character.codePointAt(0);
-    if (code < 0x20 && !['\n', '\r', '\t', '\b', '\u001b', '\u0003', '\u0004', '\u007f'].includes(character)) {
-      throw new WebSpiderError('WS_VALIDATION', 'Terminal input contains a forbidden control character.', 400);
+  invariant(!text.includes('\0'), 'WS_VALIDATION', 'Terminal input contains a NUL byte.');
+  return Buffer.from(text);
+}
+
+function terminalProcesses(rootPid) {
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,tty='], { encoding: 'utf8' });
+  if (result.status !== 0) return [];
+  const processes = String(result.stdout || '').split('\n').map((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$/);
+    return match ? { pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), tty: match[4] } : null;
+  }).filter(Boolean);
+  const descendants = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const process of processes) {
+      if (descendants.has(process.ppid) && !descendants.has(process.pid)) {
+        descendants.add(process.pid);
+        changed = true;
+      }
     }
   }
-  return Buffer.from(text);
+  return processes.filter((process) => descendants.has(process.pid) && !['?', '??', '-'].includes(process.tty));
 }
 
 function usableCodexInstruction(home) {
@@ -110,10 +126,34 @@ function option(name) {
 async function main() {
   const [resource, action = 'show'] = process.argv.slice(2);
   const valid = (resource === 'policy' && ['show', 'patch'].includes(action))
-    || (resource === 'usage' && ['show', 'report'].includes(action));
+    || (resource === 'usage' && ['show', 'report'].includes(action))
+    || (resource === 'agents' && ['list', 'send'].includes(action));
   if (!valid) {
-    console.error('Usage: webspider-control policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
+  }
+  if (resource === 'agents') {
+    if (action === 'list') {
+      console.log(JSON.stringify(await request('agents'), null, 2));
+      return;
+    }
+    const agent = option('--agent');
+    const messageOption = option('--message');
+    const file = option('--file');
+    const wake = option('--wake') || 'ensure_running';
+    if (!agent || (!messageOption && !file) || (messageOption && file)) {
+      console.error('agents send requires --agent ID and exactly one of --message TEXT or --file PATH');
+      process.exit(2);
+    }
+    if (!['ensure_running', 'queue_only', 'interrupt'].includes(wake)) {
+      console.error('--wake must be ensure_running, queue_only, or interrupt');
+      process.exit(2);
+    }
+    const message = file ? (await import('node:fs')).readFileSync(file, 'utf8') : messageOption;
+    console.log(JSON.stringify(await request('agents/' + encodeURIComponent(agent) + '/messages', 'POST', {
+      message, wake_policy: wake,
+    }), null, 2));
+    return;
   }
   if (resource === 'policy' && action === 'show') {
     console.log(JSON.stringify(await request('policy'), null, 2));
@@ -223,9 +263,7 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
     fs.writeFileSync(recoveryPath, recoveryContext, { mode: 0o600 });
     output.WEBSPIDER_RECOVERY_CONTEXT = recoveryPath;
   }
-  if (/^codex(?:$|[-.])/i.test(path.basename(argv[0] || ''))) {
-    output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment);
-  }
+  output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment);
   return output;
 }
 
@@ -379,6 +417,26 @@ export class ProcessSupervisor extends EventEmitter {
       fs.closeSync(fd);
     }
     return { accepted_bytes: safe.length };
+  }
+
+  resize(terminalId, columns, rows) {
+    const runtime = this.database.getProcessByTerminal(terminalId);
+    invariant(runtime && runtime.state === 'running', 'WS_AGENT_NOT_READY', 'Terminal process is not running.', 409);
+    invariant(Number.isInteger(columns) && columns >= 20 && columns <= 500, 'WS_VALIDATION', 'Terminal columns must be between 20 and 500.');
+    invariant(Number.isInteger(rows) && rows >= 5 && rows <= 300, 'WS_VALIDATION', 'Terminal rows must be between 5 and 300.');
+    const processes = terminalProcesses(runtime.pid);
+    const tty = processes.at(-1)?.tty;
+    if (!tty) return { resized: false, columns, rows, reason: 'pty_not_ready' };
+    const device = tty.startsWith('/') ? tty : `/dev/${tty}`;
+    const args = process.platform === 'darwin'
+      ? ['-f', device, 'rows', String(rows), 'cols', String(columns)]
+      : ['-F', device, 'rows', String(rows), 'cols', String(columns)];
+    const resized = spawnSync('stty', args, { encoding: 'utf8' });
+    if (resized.status !== 0) return { resized: false, columns, rows, reason: 'stty_failed' };
+    for (const pgid of new Set(processes.map((item) => item.pgid))) {
+      try { process.kill(-pgid, 'SIGWINCH'); } catch { /* process may have exited during resize */ }
+    }
+    return { resized: true, columns, rows };
   }
 
   message(agentInstanceId, text) {

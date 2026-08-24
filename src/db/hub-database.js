@@ -13,6 +13,8 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'policy:write:system',
   'usage:read',
   'usage:write',
+  'agents:read',
+  'messages:write',
 ]);
 
 function decode(value, fallback = null) {
@@ -636,7 +638,7 @@ export class HubDatabase extends EventEmitter {
     invariant(agent?.orchestration_role === 'main', 'WS_FORBIDDEN', 'Only a main agent can receive behavior-control authority.', 403);
     invariant(Array.isArray(scopes) && scopes.length > 0, 'WS_VALIDATION', 'At least one control scope is required.');
     invariant(scopes.every((scope) => AGENT_CONTROL_ALLOWED_SCOPES.has(scope)), 'WS_FORBIDDEN',
-      'Agent control scopes are limited to policy editing and read-only account-usage observation.', 403);
+      'Agent control scopes are limited to the main-agent orchestration allowlist.', 403);
     const now = nowISO();
     const record = {
       id: makeId('act'),
