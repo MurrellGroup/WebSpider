@@ -8,16 +8,11 @@ User distributions are versioned GitHub Release assets built on native GitHub-ho
 
 ## Quick start
 
-The release bootstrap detects the machine, downloads the matching immutable release asset from `MurrellGroup/WebSpider`, verifies it against `SHA256SUMS`, installs the native per-user boot service, and starts WebSpider. Because the repository is private, use an authenticated GitHub CLI to obtain the bootstrap and export a token with read access for its two authenticated asset downloads:
+The release bootstrap detects the machine, downloads the matching immutable release asset from `MurrellGroup/WebSpider`, verifies it against `SHA256SUMS`, installs the native per-user boot service, and starts WebSpider:
 
 ```bash
-export GH_TOKEN="$(gh auth token)"
-installer_dir="$(mktemp -d)"
-gh release download --repo MurrellGroup/WebSpider --pattern WebSpider_Install.run --dir "$installer_dir"
-sh "$installer_dir/WebSpider_Install.run" --workspace "$PWD"
+curl -fsSL https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run | sh -s -- --workspace "$PWD"
 ```
-
-The bootstrap inherits `GH_TOKEN` and uses GitHub's authenticated release-asset API for the versioned installer and checksum downloads. If the repository is later made public, the bootstrap can instead be downloaded from `https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run` and run without a token.
 
 The same release also contains fully self-contained installers for direct or offline use:
 

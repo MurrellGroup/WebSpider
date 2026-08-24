@@ -24,10 +24,8 @@ test('GitHub Actions builds every supported native target before publishing a ta
   assert.match(workflow, /gh release create "\$GITHUB_REF_NAME"/);
   assert.match(workflow, /release\/SHA256SUMS/);
   assert.match(workflow, /release\/WebSpider_Install\.run/);
-  assert.match(readme, /gh release download --repo MurrellGroup\/WebSpider --pattern WebSpider_Install\.run/);
-  assert.match(readme, /--dir "\$installer_dir"/);
-  assert.doesNotMatch(readme, /--clobber/);
-  assert.match(readme, /export GH_TOKEN=/);
+  assert.match(readme, /curl -fsSL https:\/\/github\.com\/MurrellGroup\/WebSpider\/releases\/latest\/download\/WebSpider_Install\.run \| sh -s -- --workspace "\$PWD"/);
+  assert.doesNotMatch(readme, /GH_TOKEN|gh release download|--clobber/);
   assert.doesNotMatch(readme, /OWNER\/REPOSITORY/);
   assert.match(fs.readFileSync(path.join(repository, '.gitignore'), 'utf8'), /^dist\/$/m);
 });
