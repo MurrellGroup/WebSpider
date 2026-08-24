@@ -185,14 +185,25 @@ elif [ "$install_service" -eq 1 ]; then
   health_host=$listen_host
   case "$health_host" in 0.0.0.0|::) health_host=127.0.0.1 ;; esac
   attempt=0
+  hub_ready=0
   while [ "$attempt" -lt 60 ]; do
-    if [ -s "$state_dir/hub/owner.token" ] && "$install_root/runtime/bin/node" -e \
-      "fetch('http://$health_host:$listen_port/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+    if [ -s "$state_dir/hub/owner.token" ] && WEBSPIDER_EXPECTED_VERSION="$product_version" "$install_root/runtime/bin/node" -e \
+      "fetch('http://$health_host:$listen_port/healthz').then(async r=>{const x=await r.json();process.exit(r.ok&&x.version===process.env.WEBSPIDER_EXPECTED_VERSION?0:1)}).catch(()=>process.exit(1))"; then
+      hub_ready=1
       break
     fi
     attempt=$((attempt + 1))
     sleep 0.25
   done
+  if [ "$hub_ready" -ne 1 ]; then
+    echo "The hub service did not start WebSpider $product_version." >&2
+    if [ "$platform" = linux ]; then
+      echo "Logs: journalctl --user -u webspider.service -n 100 --no-pager" >&2
+    else
+      echo "Logs: $state_dir/logs/webspider.error.log" >&2
+    fi
+    exit 1
+  fi
   if [ -s "$state_dir/hub/owner.token" ]; then
     owner_token=$(sed -n '1p' "$state_dir/hub/owner.token")
     if [ -n "$public_base_url" ]; then

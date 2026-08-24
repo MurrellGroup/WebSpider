@@ -3,6 +3,7 @@ import { randomIdentifier } from './random.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
+const PORTAL_VERSION = '0.6.1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -120,6 +121,7 @@ function friendlyError(error) {
     WS_TERMINAL_LEASE_STALE: 'Terminal control moved to another session. Take control again if needed.',
     WS_ROOT_REVOKED: 'The workspace moved or changed identity. Reconnect the project root before continuing.',
     WS_PREVIEW_UNSAFE: 'This file is download-only because rendering it here could execute active content.',
+    WS_VERSION_MISMATCH: 'The portal and running hub are different versions. Restart the WebSpider hub service.',
   };
   return messages[error?.code] || error?.message || 'WebSpider could not complete that action.';
 }
@@ -172,6 +174,12 @@ function showApp() {
   $('#app-shell').classList.remove('hidden');
 }
 
+function showVersionMismatch(hubVersion) {
+  showApp();
+  closeTerminal();
+  $('#main-view').innerHTML = `<div class="page">${pageHeader('Restart required', 'The browser portal and running hub do not match')}<div class="page-content"><section class="panel"><div class="panel-header"><h2>Hub process is stale</h2><span>portal ${h(PORTAL_VERSION)} · hub ${h(hubVersion || 'unknown')}</span></div><div class="panel-body"><p class="muted">Restart the WebSpider service on the hub machine, then reload this page.</p><pre class="command-output">systemctl --user restart webspider.service</pre></div></section></div></div>`;
+}
+
 function closeTerminal() {
   state.terminalSocket?.close();
   state.terminalSocket = null;
@@ -205,6 +213,11 @@ function consumeAccessToken() {
 }
 
 async function loadData() {
+  const health = await api('/healthz');
+  if (health.version !== PORTAL_VERSION) {
+    showVersionMismatch(health.version);
+    throw Object.assign(new Error(`Portal ${PORTAL_VERSION} requires hub ${PORTAL_VERSION}; running hub is ${health.version || 'unknown'}.`), { code: 'WS_VERSION_MISMATCH' });
+  }
   const [summary, projects, agents, nodes, tasks, attention, notes] = await Promise.all([
     api('/api/v1/summary'),
     api('/api/v1/projects'),
@@ -272,12 +285,24 @@ function renderPortfolioRows() {
   }).join('');
 }
 
+function masterAgent() {
+  return state.agents.find((agent) => agent.orchestration_role === 'main')
+    || state.agents.find((agent) => agent.id === 'agt_master')
+    || null;
+}
+
+async function openMasterTerminal() {
+  const master = masterAgent();
+  if (master) return renderAgent(master.id, 'terminal');
+  return renderHome();
+}
+
 async function renderHome() {
   state.selectedProject = null;
   state.selectedAgent = null;
   closeTerminal();
   renderSidebar();
-  history.replaceState(null, '', '#/home');
+  history.replaceState(null, '', '#/overview');
   $('#main-view').innerHTML = `<div class="page">
     ${pageHeader('Master Spider', 'Research portfolio and persistent agent fabric', '<button class="primary" data-action="onboard-project">Add project</button><button data-action="refresh">Refresh</button>')}
     <div class="page-content">
@@ -370,6 +395,7 @@ async function renderAgent(agentId, tab = 'terminal') {
   $('#main-view').innerHTML = `<div class="page">
     ${pageHeader(agent.title || agent.profile_name, `${agent.project_name} · ${agent.node_name} · ${agent.work_status}${agent.status_summary ? ` · ${agent.status_summary}` : ''}`, `
       <span class="status-pill ${h(agent.state)}">${h(agent.state)}</span>
+      ${agent.orchestration_role === 'main' ? '<button class="mobile-primary" data-action="overview">Portfolio</button>' : ''}
       ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : `<details class="action-menu"><summary>Agent actions</summary><div><button class="danger" data-action="stop-agent">Stop agent</button></div></details>`}`)}
     <nav class="tabs">${agentTabs()}</nav>
     <div id="agent-content" class="page-content ${tab === 'terminal' ? 'terminal-page-content' : ''}"><div class="loading">Loading ${h(tab)}…</div></div>
@@ -884,12 +910,13 @@ function connectEvents() {
 
 async function routeFromHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  if (parts[0] === 'home') return renderHome();
+  if (parts[0] === 'overview') return renderHome();
+  if (parts[0] === 'home') return openMasterTerminal();
   if (parts[0] === 'notes') return renderNotes(parts[1] ? decodeURIComponent(parts[1]) : null);
   const agentIndex = parts.indexOf('agents');
   if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
   if (parts[0] === 'projects' && parts[1]) return renderProject(decodeURIComponent(parts[1]));
-  const mostRecentAgent = state.agents.slice().sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at))[0];
+  const mostRecentAgent = masterAgent() || state.agents.slice().sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at))[0];
   if (mostRecentAgent) return renderAgent(mostRecentAgent.id, 'terminal');
   if (state.projects[0]) return renderProject(state.projects[0].id);
   return renderHome();
@@ -953,7 +980,8 @@ document.addEventListener('click', async (event) => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (!action) return;
   try {
-    if (action === 'home') return renderHome();
+    if (action === 'master') return openMasterTerminal();
+    if (action === 'overview') return renderHome();
     if (action === 'onboard-project') return showProjectOnboarding();
     if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
     if (action === 'add-terminal') return showTerminalForm();
@@ -1142,7 +1170,8 @@ async function init() {
     await loadData();
     connectEvents();
     await routeFromHash();
-  } catch {
+  } catch (error) {
+    if (error?.code === 'WS_VERSION_MISMATCH') return;
     showLogin();
   }
 }

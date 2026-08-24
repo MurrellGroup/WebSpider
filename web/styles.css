@@ -368,6 +368,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .mobile-nav button span { color: #c7d0d8; font-size: 15px; }
   .page-header { padding: 0 14px; }
   .header-actions button:not(.mobile-primary) { display: none; }
+  .header-actions .action-menu { display: none; }
   .page-content { padding: 14px; }
   .summary-strip { grid-template-columns: repeat(2, 1fr); }
   .project-summary { grid-template-columns: repeat(2, 1fr); }

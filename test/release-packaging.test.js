@@ -66,3 +66,11 @@ test('release bootstrap is rendered with a fixed repository and version', (t) =>
   assert.match(source, /actual.*expected|expected.*actual/s);
   assert.equal(spawnSync('sh', ['-n', output]).status, 0);
 });
+
+test('native installer rejects a stale running hub version', () => {
+  const installer = fs.readFileSync(path.join(repository, 'install/installer-header.sh'), 'utf8');
+  assert.match(installer, /WEBSPIDER_EXPECTED_VERSION="\$product_version"/);
+  assert.match(installer, /x\.version===process\.env\.WEBSPIDER_EXPECTED_VERSION/);
+  assert.match(installer, /hub_ready=1/);
+  assert.match(installer, /hub service did not start WebSpider \$product_version/);
+});

@@ -403,7 +403,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.6.0\n\n`);
+  process.stdout.write(`WebSpider 0.6.1\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);
