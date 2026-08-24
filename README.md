@@ -12,8 +12,9 @@ The release bootstrap detects the machine, downloads the matching immutable rele
 
 ```bash
 export GH_TOKEN="$(gh auth token)"
-gh release download --repo MurrellGroup/WebSpider --pattern WebSpider_Install.run --clobber
-sh WebSpider_Install.run --workspace "$PWD"
+installer_dir="$(mktemp -d)"
+gh release download --repo MurrellGroup/WebSpider --pattern WebSpider_Install.run --dir "$installer_dir"
+sh "$installer_dir/WebSpider_Install.run" --workspace "$PWD"
 ```
 
 The bootstrap inherits `GH_TOKEN` and uses GitHub's authenticated release-asset API for the versioned installer and checksum downloads. If the repository is later made public, the bootstrap can instead be downloaded from `https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run` and run without a token.

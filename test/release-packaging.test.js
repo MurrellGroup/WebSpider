@@ -25,6 +25,8 @@ test('GitHub Actions builds every supported native target before publishing a ta
   assert.match(workflow, /release\/SHA256SUMS/);
   assert.match(workflow, /release\/WebSpider_Install\.run/);
   assert.match(readme, /gh release download --repo MurrellGroup\/WebSpider --pattern WebSpider_Install\.run/);
+  assert.match(readme, /--dir "\$installer_dir"/);
+  assert.doesNotMatch(readme, /--clobber/);
   assert.match(readme, /export GH_TOKEN=/);
   assert.doesNotMatch(readme, /OWNER\/REPOSITORY/);
   assert.match(fs.readFileSync(path.join(repository, '.gitignore'), 'utf8'), /^dist\/$/m);
