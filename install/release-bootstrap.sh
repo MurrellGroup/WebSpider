@@ -37,7 +37,7 @@ download() {
     if [ ! -s "$release_json" ]; then
       metadata_url="https://api.github.com/repos/$repository/releases/tags/v$version"
       if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 \
+        curl --http1.1 -fsSL --retry 5 --retry-delay 2 \
           --header "Accept: application/vnd.github+json" \
           --header "Authorization: Bearer $github_token" \
           --output "$release_json" "$metadata_url"
@@ -66,7 +66,7 @@ download() {
       exit 1
     fi
     if command -v curl >/dev/null 2>&1; then
-      curl -fL --retry 3 \
+      curl --http1.1 -fL --retry 5 --retry-delay 2 \
         --header "Accept: application/octet-stream" \
         --header "Authorization: Bearer $github_token" \
         --output "$destination" "$asset_api_url"
@@ -79,7 +79,7 @@ download() {
     return
   fi
   if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --output "$destination" "$source_url"
+    curl --http1.1 -fL --retry 5 --retry-delay 2 --output "$destination" "$source_url"
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$destination" "$source_url"
   else
