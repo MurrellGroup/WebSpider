@@ -10,6 +10,9 @@ state_dir=${WEBSPIDER_STATE_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/webspider
 listen=${WEBSPIDER_LISTEN:-"127.0.0.1:7340"}
 public_base_url=${WEBSPIDER_PUBLIC_BASE_URL:-}
 install_service=1
+node_hub=
+join_token=
+node_name=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -19,9 +22,12 @@ while [ "$#" -gt 0 ]; do
     --state-dir) state_dir=$2; shift 2 ;;
     --listen) listen=$2; shift 2 ;;
     --public-base-url) public_base_url=$2; shift 2 ;;
+    --node) node_hub=$2; shift 2 ;;
+    --token) join_token=$2; shift 2 ;;
+    --name) node_name=$2; shift 2 ;;
     --no-service) install_service=0; shift ;;
     -h|--help)
-      echo "Usage: sh WebSpider_Install_${product_version}.run [--workspace PATH] [--listen HOST:PORT] [--public-base-url URL] [--no-service]"
+      echo "Usage: sh WebSpider_Install_${product_version}.run [--workspace PATH] [--listen HOST:PORT] [--public-base-url URL] [--node HUB_URL --token JOIN_TOKEN [--name NAME]] [--no-service]"
       exit 0
       ;;
     *) echo "Unknown installer option: $1" >&2; exit 2 ;;
@@ -115,7 +121,24 @@ case ":$PATH:" in
     ;;
 esac
 
-if [ "$install_service" -eq 1 ]; then
+if [ -n "$node_hub" ]; then
+  node_state_dir="$state_dir/node"
+  if [ -n "$join_token" ]; then
+    if [ -s "$node_state_dir/config.json" ] && [ -s "$node_state_dir/identity.json" ]; then
+      set -- node attach --hub "$node_hub" --token "$join_token" --workspace "$workspace" --state-dir "$node_state_dir"
+    else
+      set -- node join --hub "$node_hub" --token "$join_token" --workspace "$workspace" --state-dir "$node_state_dir"
+      if [ -n "$node_name" ]; then set -- "$@" --name "$node_name"; fi
+    fi
+    "$bin_dir/webspider" "$@"
+  elif [ ! -s "$node_state_dir/config.json" ]; then
+    echo "A new worker installation requires --token with the one-time join token." >&2
+    exit 2
+  fi
+  if [ "$install_service" -eq 1 ]; then
+    "$bin_dir/webspider" service install-node --user --state-dir "$node_state_dir" --executable "$bin_dir/webspider"
+  fi
+elif [ "$install_service" -eq 1 ]; then
   set -- service install --user \
     --listen "$listen" \
     --workspace "$workspace" \
@@ -132,7 +155,10 @@ if [ -d "$previous" ]; then rm -rf "$previous"; fi
 echo "WebSpider $product_version installed."
 echo "Command: $bin_dir/webspider"
 echo "Workspace: $workspace"
-if [ "$install_service" -eq 1 ]; then
+if [ -n "$node_hub" ]; then
+  echo "Worker hub: $node_hub"
+  if [ "$install_service" -eq 1 ]; then echo "Worker service: installed and running"; fi
+elif [ "$install_service" -eq 1 ]; then
   echo "Boot service: installed and running"
   listen_host=${listen%:*}
   listen_port=${listen##*:}

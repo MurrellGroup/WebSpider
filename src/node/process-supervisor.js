@@ -63,6 +63,25 @@ function terminalProcesses(rootPid) {
   return processes.filter((process) => descendants.has(process.pid) && !['?', '??', '-'].includes(process.tty));
 }
 
+function enhancedKeyboardEnabled(outputLog) {
+  try {
+    const stat = fs.statSync(outputLog);
+    const length = Math.min(stat.size, 65_536);
+    const descriptor = fs.openSync(outputLog, 'r');
+    try {
+      const bytes = Buffer.alloc(length);
+      fs.readSync(descriptor, bytes, 0, length, stat.size - length);
+      let enabled = false;
+      for (const match of bytes.toString('utf8').matchAll(/\u001b\[(>|<)\d*u/g)) enabled = match[1] === '>';
+      return enabled;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch {
+    return false;
+  }
+}
+
 function usableCodexInstruction(home) {
   for (const filename of ['AGENTS.override.md', 'AGENTS.md']) {
     const candidate = path.join(home, filename);
@@ -127,10 +146,28 @@ async function main() {
   const [resource, action = 'show'] = process.argv.slice(2);
   const valid = (resource === 'policy' && ['show', 'patch'].includes(action))
     || (resource === 'usage' && ['show', 'report'].includes(action))
-    || (resource === 'agents' && ['list', 'send'].includes(action));
+    || (resource === 'agents' && ['list', 'send'].includes(action))
+    || (resource === 'portfolio' && action === 'list')
+    || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
+  }
+  if (resource === 'portfolio') {
+    console.log(JSON.stringify(await request('portfolio'), null, 2));
+    return;
+  }
+  if (resource === 'report') {
+    const status = option('--status');
+    const summaryOption = option('--summary');
+    const file = option('--file');
+    if (!['idle', 'working', 'blocked', 'completed'].includes(status) || (!summaryOption && !file) || (summaryOption && file)) {
+      console.error('report requires --status idle|working|blocked|completed and exactly one of --summary TEXT or --file PATH');
+      process.exit(2);
+    }
+    const summary = file ? (await import('node:fs')).readFileSync(file, 'utf8') : summaryOption;
+    console.log(JSON.stringify(await request('report', 'POST', { status, summary }), null, 2));
+    return;
   }
   if (resource === 'agents') {
     if (action === 'list') {
@@ -445,7 +482,12 @@ export class ProcessSupervisor extends EventEmitter {
     invariant(runtime && runtime.terminalId, 'WS_AGENT_NOT_READY', 'Agent terminal is not running.', 409);
     const normalized = text.replace(/\r\n?/g, '\n');
     invariant(!normalized.includes('\0'), 'WS_VALIDATION', 'Message contains forbidden content.');
-    return this.input(runtime.terminalId, Buffer.from(`${normalized}\n`));
+    const codexRuntime = path.basename(runtime.argv?.[0] || '').toLowerCase().includes('codex');
+    const enhanced = codexRuntime || enhancedKeyboardEnabled(runtime.outputLog);
+    const payload = enhanced
+      ? `\u001b[200~${normalized}\u001b[201~\u001b[13u`
+      : `${normalized}\n`;
+    return this.input(runtime.terminalId, Buffer.from(payload));
   }
 
   stopProcess(id, signal = 'SIGTERM') {

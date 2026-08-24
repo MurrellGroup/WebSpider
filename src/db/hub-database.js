@@ -15,6 +15,8 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'usage:write',
   'agents:read',
   'messages:write',
+  'portfolio:read',
+  'status:write:self',
 ]);
 
 function decode(value, fallback = null) {
@@ -112,6 +114,7 @@ function agentRow(row) {
     project_name: row.project_name,
     node_id: row.node_id,
     node_name: row.node_name,
+    title: row.title || row.profile_name,
     task_id: row.task_id,
     active_thread_id: row.active_thread_id,
     orchestration_role: row.orchestration_role || 'worker',
@@ -122,6 +125,9 @@ function agentRow(row) {
     created_at: row.created_at,
     last_activity_at: row.last_activity_at,
     stopped_at: row.stopped_at,
+    work_status: row.work_status || 'idle',
+    status_summary: row.status_summary || '',
+    status_updated_at: row.status_updated_at,
   };
 }
 
@@ -279,7 +285,8 @@ export class HubDatabase extends EventEmitter {
         display_name TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         consumed_at TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}'
       );
 
       CREATE TABLE IF NOT EXISTS agent_profiles (
@@ -306,7 +313,10 @@ export class HubDatabase extends EventEmitter {
         current_turn_id TEXT,
         created_at TEXT NOT NULL,
         last_activity_at TEXT NOT NULL,
-        stopped_at TEXT
+        stopped_at TEXT,
+        work_status TEXT NOT NULL DEFAULT 'idle',
+        status_summary TEXT NOT NULL DEFAULT '',
+        status_updated_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS agent_control_tokens (
@@ -357,6 +367,7 @@ export class HubDatabase extends EventEmitter {
         mount_policy TEXT NOT NULL,
         created_at TEXT NOT NULL,
         revoked_at TEXT,
+        node_root_id TEXT,
         UNIQUE(agent_instance_id, logical_name)
       );
 
@@ -369,7 +380,8 @@ export class HubDatabase extends EventEmitter {
         canonical_columns INTEGER NOT NULL DEFAULT 120,
         canonical_rows INTEGER NOT NULL DEFAULT 36,
         created_at TEXT NOT NULL,
-        exited_at TEXT
+        exited_at TEXT,
+        label TEXT NOT NULL DEFAULT 'Terminal'
       );
 
       CREATE TABLE IF NOT EXISTS terminal_leases (
@@ -579,6 +591,16 @@ export class HubDatabase extends EventEmitter {
     }
     const agentColumns = new Set(this.db.prepare('PRAGMA table_info(agent_instances)').all().map((column) => column.name));
     if (!agentColumns.has('orchestration_role')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN orchestration_role TEXT NOT NULL DEFAULT 'worker'");
+    if (!agentColumns.has('work_status')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN work_status TEXT NOT NULL DEFAULT 'idle'");
+    if (!agentColumns.has('status_summary')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN status_summary TEXT NOT NULL DEFAULT ''");
+    if (!agentColumns.has('status_updated_at')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN status_updated_at TEXT');
+    const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
+    if (!joinColumns.has('metadata_json')) this.db.exec("ALTER TABLE join_tokens ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
+    const rootColumns = new Set(this.db.prepare('PRAGMA table_info(workspace_roots)').all().map((column) => column.name));
+    if (!rootColumns.has('node_root_id')) this.db.exec('ALTER TABLE workspace_roots ADD COLUMN node_root_id TEXT');
+    this.db.exec('UPDATE workspace_roots SET node_root_id = id WHERE node_root_id IS NULL');
+    const terminalColumns = new Set(this.db.prepare('PRAGMA table_info(terminal_sessions)').all().map((column) => column.name));
+    if (!terminalColumns.has('label')) this.db.exec("ALTER TABLE terminal_sessions ADD COLUMN label TEXT NOT NULL DEFAULT 'Terminal'");
     this.db.prepare("UPDATE agent_instances SET orchestration_role = 'main' WHERE id = 'agt_master'").run();
     const snapshotColumns = new Set(this.db.prepare('PRAGMA table_info(policy_snapshots)').all().map((column) => column.name));
     if (!snapshotColumns.has('agent_role')) this.db.exec("ALTER TABLE policy_snapshots ADD COLUMN agent_role TEXT NOT NULL DEFAULT 'worker'");
@@ -635,10 +657,14 @@ export class HubDatabase extends EventEmitter {
 
   issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = 43_200_000) {
     const agent = this.getAgent(agentInstanceId);
-    invariant(agent?.orchestration_role === 'main', 'WS_FORBIDDEN', 'Only a main agent can receive behavior-control authority.', 403);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     invariant(Array.isArray(scopes) && scopes.length > 0, 'WS_VALIDATION', 'At least one control scope is required.');
     invariant(scopes.every((scope) => AGENT_CONTROL_ALLOWED_SCOPES.has(scope)), 'WS_FORBIDDEN',
-      'Agent control scopes are limited to the main-agent orchestration allowlist.', 403);
+      'Agent control scopes are limited to the orchestration allowlist.', 403);
+    if (agent.orchestration_role !== 'main') {
+      invariant(scopes.every((scope) => scope === 'status:write:self'), 'WS_FORBIDDEN',
+        'A worker agent can only report its own durable status.', 403);
+    }
     const now = nowISO();
     const record = {
       id: makeId('act'),
@@ -666,7 +692,7 @@ export class HubDatabase extends EventEmitter {
     const row = this.db.prepare(`SELECT t.*, a.orchestration_role FROM agent_control_tokens t
       JOIN agent_instances a ON a.id = t.agent_instance_id
       WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > ?`).get(sha256(token), nowISO());
-    if (!row || row.orchestration_role !== 'main') return null;
+    if (!row) return null;
     return {
       id: row.id,
       principal_id: `agent:${row.agent_instance_id}`,
@@ -771,7 +797,7 @@ export class HubDatabase extends EventEmitter {
     return { snapshot, weekly, stale: ageMs > staleAfterMs, age_ms: ageMs };
   }
 
-  createJoinToken(displayName, token, ttlMs = 600_000) {
+  createJoinToken(displayName, token, ttlMs = 600_000, metadata = {}) {
     const created = nowISO();
     const record = {
       id: makeId('jtk'),
@@ -780,8 +806,8 @@ export class HubDatabase extends EventEmitter {
       created_at: created,
     };
     this.db.prepare(`INSERT INTO join_tokens
-      (id, token_hash, display_name, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(record.id, sha256(token), record.display_name, record.expires_at, record.created_at);
+      (id, token_hash, display_name, expires_at, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(record.id, sha256(token), record.display_name, record.expires_at, record.created_at, encode(metadata));
     return record;
   }
 
@@ -800,8 +826,26 @@ export class HubDatabase extends EventEmitter {
         adapterInventory: metadata.adapter_inventory,
       });
       this.db.prepare('UPDATE join_tokens SET consumed_at = ? WHERE id = ?').run(now, row.id);
-      return node;
+      return { ...node, enrollment: decode(row.metadata_json, {}) };
     });
+  }
+
+  consumeJoinTokenForNode(token, nodeId) {
+    return this.transaction(() => {
+      const now = nowISO();
+      const row = this.db.prepare(`SELECT * FROM join_tokens
+        WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`).get(sha256(token), now);
+      invariant(row, 'WS_AUTH_REQUIRED', 'Join token is invalid, expired, or already used.', 401);
+      invariant(this.getNode(nodeId, true), 'WS_AUTH_REQUIRED', 'Unknown node.', 401);
+      this.db.prepare('UPDATE join_tokens SET consumed_at = ? WHERE id = ?').run(now, row.id);
+      return decode(row.metadata_json, {});
+    });
+  }
+
+  updateNodeCapabilities(id, capabilities) {
+    invariant(this.getNode(id, true), 'WS_NOT_FOUND', 'Node not found.', 404);
+    this.db.prepare('UPDATE nodes SET capabilities_json = ? WHERE id = ?').run(encode(capabilities || {}), id);
+    return this.getNode(id);
   }
 
   createNode({ id = makeId('nod'), displayName, publicKey, labels = {}, capabilities = {}, adapterInventory = [] }) {
@@ -1018,6 +1062,7 @@ export class HubDatabase extends EventEmitter {
     const terminalId = makeId('trm');
     const rootRecord = root ? {
       id: root.id || makeId('awr'),
+      node_root_id: root.node_root_id || root.id,
       logical_name: root.logical_name || 'workspace',
       access_mode: root.access_mode || 'read_only',
       expose_in_portal: root.expose_in_portal ?? true,
@@ -1043,10 +1088,10 @@ export class HubDatabase extends EventEmitter {
         .run(terminalId, id, nodeId, created);
       if (rootRecord) {
         this.db.prepare(`INSERT INTO workspace_roots
-          (id, agent_instance_id, project_id, node_id, logical_name, access_mode, expose_in_portal,
+          (id, node_root_id, agent_instance_id, project_id, node_id, logical_name, access_mode, expose_in_portal,
            allow_download, allow_search, allow_preview, symlink_policy, mount_policy, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(rootRecord.id, id, projectId, nodeId, rootRecord.logical_name, rootRecord.access_mode,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(rootRecord.id, rootRecord.node_root_id, id, projectId, nodeId, rootRecord.logical_name, rootRecord.access_mode,
             Number(rootRecord.expose_in_portal), Number(rootRecord.allow_download), Number(rootRecord.allow_search),
             Number(rootRecord.allow_preview), rootRecord.symlink_policy, rootRecord.mount_policy, created);
       }
@@ -1058,10 +1103,11 @@ export class HubDatabase extends EventEmitter {
 
   getAgent(id) {
     const row = this.db.prepare(`SELECT a.*, p.name AS profile_name, pr.name AS project_name,
-      n.display_name AS node_name FROM agent_instances a
+      n.display_name AS node_name, t.title AS title FROM agent_instances a
       JOIN agent_profiles p ON p.id = a.profile_id
       JOIN projects pr ON pr.id = a.project_id
-      JOIN nodes n ON n.id = a.node_id WHERE a.id = ?`).get(id);
+      JOIN nodes n ON n.id = a.node_id
+      LEFT JOIN threads t ON t.id = a.active_thread_id WHERE a.id = ?`).get(id);
     if (!row) return null;
     const value = agentRow(row);
     const terminal = this.db.prepare('SELECT id, state FROM terminal_sessions WHERE agent_instance_id = ? ORDER BY created_at LIMIT 1').get(id);
@@ -1096,6 +1142,18 @@ export class HubDatabase extends EventEmitter {
     const current = this.getAgent(id);
     this.appendEvent('agent', id, `agent.${state}.v1`, actor, id, { previous_state: previous.state, ...payload });
     return current;
+  }
+
+  updateAgentWorkStatus(id, status, summary, actor = `agent:${id}`) {
+    invariant(['idle', 'working', 'blocked', 'completed'].includes(status), 'WS_VALIDATION', 'Invalid worker status.');
+    invariant(typeof summary === 'string' && summary.trim().length > 0 && summary.length <= 4_000,
+      'WS_VALIDATION', 'A status summary of at most 4000 characters is required.');
+    invariant(this.getAgent(id), 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    const updated = nowISO();
+    this.db.prepare('UPDATE agent_instances SET work_status = ?, status_summary = ?, status_updated_at = ?, last_activity_at = ? WHERE id = ?')
+      .run(status, summary.trim(), updated, updated, id);
+    this.appendEvent('agent', id, 'agent.status.reported.v1', actor, id, { status, summary: summary.trim() });
+    return this.getAgent(id);
   }
 
   getThread(id) {
@@ -1262,6 +1320,7 @@ export class HubDatabase extends EventEmitter {
     if (!row) return null;
     return {
       id: row.id,
+      node_root_id: row.node_root_id || row.id,
       agent_instance_id: row.agent_instance_id,
       project_id: row.project_id,
       node_id: row.node_id,
@@ -1298,6 +1357,7 @@ export class HubDatabase extends EventEmitter {
       canonical_rows: row.canonical_rows,
       created_at: row.created_at,
       exited_at: row.exited_at,
+      label: row.label || 'Terminal',
     };
   }
 
@@ -1310,6 +1370,24 @@ export class HubDatabase extends EventEmitter {
       VALUES (?, ?, ?, 'task_shell', 'detached', ?)`)
       .run(id, agentInstanceId, agent.node_id, nowISO());
     return this.getTerminal(id);
+  }
+
+  createInteractiveTerminal(agentInstanceId, label = 'Shell') {
+    const agent = this.getAgent(agentInstanceId);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(typeof label === 'string' && label.trim().length > 0 && label.length <= 80,
+      'WS_VALIDATION', 'A terminal label of at most 80 characters is required.');
+    const id = makeId('trm');
+    this.db.prepare(`INSERT INTO terminal_sessions
+      (id, agent_instance_id, node_id, kind, state, label, created_at)
+      VALUES (?, ?, ?, 'shell_tab', 'detached', ?, ?)`)
+      .run(id, agentInstanceId, agent.node_id, label.trim(), nowISO());
+    return this.getTerminal(id);
+  }
+
+  listAgentTerminals(agentInstanceId) {
+    return this.db.prepare('SELECT id FROM terminal_sessions WHERE agent_instance_id = ? ORDER BY created_at')
+      .all(agentInstanceId).map((row) => this.getTerminal(row.id));
   }
 
   setTerminalState(id, state) {

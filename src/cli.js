@@ -2,12 +2,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomBytes } from 'node:crypto';
 import { Hub } from './hub/hub.js';
 import { NodeDaemon } from './node/node-daemon.js';
-import { ensurePrivateFile, generateNodeIdentity } from './lib/security.js';
+import { ensurePrivateFile, generateNodeIdentity, signNodeHello } from './lib/security.js';
 import { makeId } from './lib/ids.js';
 import { inferProjectContext } from './lib/project-policy.js';
-import { installUserService, uninstallUserService, userServiceStatus } from './lib/service-manager.js';
+import {
+  installNodeUserService,
+  installUserService,
+  nodeUserServiceStatus,
+  uninstallNodeUserService,
+  uninstallUserService,
+  userServiceStatus,
+} from './lib/service-manager.js';
 
 function parseArgs(argv) {
   const positional = [];
@@ -51,8 +59,13 @@ function loadOrCreateIdentity(nodeStateDir, nodeId = null) {
   return identity;
 }
 
-function writeNodeConfig(nodeStateDir, config) {
-  ensurePrivateFile(path.join(nodeStateDir, 'config.json'), JSON.stringify(config, null, 2));
+export function writeNodeConfig(nodeStateDir, config) {
+  fs.mkdirSync(nodeStateDir, { recursive: true, mode: 0o700 });
+  const destination = path.join(nodeStateDir, 'config.json');
+  const temporary = path.join(nodeStateDir, `.config.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  fs.writeFileSync(temporary, JSON.stringify(config, null, 2), { mode: 0o600, flag: 'wx' });
+  fs.renameSync(temporary, destination);
+  fs.chmodSync(destination, 0o600);
 }
 
 function loadNodeConfig(nodeStateDir) {
@@ -211,12 +224,22 @@ async function runHub(options) {
 function parseRoot(value) {
   const separator = value?.indexOf('=');
   if (!value || separator <= 0) throw new Error('--root must be ROOT_ID=/absolute/local/path');
-  return { id: value.slice(0, separator), path: path.resolve(value.slice(separator + 1)) };
+  const resolved = path.resolve(value.slice(separator + 1));
+  return { id: value.slice(0, separator), path: resolved, display_name: path.basename(resolved) || 'workspace' };
 }
 
 async function joinNode(options) {
   if (!options.hub || !options.token) throw new Error('node join requires --hub and --token');
   const nodeStateDir = path.resolve(options['state-dir'] || path.join(defaultStateDir(), 'node'));
+  if (options.root && options.workspace) throw new Error('Use either --root or --workspace, not both');
+  const roots = options.root
+    ? [parseRoot(options.root)]
+    : options.workspace
+      ? [{ id: makeId('awr'), path: path.resolve(options.workspace), display_name: path.basename(path.resolve(options.workspace)) || 'workspace' }]
+      : [];
+  for (const root of roots) {
+    if (!fs.statSync(root.path, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Workspace does not exist: ${root.path}`);
+  }
   const identity = loadOrCreateIdentity(nodeStateDir);
   const response = await fetch(new URL('/api/v1/nodes/enroll', options.hub), {
     method: 'POST',
@@ -226,16 +249,58 @@ async function joinNode(options) {
       name: options.name || os.hostname(),
       public_key: identity.publicKey,
       labels: { os: process.platform, arch: process.arch },
-      capabilities: { rooted_files: true, detached_processes: process.platform !== 'win32' },
+      capabilities: {
+        rooted_files: true,
+        detached_processes: process.platform !== 'win32',
+        root_ids: roots.map((root) => root.id),
+        roots: roots.map((root) => ({ id: root.id, name: root.display_name || 'workspace' })),
+        shell: process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
+        codex: Boolean(findExecutable('codex')),
+      },
     }),
   });
   if (!response.ok) throw new Error(`Enrollment failed: ${await response.text()}`);
   const enrollment = await response.json();
   identity.nodeId = enrollment.node_id;
   fs.writeFileSync(path.join(nodeStateDir, 'identity.json'), JSON.stringify(identity, null, 2), { mode: 0o600 });
-  const roots = options.root ? [parseRoot(options.root)] : [];
   writeNodeConfig(nodeStateDir, { hubURL: options.hub, displayName: enrollment.display_name, roots });
   logJSON({ enrolled: true, node_id: enrollment.node_id, state_dir: nodeStateDir, roots });
+}
+
+async function attachNodeRoot(options) {
+  if (!options.token) throw new Error('node attach requires --token');
+  const nodeStateDir = path.resolve(options['state-dir'] || path.join(defaultStateDir(), 'node'));
+  const identity = loadOrCreateIdentity(nodeStateDir);
+  const config = loadNodeConfig(nodeStateDir);
+  if (!options.workspace) throw new Error('node attach requires --workspace');
+  const workspace = path.resolve(options.workspace);
+  if (!fs.statSync(workspace, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`Workspace does not exist: ${workspace}`);
+  }
+  const root = { id: makeId('awr'), path: workspace, display_name: path.basename(workspace) || 'workspace' };
+  const timestamp = Date.now();
+  const nonce = randomBytes(18).toString('base64url');
+  const hub = options.hub || config.hubURL;
+  const response = await fetch(new URL('/api/v1/nodes/attach-root', hub), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token: options.token,
+      node_id: identity.nodeId,
+      timestamp,
+      nonce,
+      signature: signNodeHello(identity.privateKey, identity.nodeId, timestamp, nonce),
+      root: { id: root.id, name: root.display_name },
+    }),
+  });
+  if (!response.ok) throw new Error(`Project attachment failed: ${await response.text()}`);
+  const result = await response.json();
+  writeNodeConfig(nodeStateDir, {
+    ...config,
+    hubURL: hub,
+    roots: [...(config.roots || []).filter((candidate) => candidate.id !== root.id), root],
+  });
+  logJSON({ attached: true, node_id: identity.nodeId, root, agent_id: result.agent_id, state_dir: nodeStateDir });
 }
 
 async function runNode(options) {
@@ -320,7 +385,16 @@ function serviceCommand(action, options) {
     if (!options.user) throw new Error('service uninstall requires --user');
     return logJSON(uninstallUserService());
   }
-  throw new Error('service requires install --user, status, or uninstall --user');
+  if (action === 'install-node') {
+    if (!options.user) throw new Error('service install-node requires --user');
+    return logJSON(installNodeUserService({ executable, stateDir }));
+  }
+  if (action === 'status-node') return logJSON(nodeUserServiceStatus());
+  if (action === 'uninstall-node') {
+    if (!options.user) throw new Error('service uninstall-node requires --user');
+    return logJSON(uninstallNodeUserService());
+  }
+  throw new Error('service requires install --user, install-node --user, status, status-node, uninstall --user, or uninstall-node --user');
 }
 
 function BunLikeSpawn(executable) {
@@ -329,17 +403,21 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.4.9\n\n`);
+  process.stdout.write(`WebSpider 0.5.0\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);
-  process.stdout.write(`  webspider node join --hub URL --token TOKEN [--root ID=PATH]\n`);
+  process.stdout.write(`  webspider node join --hub URL --token TOKEN [--workspace PATH | --root ID=PATH]\n`);
+  process.stdout.write(`  webspider node attach --token TOKEN --workspace PATH [--hub URL] [--state-dir PATH]\n`);
   process.stdout.write(`  webspider node [--state-dir PATH]\n`);
   process.stdout.write(`  webspider token create --hub URL --owner-token TOKEN [--name NAME]\n`);
   process.stdout.write(`  webspider auth token [--state-dir PATH]\n`);
   process.stdout.write(`  webspider service install --user [--listen HOST:PORT] [--public-base-url URL] [--workspace PATH] [--state-dir PATH]\n`);
+  process.stdout.write(`  webspider service install-node --user [--state-dir PATH]\n`);
   process.stdout.write(`  webspider service status\n`);
+  process.stdout.write(`  webspider service status-node\n`);
   process.stdout.write(`  webspider service uninstall --user\n`);
+  process.stdout.write(`  webspider service uninstall-node --user\n`);
   process.stdout.write(`  webspider doctor [--state-dir PATH]\n`);
 }
 
@@ -349,6 +427,7 @@ export async function main(argv) {
   if (command === 'up') return runUp(options);
   if (command === 'hub') return runHub(options);
   if (command === 'node' && positional[1] === 'join') return joinNode(options);
+  if (command === 'node' && positional[1] === 'attach') return attachNodeRoot(options);
   if (command === 'node') return runNode(options);
   if (command === 'token' && positional[1] === 'create') return createJoinToken(options);
   if (command === 'auth' && positional[1] === 'token') return showOwnerToken(options);

@@ -212,7 +212,8 @@ function renderWorkerInstructions(project, policy) {
   const lines = [
     ...projectHeader(project, 'WebSpider task boundary'),
     '',
-    'Use your native harness defaults for planning, tool choice, execution, and reporting. The main agent supplies the objective, material constraints, and acceptance criteria; do not infer additional workflow rules.',
+    'Use your native harness defaults for planning, tool choice, and execution. The main agent supplies the objective, material constraints, and acceptance criteria; do not infer additional workflow rules.',
+    'You are a persistent WebSpider worker. At the start of delegated work, run `$WEBSPIDER_CONTROL report --status working --summary TEXT`. Report meaningful blockers immediately with `--status blocked`. When the requested outcome is validated, report `--status completed` with the result, validation evidence, and material remaining risks. These reports update the project portfolio and notify the master agent; do not substitute routine chatter for useful work.',
   ];
   const scholarly = scholarlyInvariants(policy);
   if (scholarly.length) {
@@ -268,6 +269,7 @@ function renderMainInstructions(project, policy) {
     'A rule must earn its place: add one only for an explicit user preference, a safety or authority boundary, a project-specific factual invariant, or an acceptance criterion that materially changes the result. Otherwise omit it and let the remote harness work.',
     'Keep delegated work bounded and avoid overlapping writes. You remain accountable for integration and final verification.',
     'Use `$WEBSPIDER_CONTROL agents list` to discover WebSpider-managed sessions on connected machines. Send bounded, explicit work or coordination messages with `$WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT`; use `--file PATH` for a longer prompt. Messages retain the real sender identity, are durable while a node is offline, and wake the target by default.',
+    'Use `$WEBSPIDER_CONTROL portfolio list` to review every project, worker runtime, durable work status, latest report, and last activity. Treat stale or blocked projects as coordination work: request a concise update, resolve blockers you can resolve, and keep the user focused on decisions that actually require them.',
     '',
     '## Session context awareness',
     '',
@@ -288,6 +290,7 @@ function renderMainInstructions(project, policy) {
     'Examples:',
     '',
     '- `$WEBSPIDER_CONTROL policy show`',
+    '- `$WEBSPIDER_CONTROL portfolio list`',
     '- `$WEBSPIDER_CONTROL policy patch --scope project --json \'{"scholarly_work_product":{"citations":"verify against primary sources"}}\' --reason \'User explicitly requested stricter citation defaults\'`',
     '- `$WEBSPIDER_CONTROL usage show`',
     '- `$WEBSPIDER_CONTROL usage report --weekly-remaining 60 --source codex-status`',

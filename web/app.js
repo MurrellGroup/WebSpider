@@ -16,6 +16,8 @@ const state = {
   attention: [],
   selectedProject: null,
   selectedAgent: null,
+  terminals: [],
+  selectedTerminalId: null,
   tab: 'terminal',
   eventSocket: null,
   terminalSocket: null,
@@ -118,6 +120,43 @@ function friendlyError(error) {
   return messages[error?.code] || error?.message || 'WebSpider could not complete that action.';
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function openModal(content) {
+  const modal = $('#modal');
+  $('#modal-content').innerHTML = content;
+  modal.showModal();
+  $('input, textarea, select', modal)?.focus();
+}
+
+function closeModal() {
+  $('#modal')?.close();
+}
+
+function workerInstallCommand(invite, nodeName) {
+  const bootstrap = 'https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run';
+  return `i=$(mktemp);curl --http1.1 -fL --retry 5 -o "$i" ${bootstrap}&&sh "$i" --node ${shellQuote(invite.hub_url)} --token ${shellQuote(invite.token)} --workspace "$PWD" --name ${shellQuote(nodeName)}`;
+}
+
+function showWorkerCommand({ project, invite, hub_url: hubURL }, nodeName) {
+  openModal(`<div class="modal-header"><div><h2>${h(project.name)}</h2><p>Run once inside the project directory on the worker machine.</p></div><button data-action="close-modal" title="Close">×</button></div><div class="modal-body"><textarea id="worker-command" class="command-output" readonly>${h(workerInstallCommand({ ...invite, hub_url: hubURL }, nodeName))}</textarea><div class="modal-actions"><span>Invite expires ${h(formatTime(invite.expires_at, true))}</span><button class="primary" data-action="copy-worker-command">Copy command</button></div></div>`);
+}
+
+function showProjectOnboarding() {
+  openModal(`<form id="onboard-project-form"><div class="modal-header"><div><h2>Add research project</h2><p>Create the project and its persistent worker.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Project name<input name="project_name" required maxlength="120"></label><label>Worker machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><label>Description<textarea name="description" maxlength="1000"></textarea></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create project</button></div></div></form>`);
+}
+
+function showProjectConnection(projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  openModal(`<form id="connect-project-form" data-project-id="${h(projectId)}"><div class="modal-header"><div><h2>Connect ${h(project?.name || 'project')}</h2><p>Install its persistent worker on the machine that owns the project directory.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Worker machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create worker command</button></div></div></form>`);
+}
+
+function showTerminalForm() {
+  openModal(`<form id="add-terminal-form"><div class="modal-header"><div><h2>New terminal</h2><p>${h(state.selectedAgent?.node_name || '')}</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Tab name<input name="label" required maxlength="80" value="Monitor"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Open terminal</button></div></div></form>`);
+}
+
 function showLogin() {
   $('#login-view').classList.remove('hidden');
   $('#app-shell').classList.add('hidden');
@@ -190,8 +229,8 @@ function renderSidebar() {
       <button class="project-heading ${state.selectedProject?.id === project.id ? 'selected' : ''}" data-project-id="${h(project.id)}">${h(project.name)}</button>
       ${agents.map((agent) => `<button class="agent-link ${state.selectedAgent?.id === agent.id ? 'selected' : ''}" data-agent-id="${h(agent.id)}">
         <i class="state-dot ${h(agent.state)}"></i>
-        <span class="name">${h(agent.profile_name)}</span>
-        <span class="adapter">${h(agent.state)}</span>
+        <span class="name">${h(agent.title || agent.profile_name)}</span>
+        <span class="adapter">${h(agent.work_status !== 'idle' ? agent.work_status : agent.state)}</span>
       </button>`).join('') || '<div class="muted" style="font-size:10px;padding:8px 27px">No agents</div>'}
     </section>`;
   }).join('');
@@ -215,6 +254,17 @@ function summaryItem(value, label) {
   return `<div class="summary-item"><strong>${Number(value || 0)}</strong><span>${h(label)}</span></div>`;
 }
 
+function renderPortfolioRows() {
+  const projects = state.projects.filter((project) => project.id !== 'prj_local' || state.projects.length === 1);
+  if (!projects.length) return '<div class="empty"><div><strong>No research projects yet</strong><p>Add the first project from the sidebar.</p></div></div>';
+  return projects.map((project) => {
+    const agents = state.agents.filter((agent) => agent.project_id === project.id);
+    const worker = agents.find((agent) => agent.orchestration_role === 'worker') || agents[0];
+    const status = worker?.work_status || (worker ? worker.state : 'not connected');
+    return `<button class="portfolio-row" data-project-id="${h(project.id)}"><i class="state-dot ${h(worker?.state || 'offline')}"></i><span><strong>${h(project.name)}</strong><small>${h(worker?.status_summary || (worker ? `${worker.node_name} · ${worker.state}` : 'Worker not connected'))}</small></span><span class="status-pill ${h(status)}">${h(status)}</span></button>`;
+  }).join('');
+}
+
 async function renderHome() {
   state.selectedProject = null;
   state.selectedAgent = null;
@@ -222,7 +272,7 @@ async function renderHome() {
   renderSidebar();
   history.replaceState(null, '', '#/home');
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader('Master Spider', 'Durable intent, live execution across the fabric', '<button data-action="refresh">Refresh state</button>')}
+    ${pageHeader('Master Spider', 'Research portfolio and persistent agent fabric', '<button class="primary" data-action="onboard-project">Add project</button><button data-action="refresh">Refresh</button>')}
     <div class="page-content">
       <div class="summary-strip">
         ${summaryItem(state.summary.projects_active, 'active projects')}
@@ -231,7 +281,8 @@ async function renderHome() {
         ${summaryItem(state.summary.awaiting_approval, 'awaiting attention')}
         ${summaryItem(state.summary.nodes_offline, 'nodes offline')}
       </div>
-      <div class="grid-2">
+      <section class="panel portfolio-panel"><div class="panel-header"><h2>Research portfolio</h2><span>${state.projects.length} projects</span></div><div class="portfolio-list">${renderPortfolioRows()}</div></section>
+      <div class="grid-2 home-grid">
         <section class="panel"><div class="panel-header"><h2>Fabric activity</h2><span>durable event stream</span></div><div id="home-events" class="panel-body event-list"><div class="loading">Loading events…</div></div></section>
         <div>
           <section class="panel"><div class="panel-header"><h2>Security posture</h2><span>explicit scopes</span></div><div class="panel-body security-card">
@@ -269,17 +320,17 @@ async function renderProject(projectId) {
   const running = tasks.filter((task) => ['running', 'runnable'].includes(task.state));
   const completed = tasks.filter((task) => task.state === 'succeeded');
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader(project.name, project.description || 'WebSpider infers routine detail from the workspace and project history', primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open agent</button>` : '')}
+    ${pageHeader(project.name, project.description || 'Persistent project workspace and worker state', `${primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open agent</button>` : `<button class="primary" data-action="connect-project" data-project-id="${h(project.id)}">Connect worker</button>`}`)}
     <div class="page-content project-workspace">
       <section class="steer-card">
         <div><p class="eyebrow">STEER THE OUTCOME</p><h2>What should move forward?</h2><p>Give the goal at the level you care about. The agent inherits the project agreement, inspects existing work, and resolves routine implementation choices.</p></div>
-        ${primaryAgent ? `<form id="project-message-form" data-target-agent-id="${h(primaryAgent.id)}" data-thread-id="${h(primaryAgent.active_thread_id)}"><textarea name="message" required placeholder="For example: turn the current results into a submission-ready manuscript draft…"></textarea><div><span>Safe defaults and validation are automatic.</span><button type="submit" class="primary">Start or continue</button></div></form>` : '<div class="empty compact"><div><strong>No project agent yet</strong><p>Connect a project-capable node; WebSpider will apply the project defaults automatically when an agent is created.</p></div></div>'}
+        ${primaryAgent ? `<form id="project-message-form" data-target-agent-id="${h(primaryAgent.id)}" data-thread-id="${h(primaryAgent.active_thread_id)}"><textarea name="message" required placeholder="For example: turn the current results into a submission-ready manuscript draft…"></textarea><div><span>${h(primaryAgent.work_status || 'idle')}${primaryAgent.status_summary ? ` · ${h(primaryAgent.status_summary)}` : ''}</span><button type="submit" class="primary">Start or continue</button></div></form>` : '<div class="empty compact"><div><strong>No worker connected</strong><p>Connect a machine from this project header.</p></div></div>'}
       </section>
       <div class="project-summary">
         ${summaryItem(agents.length, 'agents')}${summaryItem(running.length, 'active tasks')}${summaryItem(completed.length, 'completed tasks')}${summaryItem(artifacts.artifacts.length, 'kept artifacts')}
       </div>
       <div class="grid-2 project-grid">
-        <section class="panel"><div class="panel-header"><h2>Current work</h2><span>${running.length ? `${running.length} active` : 'nothing requires setup'}</span></div><div class="panel-body task-list">${renderTaskRows(tasks.slice(0, 8))}</div></section>
+        <section class="panel"><div class="panel-header"><h2>Project agents</h2><span>${agents.length} sessions</span></div><div class="portfolio-list">${agents.map((agent) => `<button class="portfolio-row" data-agent-id="${h(agent.id)}"><i class="state-dot ${h(agent.state)}"></i><span><strong>${h(agent.title || agent.profile_name)}</strong><small>${h(agent.status_summary || `${agent.node_name} · ${agent.state}`)}</small></span><span class="status-pill ${h(agent.work_status)}">${h(agent.work_status)}</span></button>`).join('') || '<div class="empty compact"><div><strong>Waiting for worker</strong></div></div>'}</div></section>
         <section class="panel policy-card"><div class="panel-header"><h2>Main-agent defaults</h2><span>system r${h(policy.system_revision)} · project r${h(policy.revision)}</span></div><div class="panel-body"><div class="policy-line"><i>1</i><div><strong>Infer routine details</strong><p>${h(policy.summary.autonomy)}</p></div></div><div class="policy-line"><i>2</i><div><strong>Produce the work product</strong><p>${h(policy.summary.work_product)}</p></div></div><div class="policy-line"><i>3</i><div><strong>Respect worker harnesses</strong><p>${h(policy.summary.delegation)}</p></div></div><div class="policy-line"><i>4</i><div><strong>Editable when you ask</strong><p>${h(policy.summary.behavior_control)} Tell the main agent what outcome you want changed; no settings form is required.</p></div></div><div class="policy-line"><i>5</i><div><strong>Weekly account allowance</strong><p>${h(accountUsageLabel(accountUsage))}</p><p>${h(policy.summary.account_quota)}</p></div></div><details class="policy-details"><summary>View the main-agent agreement</summary><div class="markdown-body">${renderMarkdown(policy.rendered_instructions)}</div></details></div></section>
       </div>
     </div>
@@ -310,7 +361,7 @@ async function renderAgent(agentId, tab = 'terminal') {
   const agent = state.selectedAgent;
   const resumable = ['stopped', 'failed', 'hibernated'].includes(agent.state);
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader(agent.profile_name, `${agent.node_name} · ${agent.profile_name} · last activity ${formatTime(agent.last_activity_at)}`, `
+    ${pageHeader(agent.title || agent.profile_name, `${agent.project_name} · ${agent.node_name} · ${agent.work_status}${agent.status_summary ? ` · ${agent.status_summary}` : ''}`, `
       <span class="status-pill ${h(agent.state)}">${h(agent.state)}</span>
       ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : `<details class="action-menu"><summary>Agent actions</summary><div><button class="danger" data-action="stop-agent">Stop agent</button></div></details>`}`)}
     <nav class="tabs">${agentTabs()}</nav>
@@ -506,9 +557,20 @@ function fitTerminal() {
 
 async function renderTerminal(agent) {
   state.terminalText = '';
+  const data = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/terminals`);
+  state.terminals = data.terminals;
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId)
+    || state.terminals.find((candidate) => candidate.id === agent.terminal_id)
+    || state.terminals[0];
+  if (!terminal) {
+    $('#agent-content').innerHTML = '<div class="empty"><div><strong>No terminal available</strong></div></div>';
+    return;
+  }
+  state.selectedTerminalId = terminal.id;
   if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(agent.terminal_id)}</span><div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div><button class="secondary" id="terminal-control" data-action="take-control">Connecting</button></div>
+    <div class="terminal-session-tabs">${state.terminals.map((item) => `<button class="${item.id === terminal.id ? 'selected' : ''}" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i>${h(item.kind === 'primary_agent' ? agent.title || 'Agent' : item.label)}</button>`).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal">+</button>${terminal.kind === 'shell_tab' ? '<button class="terminal-close" data-action="close-terminal" title="Close terminal">×</button>' : ''}</div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span><div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div><button class="secondary" id="terminal-control" data-action="take-control">Connecting</button></div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
   </section>`;
   applyTerminalView();
@@ -543,7 +605,7 @@ async function renderTerminal(agent) {
   const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
   state.terminalSequence = 0;
-  const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(agent.terminal_id)}?attachment=${encodeURIComponent(attachment)}`);
+  const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminal.id)}?attachment=${encodeURIComponent(attachment)}`);
   state.terminalSocket = socket;
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
@@ -780,10 +842,16 @@ document.addEventListener('click', async (event) => {
     }
     return;
   }
-  const projectButton = event.target.closest('[data-project-id]');
+  const projectButton = event.target.closest('[data-project-id]:not([data-action])');
   if (projectButton) return renderProject(projectButton.dataset.projectId);
   const agentButton = event.target.closest('[data-agent-id]');
   if (agentButton) return renderAgent(agentButton.dataset.agentId, 'terminal');
+  const terminalButton = event.target.closest('[data-terminal-id]');
+  if (terminalButton && state.selectedAgent) {
+    state.selectedTerminalId = terminalButton.dataset.terminalId;
+    closeTerminal();
+    return renderTerminal(state.selectedAgent);
+  }
   const terminalView = event.target.closest('[data-terminal-view]');
   if (terminalView) {
     state.terminalView = terminalView.dataset.terminalView;
@@ -815,6 +883,19 @@ document.addEventListener('click', async (event) => {
   if (!action) return;
   try {
     if (action === 'home') return renderHome();
+    if (action === 'onboard-project') return showProjectOnboarding();
+    if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
+    if (action === 'add-terminal') return showTerminalForm();
+    if (action === 'close-modal') return closeModal();
+    if (action === 'copy-worker-command') {
+      await navigator.clipboard.writeText($('#worker-command').value);
+      return toast('Worker command copied');
+    }
+    if (action === 'close-terminal') {
+      await api(`/api/v1/terminals/${encodeURIComponent(state.selectedTerminalId)}:stop`, { method: 'POST' });
+      state.selectedTerminalId = state.selectedAgent.terminal_id;
+      return renderTerminal(state.selectedAgent);
+    }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
     if (action === 'show-nodes') return renderNodes();
     if (action === 'show-audit') return renderAudit();
@@ -841,6 +922,45 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'onboard-project-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    try {
+      const result = await api('/api/v1/projects/onboard', {
+        method: 'POST',
+        body: { project_name: form.get('project_name'), node_name: form.get('node_name'), description: form.get('description') },
+      });
+      await loadData();
+      showWorkerCommand(result, form.get('node_name'));
+    } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
+  if (event.target.id === 'connect-project-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    try {
+      const invite = await api('/api/v1/nodes/join-tokens', {
+        method: 'POST',
+        body: { project_id: event.target.dataset.projectId, name: form.get('node_name') },
+      });
+      const project = state.projects.find((item) => item.id === event.target.dataset.projectId);
+      showWorkerCommand({ project, invite, hub_url: location.origin }, form.get('node_name'));
+    } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
+  if (event.target.id === 'add-terminal-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    try {
+      const terminal = await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/terminals`, {
+        method: 'POST', body: { label: form.get('label') },
+      });
+      closeModal();
+      state.selectedTerminalId = terminal.id;
+      return renderTerminal(state.selectedAgent);
+    } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
   if (event.target.id === 'login-form') {
     event.preventDefault();
     $('#login-error').textContent = '';

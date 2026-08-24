@@ -41,7 +41,7 @@
           <span class="nav-icon">⌁</span>
           <span><strong>Master Spider</strong><small>Operational overview</small></span>
         </button>
-        <div class="sidebar-label"><span>Projects &amp; agents</span><button data-action="refresh" title="Refresh">↻</button></div>
+        <div class="sidebar-label"><span>Projects &amp; agents</span><span><button data-action="onboard-project" title="Add project">+</button><button data-action="refresh" title="Refresh">↻</button></span></div>
         <nav id="project-tree" class="project-tree" aria-label="Projects and agents"></nav>
         <footer class="sidebar-footer">
           <button data-action="show-nodes"><span>◫</span> Nodes</button>
@@ -64,5 +64,6 @@
     </div>
 
     <div id="toast" class="toast hidden" role="status"></div>
+    <dialog id="modal" class="modal"><div id="modal-content"></div></dialog>
   </body>
 </html>

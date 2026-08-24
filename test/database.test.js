@@ -135,9 +135,11 @@ test('system defaults remain layered beneath project overrides with optimistic r
   );
 });
 
-test('behavior-control tokens are issued only to the main agent and are revocable', (t) => {
+test('worker tokens are self-report-only while main control tokens remain revocable', (t) => {
   const { database, agent } = databaseFixture(t);
   assert.equal(agent.orchestration_role, 'worker');
+  database.issueAgentControlToken(agent.id, 'wsa_worker_status', ['status:write:self']);
+  assert.deepEqual(database.getAgentControlToken('wsa_worker_status').scopes, ['status:write:self']);
   assert.throws(
     () => database.issueAgentControlToken(agent.id, 'wsa_worker', ['policy:read']),
     (error) => error.code === 'WS_FORBIDDEN',

@@ -5,7 +5,7 @@
 WebSpider separates orchestration authority from worker execution behavior.
 
 - The **main agent** may change project or system defaults, but only after an explicit user request.
-- A **worker agent** receives no behavior-control credential.
+- A **worker agent** receives only a self-status credential, never behavior-control or orchestration authority.
 - Remote agents keep their native harness defaults for planning, tools, execution, and reporting.
 - WebSpider adds a remote-agent rule only when it protects an explicit user preference, a safety or authority boundary, a project-specific factual invariant, or a result-changing acceptance criterion.
 
@@ -21,7 +21,7 @@ Every launch still receives an immutable instruction snapshot, but the snapshot 
 | Scholarly work-product defaults | Only result-critical scholarly invariants |
 | Delegation and integration accountability | Native harness explicitly preserved |
 | Session-context and weekly-allowance awareness | No generic planning or tool rules |
-| Explicit-request-only behavior control | No control instructions or credential |
+| Explicit-request-only behavior control | Self-status reporting only |
 
 Codex continues to discover the resulting instructions through its normal layered `AGENTS.md` mechanism. WebSpider composes inherited user guidance with the role-specific snapshot in a private managed `CODEX_HOME`; it does not modify the workspace or the user's original Codex home.
 
@@ -49,7 +49,13 @@ Running agents retain their immutable launch snapshot. The portal marks a snapsh
 
 ## Main-agent control workflow
 
-At launch, the main terminal receives a short-lived, revocable bearer token and the path to a dependency-free helper. A Codex process started inside that shell inherits both. The token is accepted only by allowlisted policy, usage-observation, agent-inventory, and cross-agent message endpoints and is rejected by ordinary WebSpider APIs.
+At launch, the main terminal receives a short-lived, revocable bearer token and the path to a dependency-free helper. A Codex process started inside that shell inherits both. The token is accepted only by allowlisted portfolio, policy, usage-observation, agent-inventory, and cross-agent message endpoints and is rejected by ordinary WebSpider APIs.
+
+Review the complete research portfolio before coordinating work:
+
+```bash
+$WEBSPIDER_CONTROL portfolio list
+```
 
 Discover and message another WebSpider-managed agent:
 
@@ -77,7 +83,15 @@ $WEBSPIDER_CONTROL policy patch \
 
 Use `--scope system` only when the user's request clearly applies across projects. The helper fetches the current revision and sends it with the patch. Every accepted edit records the actual agent actor, scope, prior and new revision, and supplied user-request reason in the audit log.
 
-The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Independent WebSpider worker instances never receive one. A harness-native subagent is a thread inside the main runtime rather than an independently authenticated WebSpider principal; it can inherit the parent process environment, so the role-scope instruction explicitly forbids using the helper from a child thread. PTY fallback cannot cryptographically distinguish those internal threads.
+The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Each independent worker receives a separate helper token restricted to `status:write:self` and reports meaningful transitions:
+
+```bash
+$WEBSPIDER_CONTROL report --status working --summary 'Running the preregistered benchmark.'
+$WEBSPIDER_CONTROL report --status blocked --summary 'GPU allocation is unavailable; CPU fallback changes the deadline.'
+$WEBSPIDER_CONTROL report --status completed --file result-summary.txt
+```
+
+The hub derives the worker identity from the token, persists the report, updates the portfolio, and sends a durable notification to the master. A harness-native subagent is a thread inside the main runtime rather than an independently authenticated WebSpider principal; it can inherit the parent process environment, so the role-scope instruction explicitly forbids using the helper from a child thread. PTY fallback cannot cryptographically distinguish those internal threads.
 
 ## Context, account allowance, and time awareness
 

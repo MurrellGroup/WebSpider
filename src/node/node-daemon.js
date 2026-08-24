@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { NodeDatabase } from '../db/node-database.js';
@@ -7,6 +8,16 @@ import { ProcessSupervisor } from './process-supervisor.js';
 import { makeId, nowISO } from '../lib/ids.js';
 import { signNodeHello } from '../lib/security.js';
 import { WebSpiderError } from '../lib/errors.js';
+
+function executableAvailable(name) {
+  for (const directory of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    try {
+      fs.accessSync(path.join(directory, name), fs.constants.X_OK);
+      return true;
+    } catch { /* try the next PATH entry */ }
+  }
+  return false;
+}
 
 function websocketURL(hubURL) {
   const url = new URL('/api/v1/node/connect', hubURL);
@@ -179,7 +190,10 @@ export class NodeDaemon extends EventEmitter {
       rooted_files: true,
       detached_processes: process.platform !== 'win32',
       terminal_transport: 'script+fifo',
+      shell: process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
+      codex: executableAvailable('codex'),
       root_ids: this.roots.map((root) => root.id),
+      roots: this.roots.map((root) => ({ id: root.id, name: root.display_name || 'workspace' })),
     };
   }
 
@@ -294,6 +308,24 @@ export class NodeDaemon extends EventEmitter {
           environment: payload.environment,
         });
         return { runtime };
+      }
+      case 'terminal.start-shell': {
+        const existing = this.database.getProcessByTerminal(payload.terminal_id);
+        if (existing) return { runtime: existing, duplicate: true };
+        const runtime = this.supervisor.launch({
+          kind: 'shell',
+          agentInstanceId: payload.agent_instance_id,
+          terminalId: payload.terminal_id,
+          rootId: payload.root_id,
+          argv: payload.argv,
+          environment: payload.environment,
+        });
+        return { runtime };
+      }
+      case 'terminal.stop': {
+        const runtime = this.database.getProcessByTerminal(payload.terminal_id);
+        if (!runtime) return { state: 'stopped', already_stopped: true };
+        return this.supervisor.stopProcess(runtime.id, payload.signal || 'SIGTERM');
       }
       case 'task.cancel': {
         const runtime = this.database.listProcesses().find((item) => item.taskId === payload.task_id);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
-import { generateNodeIdentity } from '../src/lib/security.js';
+import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
 
 function onceWithTimeout(emitter, event, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
@@ -306,4 +306,148 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const events = await jsonFetch(`${listening.url}/api/v1/events?after=0`, listening.ownerToken);
   assert(events.body.events.some((event) => event.type === 'node.online.v1'));
   assert(events.body.events.some((event) => event.type === 'message.accepted.v1'));
+});
+
+test('a project invite provisions a persistent remote Codex worker with reports and shell tabs', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-portfolio-'));
+  const localWorkspace = path.join(directory, 'master');
+  const remoteWorkspace = path.join(directory, 'remote-project');
+  const bin = path.join(directory, 'bin');
+  fs.mkdirSync(localWorkspace);
+  fs.mkdirSync(remoteWorkspace);
+  fs.mkdirSync(bin);
+  const fakeCodex = path.join(bin, 'codex');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf "fake-codex-ready\\n"\nexec cat\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath}`;
+
+  const localIdentity = generateNodeIdentity();
+  const remoteIdentity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_portfolio_master', publicKey: localIdentity.publicKey,
+    workspace: localWorkspace, rootId: 'awr_portfolio_master',
+  });
+  const listening = await hub.listen();
+  let node;
+  t.after(async () => {
+    process.env.PATH = originalPath;
+    if (node) {
+      for (const runtime of node.database.listProcesses()) {
+        if (runtime.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await node.stop();
+    }
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const onboard = await jsonFetch(`${listening.url}/api/v1/projects/onboard`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ project_name: 'Remote study', node_name: 'GPU workstation' }),
+  });
+  assert.equal(onboard.response.status, 200);
+  const physicalRootId = 'awr_remote_physical';
+  const enrollment = await fetch(`${listening.url}/api/v1/nodes/enroll`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token: onboard.body.invite.token,
+      name: 'GPU workstation',
+      public_key: remoteIdentity.publicKey,
+      labels: { os: process.platform, arch: process.arch },
+      capabilities: {
+        rooted_files: true, detached_processes: true, codex: true,
+        shell: process.env.SHELL || '/bin/bash',
+        root_ids: [physicalRootId], roots: [{ id: physicalRootId, name: 'remote-project' }],
+      },
+    }),
+  });
+  assert.equal(enrollment.status, 200);
+  const enrolled = await enrollment.json();
+  assert(enrolled.agent_id);
+
+  node = new NodeDaemon({
+    stateDir: path.join(directory, 'remote-node'), hubURL: listening.url,
+    nodeId: enrolled.node_id, displayName: 'GPU workstation',
+    publicKey: remoteIdentity.publicKey, privateKey: remoteIdentity.privateKey,
+    roots: [{ id: physicalRootId, path: remoteWorkspace, display_name: 'remote-project', symlink_policy: 'no_symlinks' }],
+    reconnect: false,
+  });
+  node.on('error', () => {});
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+  await waitUntil(() => hub.database.getAgent(enrolled.agent_id)?.state === 'ready', 10_000);
+  const worker = hub.database.getAgent(enrolled.agent_id);
+  assert.equal(worker.project_id, onboard.body.project.id);
+  assert.equal(worker.node_id, enrolled.node_id);
+  assert.equal(node.database.getProcessByAgent(worker.id)?.state, 'running');
+
+  hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_portfolio_master', ['portfolio:read', 'agents:read', 'messages:write']);
+  const portfolio = await jsonFetch(`${listening.url}/api/v1/agent-control/portfolio`, 'wsa_portfolio_master');
+  assert.equal(portfolio.response.status, 200);
+  assert(portfolio.body.projects.some((project) => project.id === onboard.body.project.id));
+  const delegated = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${worker.id}/messages`, 'wsa_portfolio_master', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'Run the remote analysis and report progress.', wake_policy: 'ensure_running' }),
+  });
+  assert.equal(delegated.response.status, 200);
+  await waitUntil(() => node.supervisor.snapshot(worker.terminal_id).text.includes('Run the remote analysis'), 5_000);
+
+  hub.database.issueAgentControlToken(worker.id, 'wsa_worker_report', ['status:write:self']);
+  const report = await jsonFetch(`${listening.url}/api/v1/agent-control/report`, 'wsa_worker_report', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ status: 'working', summary: 'Analysis is running on the GPU.' }),
+  });
+  assert.equal(report.response.status, 200);
+  assert.equal(hub.database.getAgent(worker.id).work_status, 'working');
+  assert(hub.database.listMessages(bootstrap.agent.active_thread_id)
+    .some((message) => message.content_parts[0].text.includes('Analysis is running on the GPU.')));
+
+  const shellTab = await jsonFetch(`${listening.url}/api/v1/agent-instances/${worker.id}/terminals`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'GPU monitor' }),
+  });
+  assert.equal(shellTab.response.status, 200);
+  assert.equal(shellTab.body.kind, 'shell_tab');
+  assert.equal(node.database.getProcessByTerminal(shellTab.body.id)?.kind, 'shell');
+  assert.equal(node.database.getProcessByAgent(worker.id)?.kind, 'agent');
+
+  const secondProject = await jsonFetch(`${listening.url}/api/v1/projects/onboard`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ project_name: 'Second remote study', node_name: 'GPU workstation' }),
+  });
+  const secondRootId = 'awr_second_physical';
+  const timestamp = Date.now();
+  const nonce = 'second-project-attachment';
+  const attachment = await fetch(`${listening.url}/api/v1/nodes/attach-root`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token: secondProject.body.invite.token,
+      node_id: enrolled.node_id,
+      timestamp,
+      nonce,
+      signature: signNodeHello(remoteIdentity.privateKey, enrolled.node_id, timestamp, nonce),
+      root: { id: secondRootId, name: 'second-remote-project' },
+    }),
+  });
+  assert.equal(attachment.status, 200);
+  const attached = await attachment.json();
+  assert.equal(attached.node_id, enrolled.node_id);
+  assert.equal(hub.database.getAgent(attached.agent_id).project_id, secondProject.body.project.id);
+  assert.deepEqual(hub.database.getNode(enrolled.node_id).capabilities.root_ids.sort(), [physicalRootId, secondRootId].sort());
+  const reusedInvite = await fetch(`${listening.url}/api/v1/nodes/attach-root`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token: secondProject.body.invite.token,
+      node_id: enrolled.node_id,
+      timestamp,
+      nonce,
+      signature: signNodeHello(remoteIdentity.privateKey, enrolled.node_id, timestamp, nonce),
+      root: { id: 'awr_reused', name: 'reused' },
+    }),
+  });
+  assert.equal(reusedInvite.status, 401);
 });

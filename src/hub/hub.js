@@ -9,7 +9,7 @@ import { Router } from '../lib/router.js';
 import { acceptWebSocket, rejectWebSocket } from '../transport/websocket.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 import { contentDisposition, parsePositiveInt, readJSON, sendError, sendJSON } from '../lib/http.js';
-import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecret, sha256 } from '../lib/security.js';
+import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecret, sha256, verifyNodeHello } from '../lib/security.js';
 import { makeId, nowISO, randomToken } from '../lib/ids.js';
 import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/project-policy.js';
 
@@ -23,7 +23,9 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'usage:write',
   'agents:read',
   'messages:write',
+  'portfolio:read',
 ];
+const WORKER_AGENT_CONTROL_SCOPES = ['status:write:self'];
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -189,7 +191,7 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.4.9', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.5.0', time: nowISO() }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -239,6 +241,25 @@ export class Hub {
       return policy;
     });
     route('GET', '/api/v1/projects', async () => ({ projects: this.database.listProjects() }));
+    route('POST', '/api/v1/projects/onboard', async (ctx) => {
+      const body = await readJSON(ctx.request);
+      const project = this.database.createProject({
+        name: body.project_name,
+        description: body.description || '',
+        labels: { project_kind: 'academic', context_inference: 'user-onboarded' },
+      }, ctx.principal.principal_id);
+      const token = randomToken('wsj');
+      const invite = this.database.createJoinToken(body.node_name || project.name, token, 600_000, { project_id: project.id });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'project.worker_invite.create',
+        targetType: 'join_token',
+        targetId: invite.id,
+        projectId: project.id,
+        newState: { expires_at: invite.expires_at },
+      });
+      return { project, invite: { ...invite, token }, hub_url: this.url };
+    });
     route('POST', '/api/v1/projects', async (ctx) => {
       const body = await readJSON(ctx.request);
       const project = this.database.createProject(body, ctx.principal.principal_id);
@@ -262,6 +283,17 @@ export class Hub {
         summary: summarizeProjectPolicy(project.policy),
         rendered_instructions: renderProjectInstructions(project, { role: 'main' }),
       };
+    });
+    route('POST', '/api/v1/projects/:id/agents', async (ctx) => {
+      const body = await readJSON(ctx.request);
+      const agent = this.#createWorkerAgent({
+        projectId: ctx.params.id,
+        nodeId: body.node_id,
+        nodeRootId: body.node_root_id,
+        title: body.title,
+        actor: ctx.principal.principal_id,
+      });
+      return this.#wakeAgent(agent.id, ctx.principal.principal_id);
     });
     route('PATCH', '/api/v1/projects/:id/policy', async (ctx) => {
       const body = await readJSON(ctx.request);
@@ -386,6 +418,7 @@ export class Hub {
     route('GET', '/api/v1/agent-control/agents', async (ctx) => ({
       agents: this.database.listAgents().map((agent) => ({
         id: agent.id,
+        title: agent.title,
         profile_name: agent.profile_name,
         project_id: agent.project_id,
         project_name: agent.project_name,
@@ -393,9 +426,59 @@ export class Hub {
         node_name: agent.node_name,
         state: agent.state,
         orchestration_role: agent.orchestration_role,
+        work_status: agent.work_status,
+        status_summary: agent.status_summary,
+        status_updated_at: agent.status_updated_at,
         is_self: agent.id === ctx.principal.agent_instance_id,
       })),
     }), { agentOnly: true, agentScopes: ['agents:read'] });
+
+    route('GET', '/api/v1/agent-control/portfolio', async () => ({
+      projects: this.database.listProjects().map((project) => ({
+        id: project.id,
+        name: project.name,
+        description: project.description,
+        agents: this.database.listAgents(project.id).map((agent) => ({
+          id: agent.id,
+          title: agent.title,
+          node_id: agent.node_id,
+          node_name: agent.node_name,
+          runtime_state: agent.state,
+          work_status: agent.work_status,
+          status_summary: agent.status_summary,
+          status_updated_at: agent.status_updated_at,
+          last_activity_at: agent.last_activity_at,
+        })),
+      })),
+    }), { agentOnly: true, agentScopes: ['portfolio:read'] });
+
+    route('POST', '/api/v1/agent-control/report', async (ctx) => {
+      const body = await readJSON(ctx.request, 65_536);
+      const agent = this.database.updateAgentWorkStatus(
+        ctx.principal.agent_instance_id,
+        body.status,
+        body.summary,
+        ctx.principal.principal_id,
+      );
+      const master = this.database.getAgent('agt_master')
+        || this.database.listAgents().find((candidate) => candidate.orchestration_role === 'main');
+      let notification = null;
+      if (master && master.id !== agent.id) {
+        notification = this.database.createMessage({
+          threadId: master.active_thread_id,
+          actorId: ctx.principal.principal_id,
+          deliveryRole: 'user',
+          displaySender: `${agent.title} status via WebSpider`,
+          contentParts: [{ type: 'text', text: `[${agent.project_name}] ${body.status}: ${body.summary.trim()}` }],
+          wakePolicy: 'ensure_running',
+          idempotencyKey: body.idempotency_key || makeId('idem'),
+          traceId: body.trace_id || makeId('trc'),
+          hopCount: 1,
+        });
+        if (!notification.duplicate) queueMicrotask(() => this.#dispatchMessage(notification.message.id).catch((error) => this.#logError(error)));
+      }
+      return { agent, notification };
+    }, { agentOnly: true, agentScopes: ['status:write:self'] });
 
     route('POST', '/api/v1/agent-control/agents/:id/messages', async (ctx) => {
       const body = await readJSON(ctx.request, 262_144);
@@ -435,7 +518,11 @@ export class Hub {
     route('POST', '/api/v1/nodes/join-tokens', async (ctx) => {
       const body = await readJSON(ctx.request);
       const token = randomToken('wsj');
-      const record = this.database.createJoinToken(body.name || 'New node', token, Math.min(body.ttl_ms || 600_000, 3_600_000));
+      if (body.project_id) invariant(this.database.getProject(body.project_id), 'WS_NOT_FOUND', 'Project not found.', 404);
+      const record = this.database.createJoinToken(
+        body.name || 'New node', token, Math.min(body.ttl_ms || 600_000, 3_600_000),
+        body.project_id ? { project_id: body.project_id } : {},
+      );
       this.database.audit({ actorId: ctx.principal.principal_id, action: 'node.join_token.create', targetType: 'join_token', targetId: record.id });
       return { ...record, token };
     });
@@ -443,8 +530,52 @@ export class Hub {
       const body = await readJSON(ctx.request);
       invariant(typeof body.public_key === 'string' && body.public_key.includes('PUBLIC KEY'), 'WS_VALIDATION', 'Valid node public key is required.');
       const node = this.database.consumeJoinToken(body.token, body.public_key, body.name, body);
+      let agent = null;
+      if (node.enrollment?.project_id) {
+        const root = body.capabilities?.roots?.[0];
+        invariant(root?.id, 'WS_VALIDATION', 'The invited worker must register a workspace root.');
+        agent = this.#createWorkerAgent({
+          projectId: node.enrollment.project_id,
+          nodeId: node.id,
+          nodeRootId: root.id,
+          title: this.database.getProject(node.enrollment.project_id)?.name,
+          actor: `node:${node.id}`,
+        });
+        this.database.setAgentState(agent.id, 'starting', `node:${node.id}`, { reason: 'awaiting_initial_connection' });
+      }
       this.database.appendEvent('node', node.id, 'node.enrolled.v1', `node:${node.id}`, node.id, { display_name: node.display_name });
-      return { node_id: node.id, display_name: node.display_name, protocol_version: 1 };
+      return { node_id: node.id, display_name: node.display_name, protocol_version: 1, agent_id: agent?.id || null };
+    }, { auth: false, csrf: false });
+    route('POST', '/api/v1/nodes/attach-root', async (ctx) => {
+      const body = await readJSON(ctx.request);
+      const node = this.database.getNode(body.node_id, true);
+      invariant(node && body.timestamp && body.nonce && body.signature, 'WS_AUTH_REQUIRED', 'Incomplete node attachment request.', 401);
+      invariant(Math.abs(Date.now() - Number(body.timestamp)) <= 300_000, 'WS_AUTH_REQUIRED', 'Node attachment signature is stale.', 401);
+      invariant(verifyNodeHello(node.public_key, body.node_id, body.timestamp, body.nonce, body.signature),
+        'WS_AUTH_REQUIRED', 'Invalid node attachment signature.', 401);
+      invariant(body.root?.id && body.root?.name, 'WS_VALIDATION', 'A registered root ID and name are required.');
+      const enrollment = this.database.consumeJoinTokenForNode(body.token, node.id);
+      invariant(enrollment.project_id, 'WS_VALIDATION', 'This invite is not associated with a project.');
+      const capabilities = node.capabilities || {};
+      const roots = [...(capabilities.roots || []).filter((root) => root.id !== body.root.id), body.root];
+      const updatedNode = this.database.updateNodeCapabilities(node.id, {
+        ...capabilities,
+        roots,
+        root_ids: roots.map((root) => root.id),
+      });
+      const agent = this.#createWorkerAgent({
+        projectId: enrollment.project_id,
+        nodeId: node.id,
+        nodeRootId: body.root.id,
+        title: this.database.getProject(enrollment.project_id)?.name,
+        actor: `node:${node.id}`,
+      });
+      this.database.setAgentState(agent.id, 'starting', `node:${node.id}`, { reason: 'awaiting_root_reload' });
+      this.database.appendEvent('node', node.id, 'node.root.attached.v1', `node:${node.id}`, body.root.id, {
+        project_id: enrollment.project_id,
+        root: body.root,
+      });
+      return { attached: true, node_id: updatedNode.id, project_id: enrollment.project_id, agent_id: agent.id };
     }, { auth: false, csrf: false });
 
     route('GET', '/api/v1/agent-profiles', async () => ({ profiles: this.database.listProfiles() }));
@@ -505,6 +636,24 @@ export class Hub {
     route('POST', '/api/v1/agent-instances/:id:restart', async (ctx) => {
       await this.#stopAgent(ctx.params.id, ctx.principal.principal_id);
       return this.#wakeAgent(ctx.params.id, ctx.principal.principal_id);
+    });
+    route('GET', '/api/v1/agent-instances/:id/terminals', async (ctx) => ({
+      terminals: this.database.listAgentTerminals(ctx.params.id),
+    }));
+    route('POST', '/api/v1/agent-instances/:id/terminals', async (ctx) => {
+      const body = await readJSON(ctx.request);
+      return this.#startShellTab(ctx.params.id, body.label || 'Shell', ctx.principal.principal_id);
+    });
+    route('POST', '/api/v1/terminals/:id:stop', async (ctx) => {
+      const terminal = this.database.getTerminal(ctx.params.id);
+      invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
+      invariant(terminal.kind === 'shell_tab', 'WS_FORBIDDEN', 'Stop the primary agent from its agent controls.', 403);
+      if (this.broker.isOnline(terminal.node_id)) {
+        await this.broker.request(terminal.node_id, 'terminal.stop', { terminal_id: terminal.id });
+      }
+      this.database.setTerminalState(terminal.id, 'exited');
+      this.database.audit({ actorId: ctx.principal.principal_id, action: 'terminal.stop', targetType: 'terminal', targetId: terminal.id });
+      return this.database.getTerminal(terminal.id);
     });
 
     route('GET', '/api/v1/threads/:id', async (ctx) => {
@@ -860,10 +1009,83 @@ export class Hub {
       .catch((error) => connection.sendJSON({ type: 'ERROR', code: error.code, message: error.message }));
   }
 
+  #createWorkerAgent({ projectId, nodeId, nodeRootId, title, actor }) {
+    const project = this.database.getProject(projectId);
+    const node = this.database.getNode(nodeId);
+    invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+    invariant(node, 'WS_NOT_FOUND', 'Node not found.', 404);
+    const roots = Array.isArray(node.capabilities?.roots) ? node.capabilities.roots : [];
+    const root = roots.find((candidate) => candidate.id === nodeRootId)
+      || (node.capabilities?.root_ids || []).includes(nodeRootId) && { id: nodeRootId, name: 'workspace' };
+    invariant(root, 'WS_ROOT_NOT_FOUND', 'The selected node has not registered that workspace root.', 404);
+    invariant(node.capabilities?.codex !== false, 'WS_ADAPTER_UNAVAILABLE', 'Codex is not available on the selected node.', 409);
+    const profileId = makeId('apf');
+    const profile = this.database.createProfile({
+      id: profileId,
+      name: `Codex ${node.display_name} ${profileId.slice(-6)}`,
+      adapterKind: 'pty',
+      executable: 'codex',
+      arguments: [],
+      restartPolicy: { mode: 'on_failure', max_attempts: 3 },
+    }, actor);
+    const agent = this.database.createAgent({
+      profileId: profile.id,
+      projectId: project.id,
+      nodeId: node.id,
+      title: title?.trim() || project.name,
+      orchestrationRole: 'worker',
+      resumability: 'detached_process',
+      root: {
+        node_root_id: root.id,
+        logical_name: root.name || 'workspace',
+        access_mode: 'read_write',
+        symlink_policy: 'no_symlinks',
+        mount_policy: 'allow_nested',
+      },
+    }, actor);
+    this.database.audit({
+      actorId: actor,
+      action: 'agent.create',
+      targetType: 'agent_instance',
+      targetId: agent.id,
+      projectId: project.id,
+      newState: agent,
+    });
+    return agent;
+  }
+
+  async #startShellTab(agentId, label, actor) {
+    const agent = this.database.getAgent(agentId);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    const node = this.database.getNode(agent.node_id);
+    invariant(node?.status === 'online' && this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'Agent node is offline.', 503);
+    const root = this.database.listAgentRoots(agent.id)[0];
+    invariant(root, 'WS_ROOT_NOT_FOUND', 'Agent has no active workspace root.', 404);
+    const shell = typeof node.capabilities?.shell === 'string' && node.capabilities.shell.startsWith('/')
+      ? node.capabilities.shell
+      : node.labels?.os === 'darwin' ? '/bin/zsh' : '/bin/bash';
+    const terminal = this.database.createInteractiveTerminal(agent.id, label);
+    try {
+      await this.broker.request(agent.node_id, 'terminal.start-shell', {
+        agent_instance_id: agent.id,
+        terminal_id: terminal.id,
+        root_id: root.node_root_id,
+        argv: [shell, '-l'],
+        environment: {},
+      });
+      this.database.setTerminalState(terminal.id, 'attached');
+      this.database.audit({ actorId: actor, action: 'terminal.create', targetType: 'terminal', targetId: terminal.id, projectId: agent.project_id, newState: { label } });
+      return this.database.getTerminal(terminal.id);
+    } catch (error) {
+      this.database.setTerminalState(terminal.id, 'exited');
+      throw error;
+    }
+  }
+
   async #wakeAgent(agentId, actor) {
     let agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
-    if (['ready', 'busy', 'starting'].includes(agent.state)) return agent;
+    if (['ready', 'busy'].includes(agent.state)) return agent;
     const node = this.database.getNode(agent.node_id);
     invariant(node?.status === 'online' && this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'Agent node is offline.', 503);
     const profile = this.database.getProfile(agent.profile_id);
@@ -896,11 +1118,19 @@ export class Hub {
         };
       } else {
         this.database.revokeAgentControlTokens(agent.id);
+        controlToken = randomToken('wsa');
+        const record = this.database.issueAgentControlToken(agent.id, controlToken, WORKER_AGENT_CONTROL_SCOPES);
+        agentControl = {
+          url: new URL('/api/v1/agent-control', this.url).href,
+          token: controlToken,
+          scopes: record.scopes,
+          expires_at: record.expires_at,
+        };
       }
       await this.broker.request(agent.node_id, 'process.start-agent', {
         agent_instance_id: agent.id,
         terminal_id: agent.terminal_id,
-        root_id: root.id,
+        root_id: root.node_root_id,
         argv: [profile.executable, ...profile.arguments],
         environment: profile.environment,
         policy_snapshot: policySnapshot,
@@ -950,6 +1180,14 @@ export class Hub {
       }
       if (!['ready', 'busy', 'starting'].includes(agent.state)) continue;
       const previousState = agent.state;
+      if (previousState === 'starting') {
+        try {
+          await this.#wakeAgent(agent.id, 'hub:initial-worker-start');
+        } catch (error) {
+          this.#logError(error);
+        }
+        continue;
+      }
       agent = this.database.setAgentState(agent.id, 'failed', 'hub:reconciler', {
         reason: 'runtime_missing_after_node_reconnect',
         connection_epoch: connectionEpoch,
@@ -1059,7 +1297,7 @@ export class Hub {
       task_id: task.id,
       agent_instance_id: agent.id,
       terminal_id: terminal.id,
-      root_id: root.id,
+      root_id: root.node_root_id,
       argv: task.specification.argv,
       environment: task.specification.environment || {},
     });
@@ -1132,7 +1370,7 @@ export class Hub {
     if (command === 'files.search') invariant(root.allow_search, 'WS_FORBIDDEN', 'Search is disabled for this root.', 403);
     let decision = 'allowed';
     try {
-      const result = await this.broker.request(root.node_id, command, { root_id: root.id, ...payload });
+      const result = await this.broker.request(root.node_id, command, { root_id: root.node_root_id, ...payload });
       this.database.audit({ actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id, projectId: root.project_id, decision, newState: { relative_path: payload.path || '', bytes: result?.size } });
       return result;
     } catch (error) {

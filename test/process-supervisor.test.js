@@ -235,6 +235,9 @@ test('agent launch materializes the inherited project agreement without workspac
   assert.match(controlScript, /usage report --weekly-remaining PERCENT/);
   assert.match(controlScript, /request\('usage', 'POST', body\)/);
   assert.match(controlScript, /agents list/);
+  assert.match(controlScript, /portfolio list/);
+  assert.match(controlScript, /report --status idle\|working\|blocked\|completed/);
+  assert.match(controlScript, /request\('report', 'POST'/);
   assert.match(controlScript, /agents\/' \+ encodeURIComponent\(agent\) \+ '\/messages'/);
   assert.doesNotMatch(controlScript, /billing|subscription|api.?key|reset.?credit|add.?credit/i);
   assert.doesNotMatch(controlScript, /wsa_test/);

@@ -127,7 +127,7 @@ export class NodeDatabase {
   }
 
   getProcessByAgent(agentId) {
-    const row = this.db.prepare('SELECT id FROM processes WHERE agent_instance_id = ? ORDER BY created_at DESC LIMIT 1').get(agentId);
+    const row = this.db.prepare("SELECT id FROM processes WHERE agent_instance_id = ? AND kind = 'agent' ORDER BY created_at DESC LIMIT 1").get(agentId);
     return row ? this.getProcess(row.id) : null;
   }
 
