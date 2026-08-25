@@ -173,6 +173,10 @@ while :; do sleep 0.05; done
   const woken = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}:wake`, listening.ownerToken, { method: 'POST' });
   assert.equal(woken.response.status, 200);
   await waitUntil(() => hub.database.getAgent(bootstrap.agent.id).state === 'ready');
+  await waitUntil(() => fs.existsSync(path.join(
+    directory, 'node', 'agent-context', bootstrap.agent.id, 'codex-home',
+    'sessions', '2026', '08', '25', 'fleet-session.jsonl',
+  )));
 
   const prepared = await jsonFetch(`${listening.url}/api/v1/fleet-updates`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirmation: 'update-all' }),
