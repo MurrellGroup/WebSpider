@@ -71,6 +71,11 @@ test('worker command copy supports plain HTTP without the Clipboard API', () => 
   assert.match(app, /Command selected; press Ctrl\/Cmd\+C to copy it\./);
 });
 
+test('note editor clicks do not reopen the note and discard the active draft', () => {
+  assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
+  assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);
+});
+
 test('terminal pages begin in watch mode and acquire control only on interaction', () => {
   const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
   assert.match(app, /interactive \? 'Take control' : 'Not running'/);

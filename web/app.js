@@ -1078,7 +1078,7 @@ document.addEventListener('click', async (event) => {
     closeTerminal();
     return renderTerminal(state.selectedAgent);
   }
-  const noteButton = event.target.closest('[data-note-id]');
+  const noteButton = event.target.closest('.note-row[data-note-id]');
   if (noteButton) return renderNotes(noteButton.dataset.noteId);
   const terminalView = event.target.closest('[data-terminal-view]');
   if (terminalView) {
