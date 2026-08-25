@@ -36,6 +36,22 @@ test('terminal input preserves interactive control-key sequences', () => {
   assert.throws(() => sanitizeInput(Buffer.from([0])), (error) => error.code === 'WS_VALIDATION');
 });
 
+test('terminal output polling defaults to interactive latency', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-poll-default-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_poll', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots });
+  assert.equal(supervisor.pollMs, 50);
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+});
+
 test('detached command writes a durable exit marker and terminal log', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-runtime-'));
   const workspace = path.join(directory, 'workspace');
@@ -141,6 +157,35 @@ test('a browser terminal resize reaches the detached PTY', async (t) => {
   supervisor.input('trm_resize', Buffer.from('stty size\nexit\n'));
   assert.equal((await completion).exit_status, 0);
   assert.match(supervisor.snapshot('trm_resize').text, /31 101/);
+});
+
+test('a maximum-size terminal write reaches the PTY without partial loss', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-input-complete-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_input', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop();
+    roots.close();
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_input_complete', kind: 'task', taskId: 'tsk_input_complete', terminalId: 'trm_input_complete',
+    rootId: 'awr_input',
+    argv: ['/bin/sh', '-c', 'stty raw -echo; dd iflag=fullblock bs=65536 count=1 of=received.bin 2>/dev/null'],
+  });
+  const payload = Buffer.from(Array.from({ length: 64 * 1024 }, (_, index) => 33 + (index % 90)));
+  const result = supervisor.input('trm_input_complete', payload);
+  assert.equal(result.accepted_bytes, payload.length);
+  assert.equal((await completion).exit_status, 0);
+  assert.deepEqual(fs.readFileSync(path.join(workspace, 'received.bin')), payload);
 });
 
 test('a replacement agent receives bounded recovery context from its prior runtime', async (t) => {

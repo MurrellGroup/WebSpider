@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { HubDatabase } from '../db/hub-database.js';
 import { NodeBroker } from './node-broker.js';
+import { TerminalInputPipeline } from './terminal-input-pipeline.js';
 import { Router } from '../lib/router.js';
 import { acceptWebSocket, rejectWebSocket } from '../transport/websocket.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
@@ -1441,11 +1442,43 @@ export class Hub {
       this.broker.off('terminal.output', outputListener);
       if (activeLease) this.database.releaseTerminalLease(terminalId, activeLease.id, leasePrincipal);
     });
-    let terminalQueue = Promise.resolve();
+    let clientAttached = true;
+    const inputPipeline = new TerminalInputPipeline({
+      sendBatch: async (bytes) => {
+        const result = await this.broker.request(terminal.node_id, 'terminal.input', {
+          terminal_id: terminalId,
+          data: bytes.toString('base64'),
+        });
+        invariant(Number(result?.accepted_bytes) === bytes.length,
+          'WS_TERMINAL_INPUT_UNCERTAIN', 'The node did not acknowledge every terminal input byte.', 502);
+        return result;
+      },
+      acknowledge: (result, frames, acceptedBytes) => {
+        if (!clientAttached) return;
+        const latest = frames.at(-1) || {};
+        connection.sendJSON({
+          type: 'INPUT_ACK',
+          lease: latest.lease,
+          input_sequence: latest.input_sequence,
+          accepted_bytes: acceptedBytes,
+          result,
+        });
+      },
+      fail: (error) => {
+        if (!clientAttached) return;
+        connection.sendJSON({
+          type: 'ERROR',
+          code: error.code || 'WS_TERMINAL_INPUT_UNCERTAIN',
+          message: `${error.message} Further terminal input was stopped to avoid loss or reordering.`,
+        });
+      },
+    });
+    connection.once('close', () => { clientAttached = false; });
+    let controlQueue = Promise.resolve();
     connection.on('text', (text) => {
       let frame;
       try { frame = JSON.parse(text); } catch { connection.sendJSON({ type: 'ERROR', code: 'WS_INVALID_JSON' }); return; }
-      terminalQueue = terminalQueue.then(async () => {
+      try {
         if (frame.type === 'LEASE_REQUEST') {
           const lease = this.database.acquireTerminalLease(terminalId, leasePrincipal);
           activeLease = lease;
@@ -1454,25 +1487,30 @@ export class Hub {
         }
         if (frame.type === 'INPUT') {
           const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
-          const result = await this.broker.request(terminal.node_id, 'terminal.input', { terminal_id: terminalId, data: frame.data });
-          connection.sendJSON({ type: 'INPUT_ACK', lease, result });
-          return;
-        }
-        if (frame.type === 'RESIZE') {
-          const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
-          const result = await this.broker.request(terminal.node_id, 'terminal.resize', {
-            terminal_id: terminalId,
-            columns: frame.columns,
-            rows: frame.rows,
-          });
-          connection.sendJSON({ type: 'RESIZE_ACK', lease, result });
+          const bytes = Buffer.from(String(frame.data || ''), 'base64');
+          inputPipeline.enqueue(bytes, { lease, input_sequence: Number(frame.input_sequence || 0) });
           return;
         }
         if (frame.type === 'HEARTBEAT') {
           const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
           connection.sendJSON({ type: 'HEARTBEAT_ACK', lease });
+          return;
         }
-      }).catch((error) => connection.sendJSON({ type: 'ERROR', code: error.code || 'WS_INTERNAL', message: error.message }));
+        if (frame.type === 'RESIZE') {
+          controlQueue = controlQueue.then(async () => {
+            const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
+            const result = await this.broker.request(terminal.node_id, 'terminal.resize', {
+              terminal_id: terminalId,
+              columns: frame.columns,
+              rows: frame.rows,
+            });
+            connection.sendJSON({ type: 'RESIZE_ACK', lease, result });
+          }).catch((error) => connection.sendJSON({ type: 'ERROR', code: error.code || 'WS_INTERNAL', message: error.message }));
+          return;
+        }
+      } catch (error) {
+        connection.sendJSON({ type: 'ERROR', code: error.code || 'WS_INTERNAL', message: error.message });
+      }
     });
     connection.sendJSON({ type: 'ATTACHED', terminal, mode: 'watch', attachment_id: attachmentId });
     this.broker.request(terminal.node_id, 'terminal.snapshot', { terminal_id: terminalId, max_bytes: 200_000 })

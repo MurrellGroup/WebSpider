@@ -42,6 +42,8 @@ const state = {
   terminalPendingInput: [],
   terminalInputBuffer: '',
   terminalInputTimer: null,
+  terminalInputSequence: 0,
+  terminalInputAcknowledged: 0,
   terminalCompositionTimer: null,
   terminalText: '',
   terminalView: 'terminal',
@@ -225,6 +227,8 @@ function closeTerminal() {
   clearTimeout(state.terminalCompositionTimer);
   state.terminalCompositionTimer = null;
   state.terminalInputBuffer = '';
+  state.terminalInputSequence = 0;
+  state.terminalInputAcknowledged = 0;
   state.terminalInputSubscription?.dispose();
   state.terminalInputSubscription = null;
   state.terminalResizeObserver?.disconnect();
@@ -618,12 +622,22 @@ function transmitTerminalInput(data) {
     requestTerminalLease();
     return;
   }
-  state.terminalSocket.send(JSON.stringify({
-    type: 'INPUT',
-    lease_id: state.terminalLease.id,
-    lease_epoch: state.terminalLease.lease_epoch,
-    data: bytesToBase64(new TextEncoder().encode(data)),
-  }));
+  const bytes = new TextEncoder().encode(data);
+  const maxChunkBytes = 48 * 1024;
+  for (let start = 0; start < bytes.length;) {
+    let end = Math.min(bytes.length, start + maxChunkBytes);
+    if (end < bytes.length) while (end > start && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    const chunk = bytes.slice(start, end);
+    state.terminalInputSequence += 1;
+    state.terminalSocket.send(JSON.stringify({
+      type: 'INPUT',
+      lease_id: state.terminalLease.id,
+      lease_epoch: state.terminalLease.lease_epoch,
+      input_sequence: state.terminalInputSequence,
+      data: bytesToBase64(chunk),
+    }));
+    start = end;
+  }
 }
 
 function requestTerminalLease() {
@@ -825,6 +839,11 @@ async function renderTerminal(agent) {
     if (frame.type === 'RESIZE_ACK') {
       const output = $('#terminal-output');
       if (output) output.dataset.ptyResized = String(frame.result?.resized === true);
+    }
+    if (frame.type === 'INPUT_ACK') {
+      state.terminalInputAcknowledged = Math.max(state.terminalInputAcknowledged, Number(frame.input_sequence || 0));
+      const output = $('#terminal-output');
+      if (output) output.dataset.inputAcknowledged = String(state.terminalInputAcknowledged);
     }
     if (frame.type === 'LEASE_GRANTED') {
       state.terminalLease = frame.lease;

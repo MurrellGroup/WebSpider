@@ -110,6 +110,9 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.doesNotMatch(app, /emulator\.onData\(queueTerminalInput\)/);
   assert.doesNotMatch(app, /if \(state\.terminalInputMode === 'direct'\) emulator\.focus\(\)/);
   assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);
+  assert.match(hub, /new TerminalInputPipeline/);
+  assert.doesNotMatch(hub, /let terminalQueue = Promise\.resolve/);
+  assert.match(hub, /frame\.type === 'HEARTBEAT'[\s\S]*HEARTBEAT_ACK[\s\S]*frame\.type === 'RESIZE'/);
 });
 
 test('every non-primary terminal tab has an explicit close control', () => {

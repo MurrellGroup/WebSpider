@@ -443,20 +443,21 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
 }
 
 export class ProcessSupervisor extends EventEmitter {
-  constructor({ stateDir, database, rootService, pollMs = 250 }) {
+  constructor({ stateDir, database, rootService, pollMs = 50 }) {
     super();
     this.stateDir = stateDir;
     this.database = database;
     this.rootService = rootService;
     this.pollMs = pollMs;
     this.timer = null;
+    this.polling = false;
     fs.mkdirSync(path.join(stateDir, 'processes'), { recursive: true, mode: 0o700 });
   }
 
   start() {
     if (this.timer) return;
     this.reconcile();
-    this.timer = setInterval(() => this.#poll().catch((error) => this.emit('error', error)), this.pollMs);
+    this.timer = setInterval(() => this.#pollOnce(), this.pollMs);
     this.timer.unref?.();
   }
 
@@ -586,9 +587,11 @@ export class ProcessSupervisor extends EventEmitter {
     const runtime = this.database.getProcessByTerminal(terminalId);
     invariant(runtime && runtime.state === 'running', 'WS_AGENT_NOT_READY', 'Terminal process is not running.', 409);
     const safe = sanitizeInput(bytes);
-    const fd = fs.openSync(runtime.inputFifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+    const fd = fs.openSync(runtime.inputFifo, fs.constants.O_WRONLY);
     try {
-      fs.writeSync(fd, safe);
+      let written = 0;
+      while (written < safe.length) written += fs.writeSync(fd, safe, written, safe.length - written);
+      invariant(written === safe.length, 'WS_TERMINAL_INPUT_UNCERTAIN', 'The terminal accepted only part of the input.', 502);
     } finally {
       fs.closeSync(fd);
     }
@@ -651,6 +654,14 @@ export class ProcessSupervisor extends EventEmitter {
     } finally {
       fs.closeSync(fd);
     }
+  }
+
+  #pollOnce() {
+    if (this.polling) return;
+    this.polling = true;
+    this.#poll()
+      .catch((error) => this.emit('error', error))
+      .finally(() => { this.polling = false; });
   }
 
   async #poll() {
