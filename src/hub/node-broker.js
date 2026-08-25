@@ -133,8 +133,12 @@ export class NodeBroker extends EventEmitter {
       return;
     }
     if (frame.type === 'command_receipt') {
-      this.database.markOutboxResult(frame.command_id, frame.result, frame.error?.message || null);
       const pending = this.pending.get(frame.command_id);
+      if (pending && (pending.nodeId !== state.nodeId || pending.epoch !== state.epoch)) return;
+      const durable = pending?.transient ? null : this.database.getOutbox(frame.command_id);
+      if (!pending && frame.transient) return;
+      if (durable?.node_id && durable.node_id !== state.nodeId) return;
+      if (durable) this.database.markOutboxResult(frame.command_id, frame.result, frame.error?.message || null);
       if (pending) {
         clearTimeout(pending.timer);
         this.pending.delete(frame.command_id);
@@ -176,6 +180,45 @@ export class NodeBroker extends EventEmitter {
       throw new WebSpiderError('WS_NODE_ERROR', item.failure_reason || 'Node command previously failed.', 500, { command_id: item.id });
     }
     return this.#dispatch(item, timeoutMs);
+  }
+
+  async requestTransient(nodeId, commandType, payload, { timeoutMs = 30_000 } = {}) {
+    const state = this.connections.get(nodeId);
+    if (!state) throw new WebSpiderError('WS_NODE_OFFLINE',
+      'Owning node is offline; live file transfer cannot continue.', 503);
+    const commandId = `cmd_trn_${randomBytes(18).toString('base64url')}`;
+    let resolvePending;
+    let rejectPending;
+    const promise = new Promise((resolve, reject) => {
+      resolvePending = resolve;
+      rejectPending = reject;
+    });
+    const timer = setTimeout(() => {
+      this.pending.delete(commandId);
+      rejectPending(new WebSpiderError('WS_NODE_OFFLINE',
+        'Timed out waiting for a live file transfer response.', 504, { command_id: commandId }));
+    }, timeoutMs);
+    timer.unref?.();
+    this.pending.set(commandId, {
+      promise,
+      resolve: resolvePending,
+      reject: rejectPending,
+      timer,
+      nodeId,
+      epoch: state.epoch,
+      replayable: false,
+      transient: true,
+    });
+    state.connection.sendJSON({
+      type: 'command',
+      protocol_version: 1,
+      connection_epoch: state.epoch,
+      command_id: commandId,
+      command_type: commandType,
+      payload,
+      transient: true,
+    });
+    return promise;
   }
 
   async #dispatch(item, timeoutMs) {
@@ -230,7 +273,9 @@ export class NodeBroker extends EventEmitter {
       if (pending.nodeId !== nodeId || pending.epoch !== epoch) continue;
       clearTimeout(pending.timer);
       this.pending.delete(id);
-      if (!pending.replayable) this.database.markOutboxResult(id, null, 'Node disconnected before acknowledging transient command.');
+      if (!pending.replayable && !pending.transient) {
+        this.database.markOutboxResult(id, null, 'Node disconnected before acknowledging transient command.');
+      }
       pending.reject(new WebSpiderError('WS_NODE_OFFLINE', 'Node disconnected before acknowledging command.', 503, { command_id: id }));
     }
   }

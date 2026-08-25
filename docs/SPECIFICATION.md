@@ -993,7 +993,7 @@ Controls:
 
 ### Files tab
 
-A project-root-only file explorer described in detail in section 9.
+A project-root-only file explorer described in detail in section 9. It includes an explicit upload action for placing a file into the open folder without creating an agent message or wake.
 
 ### Artifacts tab
 
@@ -1307,6 +1307,9 @@ GET /api/v1/roots/{root}/preview?path=<relative>
 GET /api/v1/roots/{root}/download?path=<relative>
 GET /api/v1/roots/{root}/search?query=<q>&path=<relative>
 GET /api/v1/roots/{root}/git-status?path=<relative>
+POST /api/v1/roots/{root}/file-transfers
+POST /api/v1/roots/{root}/file-transfers/{transfer}/chunks
+POST /api/v1/roots/{root}/file-transfers/{transfer}:complete
 POST /api/v1/roots/{root}/promote-artifact
 ```
 
@@ -2326,6 +2329,9 @@ GET  /api/v1/roots/{root}/preview
 GET  /api/v1/roots/{root}/download
 GET  /api/v1/roots/{root}/search
 GET  /api/v1/roots/{root}/git-status
+POST /api/v1/roots/{root}/file-transfers
+POST /api/v1/roots/{root}/file-transfers/{transfer}/chunks
+POST /api/v1/roots/{root}/file-transfers/{transfer}:complete
 POST /api/v1/roots/{root}/promote-artifact
 ```
 
@@ -2382,6 +2388,8 @@ Terminal bytes should use binary frames. Control metadata may use Protobuf or co
 ## 18.3 File streams
 
 File downloads should normally use ordinary HTTP responses from the hub rather than browser WebSockets because HTTP already handles content-disposition, caching, byte ranges, and backpressure well. The hub internally multiplexes the node stream.
+
+Uploads and live agent-to-agent handoffs use bounded chunks rather than whole-file command payloads. Transfer metadata records the last fsynced byte count; an unconfirmed tail is truncated before retry. Each chunk and the complete file are SHA-256 verified, and the completed mode-`0600` file is atomically renamed within the registered root. Agent relays use transient node commands so large payloads never enter Hub or Node command databases. Both nodes must be online and no SSH relationship is assumed.
 
 ---
 

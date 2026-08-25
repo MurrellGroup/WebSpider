@@ -5,10 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
+import { FILE_TRANSFER_CHUNK_BYTES } from '../src/lib/file-transfer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -121,6 +123,149 @@ test('same-machine Hub and worker identities stay online across one shared proce
   assert.equal(hub.broker.isOnline('nod_local'), true);
   assert.equal(hub.broker.isOnline('nod_worker'), true);
   assert.equal(unexpectedOffline, 0);
+});
+
+test('quiet browser uploads and large agent file handoffs stream across nodes without SSH', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-file-relay-'));
+  const sourceWorkspace = path.join(directory, 'source');
+  const targetWorkspace = path.join(directory, 'target');
+  fs.mkdirSync(sourceWorkspace);
+  fs.mkdirSync(path.join(targetWorkspace, 'datasets'), { recursive: true });
+  const sourceIdentity = generateNodeIdentity();
+  const targetIdentity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_file_source', publicKey: sourceIdentity.publicKey,
+    workspace: sourceWorkspace, rootId: 'awr_file_source',
+    agentProfile: { id: 'apf_file_relay', name: 'File relay test', adapterKind: 'pty', executable: '/bin/cat', arguments: [] },
+  });
+  hub.database.createNode({ id: 'nod_file_target', displayName: 'Target workstation', publicKey: targetIdentity.publicKey });
+  const targetProject = hub.database.createProject({ name: 'Target project' });
+  const sourceWorker = hub.database.createAgent({
+    id: 'agt_file_source', profileId: bootstrap.profile.id, projectId: bootstrap.project.id,
+    nodeId: 'nod_file_source', title: 'Source Sub-Spider', orchestrationRole: 'worker',
+    root: { id: 'awr_file_source_agent', node_root_id: 'awr_file_source', logical_name: 'workspace', access_mode: 'read_write' },
+  });
+  const targetWorker = hub.database.createAgent({
+    id: 'agt_file_target', profileId: bootstrap.profile.id, projectId: targetProject.id,
+    nodeId: 'nod_file_target', title: 'Target Sub-Spider', orchestrationRole: 'worker',
+    root: { id: 'awr_file_target_agent', node_root_id: 'awr_file_target', logical_name: 'workspace', access_mode: 'read_write' },
+  });
+  const listening = await hub.listen();
+  const sourceNode = new NodeDaemon({
+    stateDir: path.join(directory, 'source-node'), hubURL: listening.url,
+    nodeId: 'nod_file_source', displayName: 'Source workstation',
+    publicKey: sourceIdentity.publicKey, privateKey: sourceIdentity.privateKey,
+    roots: [{ id: 'awr_file_source', path: sourceWorkspace, symlink_policy: 'no_symlinks' }], reconnect: false,
+  });
+  const targetNode = new NodeDaemon({
+    stateDir: path.join(directory, 'target-node'), hubURL: listening.url,
+    nodeId: 'nod_file_target', displayName: 'Target workstation',
+    publicKey: targetIdentity.publicKey, privateKey: targetIdentity.privateKey,
+    roots: [{ id: 'awr_file_target', path: targetWorkspace, symlink_policy: 'no_symlinks' }], reconnect: false,
+  });
+  sourceNode.on('error', () => {});
+  targetNode.on('error', () => {});
+  const sourceOnline = onceWithTimeout(sourceNode, 'online');
+  const targetOnline = onceWithTimeout(targetNode, 'online');
+  sourceNode.start();
+  targetNode.start();
+  await Promise.all([sourceOnline, targetOnline]);
+  t.after(async () => {
+    for (const node of [sourceNode, targetNode]) {
+      for (const runtime of node.database.listProcesses()) {
+        if (runtime.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await sourceNode.stop();
+    await targetNode.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const quietBytes = Buffer.from('quiet browser data\n'.repeat(470_000));
+  const messagesBeforeUpload = hub.database.listMessages(targetWorker.active_thread_id).length;
+  const begun = await jsonFetch(`${listening.url}/api/v1/roots/awr_file_target_agent/file-transfers`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      transfer_id: 'xfr_browserquietABC1234', destination_path: 'datasets/browser-data.bin',
+      size_bytes: quietBytes.length, conflict: 'rename',
+    }),
+  });
+  assert.equal(begun.response.status, 200, JSON.stringify(begun.body));
+  let quietOffset = 0;
+  while (quietOffset < quietBytes.length) {
+    const chunk = quietBytes.subarray(quietOffset, Math.min(quietOffset + FILE_TRANSFER_CHUNK_BYTES, quietBytes.length));
+    const written = await jsonFetch(`${listening.url}/api/v1/roots/awr_file_target_agent/file-transfers/xfr_browserquietABC1234/chunks`, listening.ownerToken, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ destination_path: begun.body.destination_path, offset: quietOffset, data_base64: chunk.toString('base64') }),
+    });
+    assert.equal(written.response.status, 200);
+    quietOffset += chunk.length;
+  }
+  const quietComplete = await jsonFetch(`${listening.url}/api/v1/roots/awr_file_target_agent/file-transfers/xfr_browserquietABC1234:complete`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ destination_path: begun.body.destination_path }),
+  });
+  assert.equal(quietComplete.response.status, 200);
+  assert.deepEqual(fs.readFileSync(path.join(targetWorkspace, 'datasets', 'browser-data.bin')), quietBytes);
+  assert.equal(hub.database.listMessages(targetWorker.active_thread_id).length, messagesBeforeUpload);
+
+  const relayBytes = Buffer.from('cross-machine-binary\0data'.repeat(600_000));
+  fs.writeFileSync(path.join(sourceWorkspace, 'relay.bin'), relayBytes);
+  hub.database.issueAgentControlToken(sourceWorker.id, 'wsa_file_relay', ['files:transfer']);
+  const targets = await jsonFetch(`${listening.url}/api/v1/agent-control/files/targets`, 'wsa_file_relay');
+  assert.equal(targets.response.status, 200);
+  assert(targets.body.targets.some((target) => target.id === targetWorker.id && target.online));
+  assert(!targets.body.targets.some((target) => target.id === sourceWorker.id));
+  const relayTransferId = 'xfr_resumableRelayABC1234';
+  const relaySource = await sourceNode.rootService.describeTransferSource('awr_file_source', 'relay.bin');
+  targetNode.rootService.ensureTransferInbox('awr_file_target');
+  const partialDestination = `.webspider/inbox/${relayTransferId}-relay.bin`;
+  const partial = await targetNode.rootService.beginFileTransfer('awr_file_target', {
+    transferId: relayTransferId, destinationPath: partialDestination,
+    sizeBytes: relayBytes.length, conflict: 'error',
+    sourceVersion: relaySource.version, sourcePath: 'relay.bin',
+  });
+  const firstChunk = relayBytes.subarray(0, FILE_TRANSFER_CHUNK_BYTES);
+  await targetNode.rootService.writeFileTransferChunk('awr_file_target', {
+    transferId: relayTransferId, destinationPath: partial.destination_path, offset: 0,
+    bytes: firstChunk, sha256: createHash('sha256').update(firstChunk).digest('hex'),
+  });
+  const sourceReadOffsets = [];
+  const originalReadTransferSourceChunk = sourceNode.rootService.readTransferSourceChunk.bind(sourceNode.rootService);
+  sourceNode.rootService.readTransferSourceChunk = async (rootId, request) => {
+    sourceReadOffsets.push(request.offset);
+    return originalReadTransferSourceChunk(rootId, request);
+  };
+  const relayed = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${targetWorker.id}/files`, 'wsa_file_relay', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      transfer_id: relayTransferId, source_path: 'relay.bin',
+      instruction: 'Use this binary dataset later.', wake_policy: 'queue_only',
+    }),
+  });
+  assert.equal(relayed.response.status, 200);
+  assert.equal(relayed.body.transfer.transfer_id, relayTransferId);
+  assert.equal(sourceReadOffsets[0], FILE_TRANSFER_CHUNK_BYTES);
+  assert.equal(relayed.body.transfer.size_bytes, relayBytes.length);
+  assert.equal(relayed.body.transfer.sha256, createHash('sha256').update(relayBytes).digest('hex'));
+  assert.deepEqual(fs.readFileSync(path.join(targetWorkspace, relayed.body.transfer.relative_path)), relayBytes);
+  assert.match(relayed.body.message.content_parts[0].text, /SSH access between workstations was not used/);
+  assert.match(relayed.body.message.content_parts[0].text, /Use this binary dataset later/);
+  const relayedRetry = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${targetWorker.id}/files`, 'wsa_file_relay', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      transfer_id: relayTransferId, source_path: 'relay.bin',
+      instruction: 'Use this binary dataset later.', wake_policy: 'queue_only',
+    }),
+  });
+  assert.equal(relayedRetry.response.status, 200);
+  assert.equal(relayedRetry.body.transfer.duplicate, true);
+  assert.equal(relayedRetry.body.duplicate, true);
+  assert.equal(hub.database.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE command_type LIKE 'files.transfer-%'").get().count, 0);
+  assert.equal(sourceNode.database.db.prepare("SELECT COUNT(*) AS count FROM commands WHERE type LIKE 'files.transfer-%'").get().count, 0);
+  assert.equal(targetNode.database.db.prepare("SELECT COUNT(*) AS count FROM commands WHERE type LIKE 'files.transfer-%'").get().count, 0);
 });
 
 test('inbound agent messages include source, UTC time, elapsed context, and observed weekly allowance', () => {

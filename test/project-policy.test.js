@@ -65,9 +65,10 @@ test('project policy patches preserve inherited defaults and render an actionabl
   assert.match(worker, /instructions arrive directly, are authoritative, and bypass the Master/i);
   assert.match(worker, /report --status working\|blocked\|completed/i);
   assert.match(worker, /--notify-master.*delegated results/i);
-  assert.match(worker, /completion returns to you by default/i);
+  assert.match(worker, /returns to you by default/i);
   assert.match(worker, /Never narrate routine direct work/i);
   assert.match(worker, /documents send --master/i);
+  assert.match(worker, /files send --agent ID --file PATH/i);
   assert.match(worker, /\.webspider\/WEBSPIDER_USER_GUIDE\.txt/);
   assert.match(worker, /Citation rule: never invent/i);
   assert.match(worker, /Use the lab style guide/);

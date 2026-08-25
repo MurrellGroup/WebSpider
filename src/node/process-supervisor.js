@@ -235,13 +235,14 @@ async function main() {
     || (resource === 'usage' && ['show', 'report'].includes(action))
     || (resource === 'agents' && ['list', 'send'].includes(action))
     || (resource === 'documents' && action === 'send')
+    || (resource === 'files' && ['targets', 'send'].includes(action))
     || (resource === 'tasks' && ['list', 'run'].includes(action))
     || (resource === 'reminders' && ['list', 'add', 'cancel'].includes(action))
     || (resource === 'portfolio' && action === 'list')
     || (resource === 'notes' && ['list', 'show'].includes(action))
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -361,6 +362,44 @@ async function main() {
       sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
       instruction,
       wake_policy: wake,
+    }), null, 2));
+    return;
+  }
+  if (resource === 'files') {
+    if (action === 'targets') {
+      console.log(JSON.stringify(await request('files/targets'), null, 2));
+      return;
+    }
+    const agent = option('--agent') || (process.argv.includes('--master') ? 'master' : undefined);
+    const file = option('--file');
+    const name = option('--name');
+    const instruction = option('--instruction');
+    const wake = option('--wake') || 'ensure_running';
+    const crypto = await import('node:crypto');
+    const transferId = option('--transfer-id') || ('xfr_' + crypto.randomBytes(18).toString('base64url'));
+    if (!agent || !file || !['ensure_running', 'queue_only', 'interrupt'].includes(wake)) {
+      console.error('files send requires --agent ID or --master, --file PATH, and optional --wake ensure_running|queue_only|interrupt');
+      process.exit(2);
+    }
+    if (!/^xfr_[A-Za-z0-9_-]{16,80}$/.test(transferId)) {
+      console.error('--transfer-id must be a WebSpider xfr_ identifier');
+      process.exit(2);
+    }
+    const path = await import('node:path');
+    const absolute = path.resolve(file);
+    const workspace = process.env.WEBSPIDER_WORKSPACE_ROOT || process.cwd();
+    const relative = path.relative(workspace, absolute).split(path.sep).join('/');
+    if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) {
+      console.error('files send accepts only files inside this agent workspace');
+      process.exit(2);
+    }
+    console.error('WebSpider file transfer ID: ' + transferId);
+    console.log(JSON.stringify(await request('agents/' + encodeURIComponent(agent) + '/files', 'POST', {
+      source_path: relative,
+      filename: name,
+      instruction,
+      wake_policy: wake,
+      transfer_id: transferId,
     }), null, 2));
     return;
   }
@@ -649,6 +688,7 @@ export class ProcessSupervisor extends EventEmitter {
         WEBSPIDER_AGENT_INSTANCE_ID: agentInstanceId || '',
         WEBSPIDER_TASK_ID: taskId || '',
         WEBSPIDER_ROOT_ID: rootId,
+        WEBSPIDER_WORKSPACE_ROOT: root.canonical,
         ...environment,
         ...guideEnvironment,
         ...policyEnvironment,

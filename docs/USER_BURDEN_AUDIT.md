@@ -31,6 +31,7 @@ A third invariant applies to interaction topology: direct user-to-Sub-Spider pro
 | Codex instructions | Adapter-specific integration would be required | Compose existing global guidance with the project agreement in a private managed `CODEX_HOME/AGENTS.md` |
 | Landing page | Opened on fabric operations or forced the Master | Open the most recently active agent terminal; keep the Master and operational overview one click away |
 | Direct project work | Treated workers mainly as Master-controlled executors | Make every Sub-Spider a first-class persistent user interface with direct Terminal, durable Text box/Conversation messages, files, attachments, and project-local status |
+| Supplying data | Every browser upload also became an agent message; cross-machine files needed an external channel | Keep message-coupled terminal attachments, add quiet destination-folder uploads, and provide chunked root-confined Spider-to-Spider relay without SSH |
 | Master context | Every worker lifecycle report interrupted the Master | Persist worker status without a Master message by default; require explicit notification for delegated results, requested milestones, blockers, material risks, or actionable decisions |
 | Project steering | Required navigating to an agent before expressing intent | Add a project-level outcome box that selects the active agent and safe delivery behavior automatically |
 | Message delivery | Exposed four scheduling choices on every message | Use “next safe point” by default; move alternate delivery semantics under progressive disclosure |

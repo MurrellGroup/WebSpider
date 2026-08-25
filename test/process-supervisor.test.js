@@ -372,7 +372,7 @@ test('agent launch materializes the inherited project agreement without workspac
   fs.mkdirSync(inheritedCodexHome);
   fs.writeFileSync(path.join(inheritedCodexHome, 'AGENTS.md'), '# User defaults\nPreserve the user rule.');
   const fakeCodex = path.join(directory, 'codex');
-  fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -n "$HOME" && test -n "$USER" && test -n "$LOGNAME" && test -n "$SHELL" && test -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -f "$WEBSPIDER_USER_GUIDE" && grep -q "Master Spider" "$WEBSPIDER_USER_GUIDE" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test"\n');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -n "$HOME" && test -n "$USER" && test -n "$LOGNAME" && test -n "$SHELL" && test -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -f "$WEBSPIDER_USER_GUIDE" && grep -q "Master Spider" "$WEBSPIDER_USER_GUIDE" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test" && test "$WEBSPIDER_WORKSPACE_ROOT" = "$PWD"\n');
   fs.chmodSync(fakeCodex, 0o700);
   const database = new NodeDatabase(path.join(directory, 'node.db'));
   const roots = new RootedFileService([{ id: 'awr_context', path: workspace }]);
@@ -415,6 +415,11 @@ test('agent launch materializes the inherited project agreement without workspac
   assert.match(controlScript, /usage report --weekly-remaining PERCENT/);
   assert.match(controlScript, /request\('usage', 'POST', body\)/);
   assert.match(controlScript, /agents list/);
+  assert.match(controlScript, /files targets/);
+  assert.match(controlScript, /request\('files\/targets'\)/);
+  assert.match(controlScript, /source_path: relative/);
+  assert.match(controlScript, /transfer_id: transferId/);
+  assert.match(controlScript, /process\.env\.WEBSPIDER_WORKSPACE_ROOT/);
   assert.match(controlScript, /portfolio list/);
   assert.match(controlScript, /report --status idle\|working\|blocked\|completed/);
   assert.match(controlScript, /--notify-master/);

@@ -194,6 +194,19 @@ test('browser file attachments stage for the selected agent and send only on pla
   assert.match(app, /if \(hasAttachments && !await sendStagedTerminalAttachments\(\)\) return/);
 });
 
+test('Files tab uploads into the open folder without messaging the agent', () => {
+  assert.match(app, /id="workspace-file-input"[^>]*type="file"[^>]*multiple/);
+  assert.match(app, /data-action="choose-workspace-files"/);
+  assert.match(app, /Upload into workspace/);
+  assert.match(app, /This does not message, wake, or otherwise notify the agent/);
+  assert.match(app, /Keep both \(recommended\)/);
+  assert.match(app, /Replace the existing file/);
+  assert.match(app, /\/file-transfers/);
+  assert.match(app, /received_bytes/);
+  assert.match(app, /retryWorkspaceUploadRequest/);
+  assert.match(app, /uploaded without messaging the agent/);
+});
+
 test('every primary agent Text box is described and delivered as a direct durable message', () => {
   assert.match(app, /terminal\.kind === 'primary_agent'[\s\S]*Draft a durable message directly to/);
   assert.match(app, /if \(terminal\?\.kind === 'primary_agent'\)/);

@@ -5,12 +5,16 @@ import { createHash, randomBytes } from 'node:crypto';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 import { validateFileUpload } from '../lib/file-upload.js';
 import { validateImageUpload } from '../lib/image-upload.js';
+import {
+  FILE_TRANSFER_CHUNK_BYTES, validateTransferConflict, validateTransferId, validateTransferSize,
+} from '../lib/file-transfer.js';
 
 const {
   O_RDONLY,
   O_NOFOLLOW,
   O_DIRECTORY,
   O_CLOEXEC,
+  O_RDWR,
 } = fs.constants;
 
 const ACTIVE_PREVIEW_EXTENSIONS = new Set(['.html', '.htm', '.svg', '.js', '.mjs', '.cjs']);
@@ -49,6 +53,58 @@ function metadata(name, stat, extra = {}) {
     previewable: kind === 'file' && !ACTIVE_PREVIEW_EXTENSIONS.has(path.extname(name).toLowerCase()),
     ...extra,
   };
+}
+
+function transferVersion(stat) {
+  return createHash('sha256').update([
+    stat.dev, stat.ino, stat.size, Math.trunc(stat.mtimeMs), Math.trunc(stat.ctimeMs),
+  ].join(':')).digest('hex');
+}
+
+function numberedFilename(filename, index) {
+  const extension = path.extname(filename);
+  const stem = extension ? filename.slice(0, -extension.length) : filename;
+  return `${stem} (${index})${extension}`;
+}
+
+function createTransferMetadata(metadataPath, record) {
+  const descriptor = fs.openSync(metadataPath, 'wx', 0o600);
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(record));
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function replaceTransferMetadata(metadataPath, record) {
+  const temporary = `${metadataPath}.${randomBytes(8).toString('hex')}.tmp`;
+  const descriptor = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(record));
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  try {
+    fs.renameSync(temporary, metadataPath);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+    throw error;
+  }
+}
+
+async function sha256FileHandle(handle, size) {
+  const digest = createHash('sha256');
+  const buffer = Buffer.alloc(Math.min(FILE_TRANSFER_CHUNK_BYTES, Math.max(1, size)));
+  let offset = 0;
+  while (offset < size) {
+    const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - offset), offset);
+    invariant(bytesRead > 0, 'WS_TRANSFER_INVALID', 'File ended during checksum verification.', 409);
+    digest.update(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  return digest.digest('hex');
 }
 
 export function validateRelativePath(value, { allowEmpty = true } = {}) {
@@ -185,6 +241,26 @@ export class RootedFileService {
     const resolved = fs.realpathSync(destination);
     invariant(within(rootPath, resolved), 'WS_PATH_ESCAPE_BLOCKED', 'Inbox document escaped the workspace root.', 403);
     return { document_id: documentId, relative_path: relativePath, filename, sha256: digest, size_bytes: bytes.length, duplicate: false };
+  }
+
+  ensureTransferInbox(rootId) {
+    const root = this.getRoot(rootId);
+    const rootPath = this.#currentRoot(root);
+    let directory = root.anchor;
+    for (const component of ['.webspider', 'inbox']) {
+      directory = path.join(directory, component);
+      try {
+        const stat = fs.lstatSync(directory);
+        invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'The reserved WebSpider inbox path is not a real directory.', 403);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        fs.mkdirSync(directory, { mode: 0o700 });
+      }
+      invariant(within(rootPath, fs.realpathSync(directory)), 'WS_PATH_ESCAPE_BLOCKED',
+        'Inbox path escaped the workspace root.', 403);
+    }
+    return { relative_path: '.webspider/inbox' };
   }
 
   writeUserGuide(rootId, bytes) {
@@ -324,6 +400,311 @@ export class RootedFileService {
     invariant(within(rootPath, fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
       'Attached file escaped the workspace root.', 403);
     return { upload_id: uploadId, relative_path: relativePath, duplicate: false, ...validated };
+  }
+
+  async describeTransferSource(rootId, relativePath) {
+    const root = this.getRoot(rootId);
+    const opened = await this.#open(root, relativePath, 'file');
+    try {
+      validateTransferSize(Number(opened.stat.size));
+      return {
+        path: opened.relativePath,
+        filename: path.basename(opened.relativePath),
+        size_bytes: Number(opened.stat.size),
+        mtime: opened.stat.mtime.toISOString(),
+        version: transferVersion(opened.stat),
+      };
+    } finally {
+      await opened.handle.close();
+    }
+  }
+
+  async readTransferSourceChunk(rootId, { path: relativePath, version, offset, length }) {
+    const root = this.getRoot(rootId);
+    const opened = await this.#open(root, relativePath, 'file');
+    try {
+      invariant(version === transferVersion(opened.stat), 'WS_FILE_CHANGED',
+        'Source file changed during transfer.', 412);
+      invariant(Number.isSafeInteger(offset) && offset >= 0 && offset <= opened.stat.size,
+        'WS_VALIDATION', 'File transfer offset is invalid.');
+      invariant(Number.isInteger(length) && length >= 1 && length <= FILE_TRANSFER_CHUNK_BYTES,
+        'WS_VALIDATION', `File transfer chunks may be at most ${FILE_TRANSFER_CHUNK_BYTES} bytes.`);
+      const bytes = Buffer.alloc(Math.min(length, Number(opened.stat.size) - offset));
+      const { bytesRead } = await opened.handle.read(bytes, 0, bytes.length, offset);
+      const chunk = bytes.subarray(0, bytesRead);
+      invariant(version === transferVersion(await opened.handle.stat()), 'WS_FILE_CHANGED',
+        'Source file changed during transfer.', 412);
+      return {
+        offset,
+        size_bytes: chunk.length,
+        data_base64: chunk.toString('base64'),
+        sha256: createHash('sha256').update(chunk).digest('hex'),
+        eof: offset + chunk.length === Number(opened.stat.size),
+      };
+    } finally {
+      await opened.handle.close();
+    }
+  }
+
+  async hashTransferSource(rootId, { path: relativePath, version }) {
+    const root = this.getRoot(rootId);
+    const opened = await this.#open(root, relativePath, 'file');
+    try {
+      invariant(version === transferVersion(opened.stat), 'WS_FILE_CHANGED',
+        'Source file changed during transfer.', 412);
+      validateTransferSize(Number(opened.stat.size));
+      const digest = await sha256FileHandle(opened.handle, Number(opened.stat.size));
+      invariant(version === transferVersion(await opened.handle.stat()), 'WS_FILE_CHANGED',
+        'Source file changed during transfer.', 412);
+      return { size_bytes: Number(opened.stat.size), version, sha256: digest };
+    } finally {
+      await opened.handle.close();
+    }
+  }
+
+  async beginFileTransfer(rootId, {
+    transferId, destinationPath, sizeBytes, conflict = 'error', sourceSha256 = null,
+    sourceVersion = null, sourcePath = null, acceptCompleted = false,
+  }) {
+    const root = this.getRoot(rootId);
+    validateTransferId(transferId);
+    const expectedSize = validateTransferSize(sizeBytes);
+    const conflictMode = validateTransferConflict(conflict);
+    const parts = validateRelativePath(destinationPath, { allowEmpty: false });
+    const requestedName = parts.at(-1);
+    const parentRelative = parts.slice(0, -1).join('/');
+    const opened = await this.#open(root, parentRelative, 'directory');
+    try {
+      const directory = root.usesProc ? `/proc/self/fd/${opened.handle.fd}` : opened.resolvedPath;
+      const partial = path.join(directory, `.webspider-${transferId}.part`);
+      const metadataPath = path.join(directory, `.webspider-${transferId}.json`);
+      const metadataStat = fs.lstatSync(metadataPath, { throwIfNoEntry: false });
+      if (metadataStat) {
+        invariant(metadataStat.isFile() && !metadataStat.isSymbolicLink(), 'WS_TRANSFER_INVALID',
+          'File transfer metadata is invalid.', 409);
+        let previous;
+        try { previous = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch {
+          throw new WebSpiderError('WS_TRANSFER_INVALID', 'File transfer metadata is damaged.', 409);
+        }
+        invariant(previous.transfer_id === transferId
+          && [previous.requested_destination_path, previous.destination_path].includes(destinationPath)
+          && previous.size_bytes === expectedSize && previous.conflict === conflictMode
+          && (sourceSha256 == null || previous.source_sha256 === sourceSha256)
+          && (sourceVersion == null || previous.source_version === sourceVersion)
+          && (sourcePath == null || previous.source_path === sourcePath),
+        'WS_CONFLICT', 'File transfer ID is already in use for another destination.', 409);
+        const partialStat = fs.lstatSync(partial, { throwIfNoEntry: false });
+        const confirmedBytes = Number(previous.received_bytes ?? partialStat?.size);
+        invariant(Number.isSafeInteger(confirmedBytes) && confirmedBytes >= 0 && confirmedBytes <= expectedSize
+          && partialStat?.isFile() && !partialStat.isSymbolicLink() && partialStat.size >= confirmedBytes,
+          'WS_TRANSFER_INVALID', 'File transfer partial data is invalid.', 409);
+        if (partialStat.size > confirmedBytes) fs.truncateSync(partial, confirmedBytes);
+        return { ...previous, received_bytes: confirmedBytes, resumed: true };
+      }
+      const orphanedPartial = fs.lstatSync(partial, { throwIfNoEntry: false });
+      if (orphanedPartial) {
+        invariant(orphanedPartial.isFile() && !orphanedPartial.isSymbolicLink(), 'WS_TRANSFER_INVALID',
+          'File transfer partial data is invalid.', 409);
+        fs.unlinkSync(partial);
+      }
+      let filename = requestedName;
+      const destinationExists = (name) => fs.lstatSync(path.join(directory, name), { throwIfNoEntry: false });
+      const existing = destinationExists(filename);
+      if (existing && conflictMode === 'error') {
+        if (acceptCompleted) {
+          invariant(existing.isFile() && !existing.isSymbolicLink() && Number(existing.size) === expectedSize,
+            'WS_FILE_EXISTS', 'A different file already exists at the requested destination.', 409, {
+              relative_path: destinationPath,
+            });
+          const handle = await fs.promises.open(
+            path.join(directory, filename), O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+          );
+          try {
+            const openedStat = await handle.stat();
+            invariant(openedStat.isFile() && Number(openedStat.size) === expectedSize,
+              'WS_FILE_EXISTS', 'A different file already exists at the requested destination.', 409);
+            return {
+              transfer_id: transferId,
+              requested_destination_path: destinationPath,
+              destination_path: destinationPath,
+              relative_path: destinationPath,
+              filename,
+              size_bytes: expectedSize,
+              received_bytes: expectedSize,
+              sha256: await sha256FileHandle(handle, expectedSize),
+              completed: true,
+            };
+          } finally {
+            await handle.close();
+          }
+        }
+        throw new WebSpiderError('WS_FILE_EXISTS', 'A file already exists at the requested destination.', 409, {
+          relative_path: destinationPath,
+        });
+      }
+      if (existing && conflictMode === 'overwrite') {
+        invariant(existing.isFile() && !existing.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'Only an existing regular file may be replaced.', 403);
+      }
+      if (existing && conflictMode === 'rename') {
+        let index = 1;
+        while (destinationExists(numberedFilename(requestedName, index))) index += 1;
+        filename = numberedFilename(requestedName, index);
+      }
+      const finalParts = [...parts.slice(0, -1), filename];
+      const finalPath = finalParts.join('/');
+      fs.writeFileSync(partial, Buffer.alloc(0), { mode: 0o600, flag: 'wx' });
+      const record = {
+        transfer_id: transferId,
+        requested_destination_path: destinationPath,
+        destination_path: finalPath,
+        size_bytes: expectedSize,
+        conflict: conflictMode,
+        source_sha256: sourceSha256 || null,
+        source_version: sourceVersion || null,
+        source_path: sourcePath || null,
+        received_bytes: 0,
+        created_at: new Date().toISOString(),
+      };
+      try {
+        createTransferMetadata(metadataPath, record);
+        await opened.handle.sync();
+      } catch (error) {
+        try { fs.unlinkSync(partial); } catch { /* best-effort rollback */ }
+        try { fs.unlinkSync(metadataPath); } catch { /* best-effort rollback */ }
+        throw error;
+      }
+      return { ...record, received_bytes: 0, resumed: false };
+    } finally {
+      await opened.handle.close();
+    }
+  }
+
+  async writeFileTransferChunk(rootId, { transferId, destinationPath, offset, bytes, sha256 }) {
+    invariant(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= FILE_TRANSFER_CHUNK_BYTES,
+      'WS_REQUEST_TOO_LARGE', 'File transfer chunk is too large.', 413);
+    invariant(createHash('sha256').update(bytes).digest('hex') === sha256,
+      'WS_UPLOAD_INVALID', 'File transfer chunk checksum does not match.', 400);
+    const transfer = await this.#openFileTransfer(rootId, transferId, destinationPath);
+    try {
+      invariant(Number.isSafeInteger(offset) && offset >= 0, 'WS_VALIDATION', 'File transfer offset is invalid.');
+      invariant(offset + bytes.length <= transfer.metadata.size_bytes, 'WS_REQUEST_TOO_LARGE',
+        'File transfer exceeds its declared size.', 413);
+      const handle = await fs.promises.open(transfer.partial, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+      try {
+        const stat = await handle.stat();
+        invariant(stat.isFile(), 'WS_TRANSFER_INVALID', 'File transfer partial data is invalid.', 409);
+        const confirmedBytes = Number(transfer.metadata.received_bytes ?? stat.size);
+        invariant(Number.isSafeInteger(confirmedBytes) && confirmedBytes >= 0 && stat.size === confirmedBytes,
+          'WS_TRANSFER_INVALID', 'File transfer confirmation state is invalid.', 409);
+        if (offset < confirmedBytes) {
+          invariant(offset + bytes.length <= confirmedBytes, 'WS_CONFLICT', 'File transfer chunk overlaps partial data.', 409);
+          const existing = Buffer.alloc(bytes.length);
+          await handle.read(existing, 0, existing.length, offset);
+          invariant(existing.equals(bytes), 'WS_CONFLICT', 'Retried file transfer chunk has different content.', 409);
+          return { transfer_id: transferId, received_bytes: confirmedBytes, duplicate: true };
+        }
+        invariant(offset === confirmedBytes, 'WS_CONFLICT', 'File transfer chunks must arrive in order.', 409);
+        let written = 0;
+        while (written < bytes.length) {
+          const result = await handle.write(bytes, written, bytes.length - written, offset + written);
+          invariant(result.bytesWritten > 0, 'WS_TRANSFER_INVALID', 'File transfer write made no progress.', 500);
+          written += result.bytesWritten;
+        }
+        await handle.sync();
+        transfer.metadata.received_bytes = offset + bytes.length;
+        replaceTransferMetadata(transfer.metadataPath, transfer.metadata);
+        await transfer.parent.handle.sync();
+        return { transfer_id: transferId, received_bytes: transfer.metadata.received_bytes, duplicate: false };
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await transfer.parent.handle.close();
+    }
+  }
+
+  async finishFileTransfer(rootId, { transferId, destinationPath, sha256 = null }) {
+    const root = this.getRoot(rootId);
+    const transfer = await this.#openFileTransfer(rootId, transferId, destinationPath);
+    try {
+      const stat = fs.lstatSync(transfer.partial);
+      invariant(stat.isFile() && !stat.isSymbolicLink()
+        && stat.size === transfer.metadata.size_bytes
+        && Number(transfer.metadata.received_bytes ?? stat.size) === transfer.metadata.size_bytes,
+        'WS_TRANSFER_INCOMPLETE', 'File transfer is not complete.', 409, {
+          received_bytes: Number(stat.size), expected_bytes: transfer.metadata.size_bytes,
+        });
+      const handle = await fs.promises.open(transfer.partial, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      let actualSha256;
+      try {
+        actualSha256 = await sha256FileHandle(handle, Number(stat.size));
+      } finally {
+        await handle.close();
+      }
+      if (sha256) invariant(actualSha256 === sha256, 'WS_UPLOAD_INVALID',
+        'Completed file checksum does not match the source.', 400);
+      let finalPath = transfer.metadata.destination_path;
+      let filename = path.basename(finalPath);
+      const directory = transfer.directory;
+      let destination = path.join(directory, filename);
+      let existing = fs.lstatSync(destination, { throwIfNoEntry: false });
+      if (existing && transfer.metadata.conflict === 'rename') {
+        let index = 1;
+        do {
+          filename = numberedFilename(path.basename(transfer.metadata.destination_path), index);
+          destination = path.join(directory, filename);
+          existing = fs.lstatSync(destination, { throwIfNoEntry: false });
+          index += 1;
+        } while (existing);
+        const parts = validateRelativePath(transfer.metadata.destination_path, { allowEmpty: false });
+        finalPath = [...parts.slice(0, -1), filename].join('/');
+      } else if (existing && transfer.metadata.conflict === 'error') {
+        throw new WebSpiderError('WS_FILE_EXISTS', 'A file appeared at the destination during transfer.', 409);
+      } else if (existing) {
+        invariant(existing.isFile() && !existing.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'Only an existing regular file may be replaced.', 403);
+      }
+      fs.renameSync(transfer.partial, destination);
+      fs.chmodSync(destination, 0o600);
+      try { fs.unlinkSync(transfer.metadataPath); } catch { /* completed data is authoritative */ }
+      try { await transfer.parent.handle.sync(); } catch { /* destination data was already synced */ }
+      invariant(within(this.#currentRoot(root), fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
+        'Transferred file escaped the workspace root.', 403);
+      return {
+        transfer_id: transferId, relative_path: finalPath, filename,
+        size_bytes: transfer.metadata.size_bytes, sha256: actualSha256,
+      };
+    } finally {
+      await transfer.parent.handle.close();
+    }
+  }
+
+  async #openFileTransfer(rootId, transferId, destinationPath) {
+    const root = this.getRoot(rootId);
+    validateTransferId(transferId);
+    const parts = validateRelativePath(destinationPath, { allowEmpty: false });
+    const parent = await this.#open(root, parts.slice(0, -1).join('/'), 'directory');
+    try {
+      const directory = root.usesProc ? `/proc/self/fd/${parent.handle.fd}` : parent.resolvedPath;
+      const metadataPath = path.join(directory, `.webspider-${transferId}.json`);
+      const partial = path.join(directory, `.webspider-${transferId}.part`);
+      let metadata;
+      try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); }
+      catch (error) {
+        if (error.code === 'ENOENT') throw new WebSpiderError('WS_TRANSFER_NOT_FOUND', 'File transfer was not found.', 404);
+        throw new WebSpiderError('WS_TRANSFER_INVALID', 'File transfer metadata is damaged.', 409);
+      }
+      invariant(metadata.transfer_id === transferId && metadata.destination_path === destinationPath,
+        'WS_CONFLICT', 'File transfer destination does not match.', 409);
+      const partialStat = fs.lstatSync(partial, { throwIfNoEntry: false });
+      invariant(partialStat?.isFile() && !partialStat.isSymbolicLink(),
+        'WS_TRANSFER_INVALID', 'File transfer partial data is invalid.', 409);
+      return { root, parent, directory, metadataPath, partial, metadata };
+    } catch (error) {
+      await parent.handle.close();
+      throw error;
+    }
   }
 
   #candidate(root, parts) {

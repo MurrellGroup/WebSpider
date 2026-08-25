@@ -16,6 +16,7 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'agents:read',
   'messages:write',
   'documents:write',
+  'files:transfer',
   'tasks:read',
   'tasks:write',
   'reminders:read:self',
@@ -715,6 +716,7 @@ export class HubDatabase extends EventEmitter {
         'reminders:read:self',
         'reminders:write:self',
         'documents:write',
+        'files:transfer',
       ]);
       invariant(scopes.every((scope) => workerScopes.has(scope)), 'WS_FORBIDDEN',
         'A worker agent can only report status, manage its own detached tasks, and schedule its own hooks.', 403);

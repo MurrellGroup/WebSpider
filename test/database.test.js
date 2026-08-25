@@ -332,7 +332,7 @@ test('system defaults remain layered beneath project overrides with optimistic r
   );
 });
 
-test('worker tokens are confined to self status, self tasks, and self-owned hooks', (t) => {
+test('worker tokens are confined to self controls and root-confined file relay', (t) => {
   const { database, agent } = databaseFixture(t);
   assert.equal(agent.orchestration_role, 'worker');
   database.issueAgentControlToken(agent.id, 'wsa_worker_status', ['status:write:self']);
@@ -342,10 +342,10 @@ test('worker tokens are confined to self status, self tasks, and self-owned hook
     (error) => error.code === 'WS_FORBIDDEN',
   );
   database.issueAgentControlToken(agent.id, 'wsa_worker_hooks', [
-    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self',
+    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self', 'files:transfer',
   ]);
   assert.deepEqual(database.getAgentControlToken('wsa_worker_hooks').scopes, [
-    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self',
+    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self', 'files:transfer',
   ]);
   const main = database.setAgentRole(agent.id, 'main');
   assert.equal(main.can_edit_behavior, true);

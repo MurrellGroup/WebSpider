@@ -16,6 +16,10 @@ import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/projec
 import { agentLaunchArguments } from '../lib/agent-profile.js';
 import { decodeFileBase64, validateFileUpload } from '../lib/file-upload.js';
 import { decodeImageBase64, validateImageUpload } from '../lib/image-upload.js';
+import {
+  decodeTransferChunk, FILE_TRANSFER_CHUNK_BYTES, validateTransferConflict,
+  validateTransferFilename, validateTransferId, validateTransferSize,
+} from '../lib/file-transfer.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIR = path.resolve(MODULE_DIR, '../../web');
@@ -28,6 +32,7 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'agents:read',
   'messages:write',
   'documents:write',
+  'files:transfer',
   'tasks:read',
   'tasks:write',
   'reminders:read:self',
@@ -42,6 +47,7 @@ const WORKER_AGENT_CONTROL_SCOPES = [
   'reminders:read:self',
   'reminders:write:self',
   'documents:write',
+  'files:transfer',
 ];
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 
@@ -232,7 +238,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.11', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: '0.6.12', portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
@@ -574,6 +580,19 @@ export class Hub {
       })),
     }), { agentOnly: true, agentScopes: ['agents:read'] });
 
+    route('GET', '/api/v1/agent-control/files/targets', async (ctx) => ({
+      targets: this.database.listAgents()
+        .filter((agent) => !agent.project_archived_at && agent.id !== ctx.principal.agent_instance_id)
+        .map((agent) => ({
+          id: agent.id,
+          title: agent.title,
+          project_name: agent.project_name,
+          node_name: agent.node_name,
+          orchestration_role: agent.orchestration_role,
+          online: this.broker.isOnline(agent.node_id),
+        })),
+    }), { agentOnly: true, agentScopes: ['files:transfer'] });
+
     route('GET', '/api/v1/agent-control/portfolio', async () => ({
       projects: this.database.listProjects().map((project) => ({
         id: project.id,
@@ -906,6 +925,92 @@ export class Hub {
       if (!result.duplicate) queueMicrotask(() => this.#dispatchMessage(result.message.id).catch((error) => this.#logError(error)));
       return { ...result, document: { id: documentId, filename, relative_path: relativePath, sha256: digest, size_bytes: bytes.length } };
     }, { agentOnly: true, agentScopes: ['documents:write'] });
+
+    route('POST', '/api/v1/agent-control/agents/:id/files', async (ctx) => {
+      const body = await readJSON(ctx.request, 65_536);
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const target = ctx.params.id === 'master' ? this.#masterAgent() : this.database.getAgent(ctx.params.id);
+      invariant(source && target, 'WS_NOT_FOUND', 'Source or destination agent was not found.', 404);
+      invariant(source.id !== target.id, 'WS_VALIDATION', 'Choose a different destination agent.');
+      invariant(!target.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Archived projects cannot receive files.', 409);
+      const sourceRoot = this.database.listAgentRoots(source.id)[0];
+      const targetRoot = this.database.listAgentRoots(target.id)[0];
+      invariant(sourceRoot && targetRoot, 'WS_ROOT_NOT_FOUND', 'Source or destination workspace root is unavailable.', 404);
+      invariant(this.broker.isOnline(sourceRoot.node_id) && this.broker.isOnline(targetRoot.node_id),
+        'WS_NODE_OFFLINE', 'Both workstations must be online for a live file transfer.', 503);
+      invariant(typeof body.source_path === 'string' && body.source_path.length > 0,
+        'WS_VALIDATION', 'A source workspace-relative file path is required.');
+      const transferId = body.transfer_id || makeId('xfr');
+      validateTransferId(transferId);
+      const sourceDescription = await this.broker.requestTransient(sourceRoot.node_id, 'files.transfer-source', {
+        root_id: sourceRoot.node_root_id,
+        path: body.source_path,
+      }, { timeoutMs: 60_000 });
+      const filename = validateTransferFilename(
+        body.filename == null ? String(sourceDescription.filename || '').normalize('NFC') : body.filename,
+      );
+      const instruction = body.instruction == null
+        ? 'Use this transferred file when it is relevant to your project work.'
+        : body.instruction;
+      invariant(typeof instruction === 'string' && instruction.trim().length > 0 && instruction.length <= 16_384,
+        'WS_VALIDATION', 'instruction must be a non-empty string of at most 16384 characters.');
+      const wakePolicy = body.wake_policy || 'ensure_running';
+      invariant(['ensure_running', 'queue_only', 'interrupt'].includes(wakePolicy),
+        'WS_VALIDATION', 'Invalid wake policy.');
+      await this.broker.requestTransient(targetRoot.node_id, 'files.transfer-inbox', {
+        root_id: targetRoot.node_root_id,
+      });
+      const destinationPath = `.webspider/inbox/${transferId}-${filename}`;
+      let transfer;
+      try {
+        transfer = await this.#relayFileTransfer({
+          transferId, sourceRoot, targetRoot, sourcePath: sourceDescription.path,
+          sourceDescription, destinationPath, conflict: 'error',
+        });
+      } catch (error) {
+        if (error instanceof WebSpiderError) {
+          error.details = { ...(error.details || {}), transfer_id: transferId };
+        }
+        throw error;
+      }
+      const text = [
+        '[WebSpider file handoff]',
+        `Transfer ID: ${transferId}`,
+        `From: ${source.title || source.id} (${source.id})`,
+        `Filename: ${transfer.filename}`,
+        `Size: ${transfer.size_bytes} bytes`,
+        `SHA-256: ${transfer.sha256}`,
+        `Local path: ${transfer.relative_path}`,
+        `Instruction: ${instruction.trim()}`,
+        'The bytes were relayed through WebSpider; SSH access between workstations was not used.',
+      ].join('\n');
+      const message = this.database.createMessage({
+        threadId: target.active_thread_id,
+        actorId: ctx.principal.principal_id,
+        deliveryRole: 'user',
+        displaySender: `${source.title || source.profile_name || source.id} file via WebSpider`,
+        contentParts: [{ type: 'text', text }],
+        wakePolicy,
+        idempotencyKey: `file-transfer:${transferId}:${target.id}`,
+        traceId: body.trace_id || makeId('trc'),
+        hopCount: 1,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.file.transfer',
+        targetType: 'agent_instance',
+        targetId: target.id,
+        projectId: target.project_id,
+        decision: 'allowed_root_confined_relay',
+        newState: {
+          transfer_id: transferId, source_agent_id: source.id,
+          source_path: body.source_path, destination_path: transfer.relative_path,
+          size_bytes: transfer.size_bytes, sha256: transfer.sha256,
+        },
+      });
+      if (!message.duplicate) queueMicrotask(() => this.#dispatchMessage(message.message.id).catch((error) => this.#logError(error)));
+      return { transfer, message: message.message, duplicate: message.duplicate };
+    }, { agentOnly: true, agentScopes: ['files:transfer'] });
 
     route('GET', '/api/v1/nodes', async () => ({ nodes: this.database.listNodes() }));
     route('POST', '/api/v1/nodes/join-tokens', async (ctx) => {
@@ -1384,6 +1489,68 @@ export class Hub {
       options: { content: ctx.url.searchParams.get('content') !== 'false' },
     }, 'files.search'));
     route('GET', '/api/v1/roots/:id/git-status', async (ctx) => this.#fileRequest(ctx, 'files.git-status', { path: ctx.url.searchParams.get('path') || '' }, 'files.git_status'));
+    route('POST', '/api/v1/roots/:id/file-transfers', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const root = this.database.getRoot(ctx.params.id);
+      invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+      invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation must be online to upload files.', 503);
+      const transferId = body.transfer_id || makeId('xfr');
+      validateTransferId(transferId);
+      validateTransferSize(body.size_bytes);
+      validateTransferConflict(body.conflict || 'rename');
+      const result = await this.broker.requestTransient(root.node_id, 'files.transfer-begin', {
+        root_id: root.node_root_id,
+        transfer_id: transferId,
+        destination_path: body.destination_path,
+        size_bytes: body.size_bytes,
+        conflict: body.conflict || 'rename',
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'workspace.file_upload.begin',
+        targetType: 'workspace_root', targetId: root.id, projectId: root.project_id,
+        newState: { transfer_id: transferId, relative_path: result.destination_path, size_bytes: result.size_bytes },
+      });
+      return result;
+    });
+    route('POST', '/api/v1/roots/:id/file-transfers/:transfer/chunks', async (ctx) => {
+      const body = await readJSON(ctx.request, 12 * 1024 * 1024);
+      const root = this.database.getRoot(ctx.params.id);
+      invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+      invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation disconnected during upload.', 503);
+      validateTransferId(ctx.params.transfer);
+      const bytes = decodeTransferChunk(body.data_base64);
+      return this.broker.requestTransient(root.node_id, 'files.transfer-chunk', {
+        root_id: root.node_root_id,
+        transfer_id: ctx.params.transfer,
+        destination_path: body.destination_path,
+        offset: body.offset,
+        data_base64: bytes.toString('base64'),
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      }, { timeoutMs: 60_000 });
+    });
+    route('POST', '/api/v1/roots/:id/file-transfers/:transfer:complete', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const root = this.database.getRoot(ctx.params.id);
+      invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+      invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation disconnected during upload.', 503);
+      validateTransferId(ctx.params.transfer);
+      const result = await this.broker.requestTransient(root.node_id, 'files.transfer-finish', {
+        root_id: root.node_root_id,
+        transfer_id: ctx.params.transfer,
+        destination_path: body.destination_path,
+      }, { timeoutMs: 1_800_000 });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'workspace.file_upload.complete',
+        targetType: 'workspace_root', targetId: root.id, projectId: root.project_id,
+        newState: {
+          transfer_id: result.transfer_id, relative_path: result.relative_path,
+          size_bytes: result.size_bytes, sha256: result.sha256,
+        },
+      });
+      return result;
+    });
     route('GET', '/api/v1/roots/:id/download', async (ctx) => {
       const relativePath = ctx.url.searchParams.get('path');
       const result = await this.#fileRequest(ctx, 'files.download', { path: relativePath, max_bytes: 64 * 1024 * 1024 }, 'files.download');
@@ -2226,6 +2393,86 @@ export class Hub {
       this.database.audit({ actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id, projectId: root.project_id, decision, newState: { relative_path: payload.path || '', error: error.code } });
       throw error;
     }
+  }
+
+  async #relayFileTransfer({
+    transferId, sourceRoot, targetRoot, sourcePath, sourceDescription,
+    destinationPath, conflict = 'error',
+  }) {
+    const sizeBytes = validateTransferSize(sourceDescription.size_bytes);
+    const begun = await this.broker.requestTransient(targetRoot.node_id, 'files.transfer-begin', {
+      root_id: targetRoot.node_root_id,
+      transfer_id: transferId,
+      destination_path: destinationPath,
+      size_bytes: sizeBytes,
+      conflict,
+      source_version: sourceDescription.version,
+      source_path: sourcePath,
+      accept_completed: true,
+    }, { timeoutMs: 60_000 });
+    invariant(Number.isSafeInteger(begun.received_bytes) && begun.received_bytes >= 0
+      && begun.received_bytes <= sizeBytes,
+    'WS_TRANSFER_INVALID', 'Destination node returned an invalid resume offset.', 502);
+    const sourceDigest = async () => {
+      const sourceHash = await this.broker.requestTransient(sourceRoot.node_id, 'files.transfer-hash', {
+        root_id: sourceRoot.node_root_id,
+        path: sourcePath,
+        version: sourceDescription.version,
+      }, { timeoutMs: 1_800_000 });
+      invariant(sourceHash.version === sourceDescription.version && sourceHash.size_bytes === sizeBytes
+        && typeof sourceHash.sha256 === 'string' && /^[a-f0-9]{64}$/.test(sourceHash.sha256),
+      'WS_TRANSFER_INVALID', 'Source node returned an invalid file digest.', 502);
+      return sourceHash.sha256;
+    };
+    if (begun.completed) {
+      const sourceSha256 = await sourceDigest();
+      invariant(sourceSha256 === begun.sha256, 'WS_FILE_EXISTS',
+        'A different file already exists at the requested destination.', 409);
+      return {
+        transfer_id: transferId,
+        relative_path: begun.relative_path,
+        filename: begun.filename,
+        size_bytes: sizeBytes,
+        sha256: sourceSha256,
+        duplicate: true,
+      };
+    }
+    let expectedSha256 = null;
+    const digest = begun.received_bytes ? null : createHash('sha256');
+    if (begun.received_bytes) {
+      expectedSha256 = await sourceDigest();
+    }
+    let offset = begun.received_bytes;
+    while (offset < sizeBytes) {
+      const sourceChunk = await this.broker.requestTransient(sourceRoot.node_id, 'files.transfer-read', {
+        root_id: sourceRoot.node_root_id,
+        path: sourcePath,
+        version: sourceDescription.version,
+        offset,
+        length: Math.min(FILE_TRANSFER_CHUNK_BYTES, sizeBytes - offset),
+      }, { timeoutMs: 60_000 });
+      const bytes = decodeTransferChunk(sourceChunk.data_base64);
+      invariant(bytes.length > 0 && sourceChunk.offset === offset && sourceChunk.size_bytes === bytes.length,
+        'WS_TRANSFER_INVALID', 'Source node returned an invalid file chunk.', 502);
+      invariant(createHash('sha256').update(bytes).digest('hex') === sourceChunk.sha256,
+        'WS_TRANSFER_INVALID', 'Source file chunk checksum does not match.', 502);
+      digest?.update(bytes);
+      await this.broker.requestTransient(targetRoot.node_id, 'files.transfer-chunk', {
+        root_id: targetRoot.node_root_id,
+        transfer_id: transferId,
+        destination_path: begun.destination_path,
+        offset,
+        data_base64: bytes.toString('base64'),
+        sha256: sourceChunk.sha256,
+      }, { timeoutMs: 60_000 });
+      offset += bytes.length;
+    }
+    return this.broker.requestTransient(targetRoot.node_id, 'files.transfer-finish', {
+      root_id: targetRoot.node_root_id,
+      transfer_id: transferId,
+      destination_path: begun.destination_path,
+      sha256: expectedSha256 || digest.digest('hex'),
+    }, { timeoutMs: 1_800_000 });
   }
 
   #noteTitle(value) {

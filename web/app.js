@@ -8,8 +8,10 @@ import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-o
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.11';
+const PORTAL_VERSION = '0.6.12';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
+const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -68,6 +70,8 @@ const state = {
   terminalPendingFiles: [],
   filePath: '',
   fileShowHidden: false,
+  workspacePendingFiles: [],
+  workspaceUploadBusy: false,
   activeRoot: null,
   previewPath: null,
   previewMode: 'source',
@@ -123,9 +127,13 @@ async function api(path, options = {}) {
   const value = type.includes('json') ? await response.json() : await response.text();
   if (response.status === 401) {
     showLogin();
-    throw Object.assign(new Error(value?.error?.message || 'Authentication required'), { code: value?.error?.code });
+    throw Object.assign(new Error(value?.error?.message || 'Authentication required'), {
+      code: value?.error?.code, status: response.status,
+    });
   }
-  if (!response.ok) throw Object.assign(new Error(value?.error?.message || value || response.statusText), { code: value?.error?.code });
+  if (!response.ok) throw Object.assign(new Error(value?.error?.message || value || response.statusText), {
+    code: value?.error?.code, status: response.status,
+  });
   return value;
 }
 
@@ -208,6 +216,24 @@ function showProjectConnection(projectId) {
 
 function showTerminalForm() {
   openModal(`<form id="add-terminal-form"><div class="modal-header"><div><h2>New terminal</h2><p>${h(state.selectedAgent?.node_name || '')}</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Tab name<input name="label" required maxlength="80" value="Monitor"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Open terminal</button></div></div></form>`);
+}
+
+function showWorkspaceUploadForm(files) {
+  state.workspacePendingFiles = files.map((file) => ({
+    file,
+    transferId: `xfr_${randomIdentifier()}`,
+    rootId: state.activeRoot.id,
+    destinationPath: state.filePath ? `${state.filePath}/${file.name.normalize('NFC')}` : file.name.normalize('NFC'),
+    done: false,
+  }));
+  const folder = state.filePath || '/';
+  openModal(`<form id="workspace-upload-form"><div class="modal-header"><div><h2>Upload into workspace</h2><p>${h(state.selectedAgent?.title || 'Agent')} · ${h(folder)}</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid">
+    <div><strong>${files.length} file${files.length === 1 ? '' : 's'}</strong><p class="muted">${files.map((file) => `${h(file.name)} · ${h(formatBytes(file.size))}`).join('<br>')}</p></div>
+    <label>If a name already exists<select name="conflict"><option value="rename">Keep both (recommended)</option><option value="error">Stop and ask me</option><option value="overwrite">Replace the existing file</option></select></label>
+    <p class="muted">Files go into the open folder. This does not message, wake, or otherwise notify the agent.</p>
+    <div id="workspace-upload-progress" class="muted"></div>
+    <div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Upload files</button></div>
+  </div></form>`);
 }
 
 function showCodexSessionForm() {
@@ -870,9 +896,28 @@ document.addEventListener('paste', (event) => {
 }, true);
 
 document.addEventListener('change', (event) => {
-  if (event.target.id !== 'terminal-file-input') return;
-  stageAttachedTerminalFiles([...(event.target.files || [])]);
-  event.target.value = '';
+  if (event.target.id === 'terminal-file-input') {
+    stageAttachedTerminalFiles([...(event.target.files || [])]);
+    event.target.value = '';
+    return;
+  }
+  if (event.target.id === 'workspace-file-input') {
+    const files = [...(event.target.files || [])];
+    event.target.value = '';
+    try {
+      if (!files.length) return;
+      if (files.length > 20) throw new Error('Upload at most 20 files at a time.');
+      for (const file of files) {
+        const filename = file.name.normalize('NFC');
+        if (file.size > MAX_FILE_TRANSFER_BYTES) throw new Error('Workspace uploads may be at most 64 GiB per file.');
+        if (new TextEncoder().encode(filename).length > 160 || filename.trim() !== filename
+          || filename === '.' || filename === '..' || /[\x00-\x1f\x7f/\\]/u.test(filename)) {
+          throw new Error('Choose files with safe names of at most 160 UTF-8 bytes.');
+        }
+      }
+      showWorkspaceUploadForm(files);
+    } catch (error) { toast(friendlyError(error), true); }
+  }
 });
 
 function transmitTerminalInput(data) {
@@ -1223,7 +1268,7 @@ async function renderFiles(agent) {
     $('#agent-content').innerHTML = '<div class="empty"><div><strong>No exposed root</strong><p>This agent has no project root available to the portal.</p></div></div>';
     return;
   }
-  $('#agent-content').innerHTML = `<div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, or PDF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, or PDF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
   await loadDirectory();
 }
 
@@ -1232,10 +1277,45 @@ async function loadDirectory() {
   const data = await api(`/api/v1/roots/${encodeURIComponent(root.id)}/entries?path=${encodeURIComponent(state.filePath)}&hidden=${state.fileShowHidden}`);
   const parts = state.filePath ? state.filePath.split('/') : [];
   const crumbs = [{ name: root.logical_name, path: '' }, ...parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join('/') }))];
-  $('#file-toolbar').innerHTML = `${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}<button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><input id="file-search" class="file-search" placeholder="Search" aria-label="Search files">`;
+  $('#file-toolbar').innerHTML = `${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}<button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" placeholder="Search" aria-label="Search files">`;
   $('#file-rows').innerHTML = data.entries.length ? data.entries.map((entry) => `<button class="file-row ${h(entry.kind)}" data-file-name="${h(entry.name)}" data-file-kind="${h(entry.kind)}">
     <span class="file-icon">${entry.kind === 'directory' ? '▰' : entry.kind === 'symlink' ? '↗' : '▤'}</span><span class="file-name">${h(entry.name)}</span><span class="file-size">${h(formatBytes(entry.size))}</span><span class="file-date">${h(formatTime(entry.mtime))}</span>
   </button>`).join('') : '<div class="empty"><div><strong>Empty directory</strong><p>No visible entries in this workspace path.</p></div></div>';
+}
+
+async function retryWorkspaceUploadRequest(path, options) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { return await api(path, options); } catch (error) {
+      lastError = error;
+      if ((error.status >= 400 && error.status < 500) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+async function uploadWorkspaceFile(entry, conflict, progress) {
+  const { file, transferId, rootId, destinationPath } = entry;
+  const filename = file.name.normalize('NFC');
+  const begun = await retryWorkspaceUploadRequest(`/api/v1/roots/${encodeURIComponent(rootId)}/file-transfers`, {
+    method: 'POST',
+    body: { transfer_id: transferId, destination_path: destinationPath, size_bytes: file.size, conflict },
+  });
+  let offset = Number(begun.received_bytes || 0);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > file.size) throw new Error('The workstation returned an invalid upload resume offset.');
+  while (offset < file.size) {
+    const bytes = new Uint8Array(await file.slice(offset, offset + FILE_TRANSFER_CHUNK_BYTES).arrayBuffer());
+    await retryWorkspaceUploadRequest(`/api/v1/roots/${encodeURIComponent(rootId)}/file-transfers/${encodeURIComponent(transferId)}/chunks`, {
+      method: 'POST',
+      body: { destination_path: begun.destination_path, offset, data_base64: bytesToBase64(bytes) },
+    });
+    offset += bytes.length;
+    if (progress) progress.textContent = `Uploading ${filename}: ${formatBytes(offset)} / ${formatBytes(file.size)}`;
+  }
+  return retryWorkspaceUploadRequest(`/api/v1/roots/${encodeURIComponent(rootId)}/file-transfers/${encodeURIComponent(transferId)}:complete`, {
+    method: 'POST', body: { destination_path: begun.destination_path },
+  });
 }
 
 async function previewFile(name) {
@@ -1535,6 +1615,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
+    if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
     if (action === 'adopt-codex-session') return showCodexSessionForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {
@@ -1662,6 +1743,34 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'workspace-upload-form') {
+    event.preventDefault();
+    if (state.workspaceUploadBusy) return;
+    const entries = state.workspacePendingFiles.filter((entry) => !entry.done);
+    const conflict = new FormData(event.target).get('conflict');
+    const button = event.target.querySelector('button[type="submit"]');
+    const progress = $('#workspace-upload-progress');
+    state.workspaceUploadBusy = true;
+    button.disabled = true;
+    try {
+      const uploaded = [];
+      for (const entry of entries) {
+        uploaded.push(await uploadWorkspaceFile(entry, conflict, progress));
+        entry.done = true;
+      }
+      state.workspacePendingFiles = [];
+      closeModal();
+      await loadDirectory();
+      toast(`${uploaded.length} file${uploaded.length === 1 ? '' : 's'} uploaded without messaging the agent.`);
+    } catch (error) {
+      toast(friendlyError(error), true);
+      if (progress) progress.textContent = friendlyError(error);
+    } finally {
+      state.workspaceUploadBusy = false;
+      button.disabled = false;
+    }
+    return;
+  }
   if (event.target.id === 'terminal-compose-form') {
     event.preventDefault();
     const textarea = $('#terminal-compose');

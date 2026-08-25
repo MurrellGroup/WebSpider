@@ -258,6 +258,21 @@ export class NodeDaemon extends EventEmitter {
   }
 
   async #handleCommand(frame) {
+    if (frame.transient) {
+      try {
+        const result = await this.#dispatch(frame.command_type, frame.payload || {});
+        this.#send({
+          type: 'command_receipt', connection_epoch: this.epoch,
+          command_id: frame.command_id, result, transient: true,
+        });
+      } catch (error) {
+        this.#send({
+          type: 'command_receipt', connection_epoch: this.epoch,
+          command_id: frame.command_id, error: serializeError(error), transient: true,
+        });
+      }
+      return;
+    }
     const accepted = this.database.acceptCommand(frame.command_id, this.epoch, frame.command_type, frame.payload || {});
     if (accepted.duplicate && ['completed', 'failed'].includes(accepted.command.state)) {
       this.#send({
@@ -314,6 +329,39 @@ export class NodeDaemon extends EventEmitter {
           filename: payload.filename,
           mimeType: payload.mime_type,
           bytes: Buffer.from(payload.data_base64 || '', 'base64'),
+          sha256: payload.sha256,
+        });
+      case 'files.transfer-source':
+        return this.rootService.describeTransferSource(payload.root_id, payload.path);
+      case 'files.transfer-inbox':
+        return this.rootService.ensureTransferInbox(payload.root_id);
+      case 'files.transfer-read':
+        return this.rootService.readTransferSourceChunk(payload.root_id, payload);
+      case 'files.transfer-hash':
+        return this.rootService.hashTransferSource(payload.root_id, payload);
+      case 'files.transfer-begin':
+        return this.rootService.beginFileTransfer(payload.root_id, {
+          transferId: payload.transfer_id,
+          destinationPath: payload.destination_path,
+          sizeBytes: payload.size_bytes,
+          conflict: payload.conflict,
+          sourceSha256: payload.source_sha256,
+          sourceVersion: payload.source_version,
+          sourcePath: payload.source_path,
+          acceptCompleted: payload.accept_completed === true,
+        });
+      case 'files.transfer-chunk':
+        return this.rootService.writeFileTransferChunk(payload.root_id, {
+          transferId: payload.transfer_id,
+          destinationPath: payload.destination_path,
+          offset: payload.offset,
+          bytes: Buffer.from(payload.data_base64 || '', 'base64'),
+          sha256: payload.sha256,
+        });
+      case 'files.transfer-finish':
+        return this.rootService.finishFileTransfer(payload.root_id, {
+          transferId: payload.transfer_id,
+          destinationPath: payload.destination_path,
           sha256: payload.sha256,
         });
       case 'process.start-agent': {

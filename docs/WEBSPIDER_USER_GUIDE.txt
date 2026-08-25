@@ -71,6 +71,9 @@ Paste an image
 Attach a file
     Open the intended Master or Sub-Spider terminal and choose Attach file. WebSpider stages up to four selected files visibly; nothing uploads or reaches the agent until Enter. Each file may be up to 8 MiB. Enter writes private checksum-verified copies under that agent workspace's `.webspider/uploads/` directory and sends their exact paths to that agent.
 
+Upload a workspace file without sending a message
+    Open the agent's Files tab, enter the destination folder, and choose Upload files. Select stop, keep both, or replace for name conflicts. The browser streams each file in bounded chunks and resumes from the workstation's last confirmed byte after a transient request failure. This route does not create a message, wake the agent, or treat the file as an instruction. Files may be up to 64 GiB.
+
 Maths mode
     The same xterm-parsed transcript, spacing, and line wrapping as Terminal mode, with recognized TeX equations typeset by the locally bundled MathJax. It does not reflow prose as Markdown. Standard \(...\), \[...\], $...$, and $$...$$ forms work; WebSpider also recognizes agent output that puts a TeX equation between standalone [ and ] lines.
 
@@ -117,6 +120,9 @@ Reminders
 Documents
     Long or byte-exact text should use document handoff. WebSpider checksum-verifies the content, writes a mode-0600 file under the destination workspace's .webspider/inbox directory, and sends a short durable message naming it.
 
+Large or binary files between agents
+    Agents on different machines do not need SSH access. Both nodes must be online while WebSpider relays bounded chunks through the Hub into the destination's `.webspider/inbox/`. Per-chunk and completed-file SHA-256 checks, confirmed offsets, and atomic final placement protect the handoff. Chunk payloads are transient and are not stored in Hub or Node command databases. The completed local file and its short destination message remain. A failed transfer can be retried with the same transfer ID.
+
 Artifacts
     Promote important outputs when they should be tracked by WebSpider independently of a workspace path. Promotion records a SHA-256 digest and metadata on the Hub.
 
@@ -135,11 +141,13 @@ Common Master operations:
     $WEBSPIDER_CONTROL portfolio list
     $WEBSPIDER_CONTROL agents list
     $WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT
+    $WEBSPIDER_CONTROL files targets
+    $WEBSPIDER_CONTROL files send --agent AGENT_ID --file PATH
     $WEBSPIDER_CONTROL tasks list
     $WEBSPIDER_CONTROL reminders list
     $WEBSPIDER_CONTROL policy show
 
-Use the helper's own usage output for the exact options supported by the installed version. Workers receive a narrower helper and cannot inspect the whole portfolio, message peer workers, or edit policy.
+Use the helper's own usage output for the exact options supported by the installed version. Workers receive a narrower helper and cannot inspect the whole portfolio, message or command peer workers, or edit policy. They can list only valid file-transfer destinations and send an explicit root-confined file to one of them.
 
 7. Instructions and policy
 --------------------------
@@ -202,6 +210,9 @@ For a future follow-up:
 
 For long specifications or reports:
     Use a document handoff.
+
+For a large/binary file needed by another Spider:
+    Run `files targets`, then `files send`. Keep both workstations online until it completes. Reuse the reported transfer ID when retrying an interrupted transfer.
 
 For code or results:
     Keep a clean Git repository, commit checkpoints, and use an external remote or backup.

@@ -230,3 +230,89 @@ test('browser file attachments preserve safe names and stay private inside the w
     mimeType: 'application/pdf', bytes, sha256,
   }), (error) => error.code === 'WS_VALIDATION');
 });
+
+test('chunked file transfers are resumable, checksum-verified, and atomically placed', async (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const bytes = Buffer.from('large-transfer-payload-'.repeat(100_000));
+  const transferId = 'xfr_abcdefghijklmnop1234';
+  const begun = await value.service.beginFileTransfer('awr_test', {
+    transferId, destinationPath: 'results/data.bin', sizeBytes: bytes.length, conflict: 'error',
+  });
+  assert.equal(begun.received_bytes, 0);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const chunk = bytes.subarray(offset, Math.min(offset + 700_000, bytes.length));
+    const sha256 = createHash('sha256').update(chunk).digest('hex');
+    const written = await value.service.writeFileTransferChunk('awr_test', {
+      transferId, destinationPath: begun.destination_path, offset, bytes: chunk, sha256,
+    });
+    offset += chunk.length;
+    assert.equal(written.received_bytes, offset);
+    if (offset === chunk.length) {
+      const partialPath = path.join(value.root, 'results', `.webspider-${transferId}.part`);
+      fs.appendFileSync(partialPath, 'unconfirmed-crash-tail');
+      const resumed = await value.service.beginFileTransfer('awr_test', {
+        transferId, destinationPath: 'results/data.bin', sizeBytes: bytes.length, conflict: 'error',
+      });
+      assert.equal(resumed.resumed, true);
+      assert.equal(resumed.received_bytes, offset);
+      assert.equal(resumed.destination_path, begun.destination_path);
+      assert.equal(fs.statSync(partialPath).size, offset);
+    }
+  }
+  const duplicate = await value.service.writeFileTransferChunk('awr_test', {
+    transferId, destinationPath: begun.destination_path, offset: 0,
+    bytes: bytes.subarray(0, 500_000),
+    sha256: createHash('sha256').update(bytes.subarray(0, 500_000)).digest('hex'),
+  });
+  assert.equal(duplicate.duplicate, true);
+  const completed = await value.service.finishFileTransfer('awr_test', {
+    transferId, destinationPath: begun.destination_path,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  });
+  assert.equal(completed.relative_path, 'results/data.bin');
+  assert.deepEqual(fs.readFileSync(path.join(value.root, completed.relative_path)), bytes);
+  assert.equal(fs.statSync(path.join(value.root, completed.relative_path)).mode & 0o777, 0o600);
+  assert.equal(fs.readdirSync(path.join(value.root, 'results')).some((name) => name.includes(transferId)), false);
+
+  const renamed = await value.service.beginFileTransfer('awr_test', {
+    transferId: 'xfr_qrstuvwxyzABCDE1234', destinationPath: 'results/data.bin', sizeBytes: 0, conflict: 'rename',
+  });
+  assert.equal(renamed.destination_path, 'results/data (1).bin');
+  const empty = await value.service.finishFileTransfer('awr_test', {
+    transferId: renamed.transfer_id, destinationPath: renamed.destination_path,
+  });
+  assert.equal(empty.relative_path, 'results/data (1).bin');
+  assert.equal(fs.statSync(path.join(value.root, empty.relative_path)).size, 0);
+});
+
+test('chunked transfer sources detect changes and destinations remain root-confined', async (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const source = await value.service.describeTransferSource('awr_test', 'README.md');
+  const hashed = await value.service.hashTransferSource('awr_test', source);
+  assert.equal(hashed.sha256, createHash('sha256').update(fs.readFileSync(path.join(value.root, 'README.md'))).digest('hex'));
+  const chunk = await value.service.readTransferSourceChunk('awr_test', {
+    path: source.path, version: source.version, offset: 0, length: 8,
+  });
+  assert.equal(Buffer.from(chunk.data_base64, 'base64').toString('utf8'), '# Worksp');
+  fs.appendFileSync(path.join(value.root, 'README.md'), 'changed\n');
+  await assert.rejects(() => value.service.readTransferSourceChunk('awr_test', {
+    path: source.path, version: source.version, offset: 0, length: 8,
+  }), (error) => error.code === 'WS_FILE_CHANGED');
+  await assert.rejects(() => value.service.hashTransferSource('awr_test', source),
+    (error) => error.code === 'WS_FILE_CHANGED');
+  await assert.rejects(() => value.service.beginFileTransfer('awr_test', {
+    transferId: 'xfr_escapeattemptABC123', destinationPath: '../outside.bin', sizeBytes: 1,
+  }), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
+  await assert.rejects(() => value.service.beginFileTransfer('awr_test', {
+    transferId: 'xfr_symlinkattemptAB123', destinationPath: 'external-link/data.bin', sizeBytes: 1,
+  }), (error) => error.code === 'WS_SYMLINK_BLOCKED');
+});

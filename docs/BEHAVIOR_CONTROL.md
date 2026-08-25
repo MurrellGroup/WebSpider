@@ -77,6 +77,16 @@ $WEBSPIDER_CONTROL documents send --agent AGENT_ID --file validation-plan.md \
 
 The helper uploads at most 512 KiB of UTF-8 `.txt`, `.md`, or `.markdown` content with its SHA-256 digest. The durable message retains the bytes while a node is offline. At delivery, the node atomically writes a mode-`0600` copy under `.webspider/inbox/<document-id>-<filename>` inside the target's registered root, verifies its checksum and confinement, and then injects a short user-role handoff containing the ID, digest, path, and instruction. A retry is idempotent. Workers can use `documents send --master`; they cannot send a document to a peer.
 
+For a large or binary file already inside the sending agent's workspace, use the live file relay:
+
+```bash
+$WEBSPIDER_CONTROL files targets
+$WEBSPIDER_CONTROL files send --agent AGENT_ID --file results/dataset.bin \
+  --instruction 'Use this dataset for the next benchmark.'
+```
+
+This does not require SSH or shared storage. The scoped helper sends only a path relative to its registered workspace. With both nodes online, the Hub streams at most 8 MiB at a time from the source root into a mode-`0600` temporary file under the destination's `.webspider/inbox/`, verifies each chunk and the complete SHA-256 digest, then atomically publishes the file and delivers its exact path. Chunk payloads bypass the durable Hub outbox and Node command-receipt databases. `files targets` exposes only destination IDs/titles and online state to a worker; it does not expose the portfolio or grant task/message authority. Use `--transfer-id ID` to resume the same confirmed partial transfer after an interruption.
+
 Detached commands can be launched immediately or after a bounded delay. They are durable across hub disconnects and are started when an offline target reconnects:
 
 ```bash
@@ -118,7 +128,7 @@ $WEBSPIDER_CONTROL policy patch \
 
 Use `--scope system` only when the user's request clearly applies across projects. The helper fetches the current revision and sends it with the patch. Every accepted edit records the actual agent actor, scope, prior and new revision, and supplied user-request reason in the audit log.
 
-The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Each independent worker receives a separate helper token restricted by both scope and route invariants: it may report its own state, list/run its own detached tasks, and list/create/cancel its own hooks. It cannot run on another agent, choose an arbitrary hook destination, inspect the portfolio, message peers, or edit policy. It may record meaningful transitions without interrupting the Master:
+The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Each independent worker receives a separate helper token restricted by both scope and route invariants: it may report its own state, list/run its own detached tasks, list/create/cancel its own hooks, and make a root-confined live file handoff to an explicit Spider destination. It cannot run commands on another agent, choose an arbitrary hook destination, inspect the portfolio, message peers, or edit policy. It may record meaningful transitions without interrupting the Master:
 
 ```bash
 $WEBSPIDER_CONTROL report --status working --summary 'Running the preregistered benchmark.'
@@ -171,6 +181,7 @@ Main-agent tokens can access only:
 - `GET` and `POST /api/v1/agent-control/tasks` with `tasks:read` / `tasks:write`; worker requests are filtered and forced to the authenticated worker.
 - `GET` and `POST /api/v1/agent-control/reminders`, plus `POST /api/v1/agent-control/reminders/{id}:cancel`, with self-reminder scopes; ownership comes from the authenticated token and destinations are only `self` or `master`.
 - `POST /api/v1/agent-control/agents/{id}/documents` with `documents:write`; main agents may target registered agents, while worker targets are forced to the Master role.
+- `GET /api/v1/agent-control/files/targets` and `POST /api/v1/agent-control/agents/{id}/files` with `files:transfer`; destination discovery is bounded and the source is forced to the authenticated agent's registered root.
 
 The patch body requires:
 
