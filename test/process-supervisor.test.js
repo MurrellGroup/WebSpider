@@ -283,6 +283,7 @@ test('an adopted user Codex session resumes from the registered root with an iso
   const inheritedCodexHome = path.join(directory, 'user-codex-home');
   const sessionDirectory = path.join(inheritedCodexHome, 'sessions', '2026', '08', '25');
   fs.mkdirSync(workspace);
+  const canonicalWorkspace = fs.realpathSync(workspace);
   fs.mkdirSync(sessionDirectory, { recursive: true });
   fs.writeFileSync(path.join(sessionDirectory, 'existing.jsonl'), '{}\n');
   const fakeCodex = path.join(directory, 'codex');
@@ -298,9 +299,9 @@ test('an adopted user Codex session resumes from the registered root with an iso
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  assert.deepEqual(codexResumeArgv([fakeCodex, '--sandbox', 'danger-full-access'], workspace, {
+  assert.deepEqual(codexResumeArgv([fakeCodex, '--sandbox', 'danger-full-access'], canonicalWorkspace, {
     selector: 'id', session_id: '01a00000-0000-0000-0000-000000000001',
-  }), [fakeCodex, 'resume', '-C', workspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001']);
+  }), [fakeCodex, 'resume', '-C', canonicalWorkspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001']);
   const completion = waitForCompletion(supervisor);
   supervisor.launch({
     id: 'run_adopted', kind: 'agent', agentInstanceId: 'agt_adopted', terminalId: 'trm_adopted',
@@ -314,9 +315,9 @@ test('an adopted user Codex session resumes from the registered root with an iso
   });
   assert.equal((await completion).exit_status, 0);
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'adopted-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', workspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001',
+    'resume', '-C', canonicalWorkspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001',
   ]);
-  assert.equal(fs.readFileSync(path.join(workspace, 'adopted-cwd.txt'), 'utf8').trim(), workspace);
+  assert.equal(fs.readFileSync(path.join(workspace, 'adopted-cwd.txt'), 'utf8').trim(), canonicalWorkspace);
   const adoptedHome = fs.readFileSync(path.join(workspace, 'adopted-home.txt'), 'utf8');
   assert.equal(fs.realpathSync(path.join(adoptedHome, 'sessions')), fs.realpathSync(path.join(inheritedCodexHome, 'sessions')));
   assert.match(fs.readFileSync(path.join(adoptedHome, 'AGENTS.md'), 'utf8'), /Adopted session test/);
@@ -326,6 +327,7 @@ test('a lost managed Codex process automatically resumes its latest dedicated se
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-resume-codex-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
+  const canonicalWorkspace = fs.realpathSync(workspace);
   const fakeCodex = path.join(directory, 'codex');
   fs.writeFileSync(fakeCodex, '#!/bin/sh\nif [ "$1" = resume ]; then printf "%s\\n" "$@" > crash-resume-args.txt; else mkdir -p "$CODEX_HOME/sessions/2026/08/25"; printf "{}\\n" > "$CODEX_HOME/sessions/2026/08/25/session.jsonl"; fi\n');
   fs.chmodSync(fakeCodex, 0o700);
@@ -356,7 +358,7 @@ test('a lost managed Codex process automatically resumes its latest dedicated se
   });
   assert.equal((await completion).exit_status, 0);
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'crash-resume-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', workspace, '--last',
+    'resume', '-C', canonicalWorkspace, '--last',
   ]);
 });
 

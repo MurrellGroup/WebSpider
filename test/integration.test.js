@@ -41,8 +41,12 @@ test('an installer attachment re-enrolls a node identity forgotten by a rebuilt 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-stale-node-'));
   const workspace = path.join(directory, 'workspace');
   const nodeState = path.join(directory, 'node');
+  const bin = path.join(directory, 'bin');
   fs.mkdirSync(workspace);
   fs.mkdirSync(nodeState);
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(path.join(bin, 'codex'), 0o700);
   const staleIdentity = { nodeId: 'nod_from_previous_hub', ...generateNodeIdentity() };
   fs.writeFileSync(path.join(nodeState, 'identity.json'), JSON.stringify(staleIdentity), { mode: 0o600 });
   fs.writeFileSync(path.join(nodeState, 'config.json'), JSON.stringify({
@@ -63,7 +67,7 @@ test('an installer attachment re-enrolls a node identity forgotten by a rebuilt 
     path.resolve('bin/webspider.js'), 'node', 'attach',
     '--hub', listening.url, '--token', token, '--workspace', workspace,
     '--state-dir', nodeState, '--name', 'Recovered workstation',
-  ]);
+  ], { env: { ...process.env, PATH: `${bin}:${process.env.PATH || ''}` } });
   assert.match(result.stdout, /"enrolled": true/);
   const identity = JSON.parse(fs.readFileSync(path.join(nodeState, 'identity.json'), 'utf8'));
   const config = JSON.parse(fs.readFileSync(path.join(nodeState, 'config.json'), 'utf8'));
@@ -323,6 +327,7 @@ test('the owner can adopt a remote Codex session and WebSpider pins it to the re
   const userCodexHome = path.join(directory, 'user-codex-home');
   const sessionDirectory = path.join(userCodexHome, 'sessions', '2026', '08', '25');
   fs.mkdirSync(workspace);
+  const canonicalWorkspace = fs.realpathSync(workspace);
   fs.mkdirSync(sessionDirectory, { recursive: true });
   fs.writeFileSync(path.join(sessionDirectory, 'existing.jsonl'), '{}\n');
   const fakeCodex = path.join(directory, 'codex');
@@ -364,10 +369,10 @@ test('the owner can adopt a remote Codex session and WebSpider pins it to the re
   assert.deepEqual(adopted.body.codex_session, { source: 'user', selector: 'last', session_id: null });
   await waitUntil(() => fs.existsSync(path.join(workspace, 'api-adopted-args.txt')));
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'api-adopted-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', workspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '--last',
+    'resume', '-C', canonicalWorkspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '--last',
   ]);
   const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
-  assert.deepEqual(runtime.argv.slice(0, 4), [fakeCodex, 'resume', '-C', workspace]);
+  assert.deepEqual(runtime.argv.slice(0, 4), [fakeCodex, 'resume', '-C', canonicalWorkspace]);
 });
 
 test('a main agent can queue delayed command work while its target node is offline', async (t) => {
