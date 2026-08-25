@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { WebSpiderError, invariant } from '../lib/errors.js';
+import { validateFileUpload } from '../lib/file-upload.js';
 import { validateImageUpload } from '../lib/image-upload.js';
 
 const {
@@ -275,6 +276,53 @@ export class RootedFileService {
     }
     invariant(within(rootPath, fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
       'Pasted image escaped the workspace root.', 403);
+    return { upload_id: uploadId, relative_path: relativePath, duplicate: false, ...validated };
+  }
+
+  writeFileUpload(rootId, { uploadId, filename, mimeType, bytes, sha256 }) {
+    const root = this.getRoot(rootId);
+    const validated = validateFileUpload({ uploadId, filename, mimeType, bytes, sha256 });
+    const rootPath = this.#currentRoot(root);
+    let directory = root.anchor;
+    for (const component of ['.webspider', 'uploads']) {
+      directory = path.join(directory, component);
+      try {
+        const stat = fs.lstatSync(directory);
+        invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'The reserved WebSpider upload path is not a real directory.', 403);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        fs.mkdirSync(directory, { mode: 0o700 });
+      }
+      invariant(within(rootPath, fs.realpathSync(directory)), 'WS_PATH_ESCAPE_BLOCKED',
+        'The reserved WebSpider upload path escaped the workspace root.', 403);
+    }
+
+    const storedName = `${uploadId}-${validated.filename}`;
+    const relativePath = `.webspider/uploads/${storedName}`;
+    const destination = path.join(directory, storedName);
+    try {
+      const stat = fs.lstatSync(destination);
+      invariant(stat.isFile() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+        'File upload destination is not a regular file.', 403);
+      const existing = fs.readFileSync(destination);
+      invariant(createHash('sha256').update(existing).digest('hex') === validated.sha256,
+        'WS_CONFLICT', 'File upload ID already exists with different content.', 409);
+      return { upload_id: uploadId, relative_path: relativePath, duplicate: true, ...validated };
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
+    const temporary = path.join(directory, `.file-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, destination);
+      fs.chmodSync(destination, 0o600);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* renamed or already removed */ }
+    }
+    invariant(within(rootPath, fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
+      'Attached file escaped the workspace root.', 403);
     return { upload_id: uploadId, relative_path: relativePath, duplicate: false, ...validated };
   }
 

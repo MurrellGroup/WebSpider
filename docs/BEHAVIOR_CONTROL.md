@@ -5,11 +5,11 @@
 WebSpider separates orchestration authority from worker execution behavior.
 
 - The **main agent** may change project or system defaults, but only after an explicit user request.
-- A **worker agent** receives a self-confined credential for status, detached work in its own registered root, and hooks addressed only to itself or the Master. It never receives behavior-control or general orchestration authority.
+- A **worker agent** is also a first-class direct user interface for its project. Direct user messages go to that worker without passing through the Master. Its automation credential is self-confined to status, detached work in its registered root, and hooks addressed only to itself or the Master; it never receives behavior-control or general orchestration authority.
 - Remote agents keep their native harness defaults for planning, tools, execution, and reporting.
 - WebSpider adds a remote-agent rule only when it protects an explicit user preference, a safety or authority boundary, a project-specific factual invariant, or a result-changing acceptance criterion.
 
-This is intentionally asymmetric. The main agent needs durable project context and a small control surface; a remote specialist normally needs an objective, material context, constraints, and success criteria—not a second harness written by the orchestrator.
+This is intentionally asymmetric in authority, not importance. Direct project work with a Sub-Spider and managed portfolio work through the Master are both normal. The Master needs portfolio context and a coordination surface when engaged; a project agent needs its project boundary and the user's direct objective, not central orchestration doctrine.
 
 ## Role-aware instruction compilation
 
@@ -87,6 +87,8 @@ $WEBSPIDER_CONTROL tasks run --agent AGENT_ID --title 'Delayed validation' --del
 
 The completion hook is stored with the task. After the detached process exits, WebSpider delivers a new user-role message containing the task ID, status, execution agent, optional hook text, and result. `--notify self` returns it to the agent on which the task ran, `--notify master` sends it to the Master, and `--notify none` records the result without starting another agent turn. A worker may omit `--agent`, in which case its own identity is used; the hub rejects any worker attempt to select a different agent.
 
+If `--notify` is omitted, work scheduled directly by a Sub-Spider returns to that Sub-Spider; work scheduled by the Master returns to the Master. Thus direct project work stays local without weakening managed delegation.
+
 Durable messages to the current agent's future self—or, for a worker, to the Master—use the same persisted task store:
 
 ```bash
@@ -116,7 +118,7 @@ $WEBSPIDER_CONTROL policy patch \
 
 Use `--scope system` only when the user's request clearly applies across projects. The helper fetches the current revision and sends it with the patch. Every accepted edit records the actual agent actor, scope, prior and new revision, and supplied user-request reason in the audit log.
 
-The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Each independent worker receives a separate helper token restricted by both scope and route invariants: it may report its own state, list/run its own detached tasks, and list/create/cancel its own hooks. It cannot run on another agent, choose an arbitrary hook destination, inspect the portfolio, message peers, or edit policy. It reports meaningful transitions with:
+The token is revoked when the agent stops, fails, exits, loses main-agent status, or wakes into a replacement session. Each independent worker receives a separate helper token restricted by both scope and route invariants: it may report its own state, list/run its own detached tasks, and list/create/cancel its own hooks. It cannot run on another agent, choose an arbitrary hook destination, inspect the portfolio, message peers, or edit policy. It may record meaningful transitions without interrupting the Master:
 
 ```bash
 $WEBSPIDER_CONTROL report --status working --summary 'Running the preregistered benchmark.'
@@ -124,7 +126,7 @@ $WEBSPIDER_CONTROL report --status blocked --summary 'GPU allocation is unavaila
 $WEBSPIDER_CONTROL report --status completed --file result-summary.txt
 ```
 
-The hub derives the worker identity from the token, persists the report, updates the portfolio, and sends a durable notification to the master. A harness-native subagent is a thread inside the main runtime rather than an independently authenticated WebSpider principal; it can inherit the parent process environment, so the role-scope instruction explicitly forbids using the helper from a child thread. PTY fallback cannot cryptographically distinguish those internal threads.
+The hub derives the worker identity from the token, persists the report, and updates the portfolio. Reporting does not message the Master by default. The worker adds `--notify-master` only when the Master delegated the result, requested that milestone, or must act on a blocker, material risk, or decision. Routine user-directed work stays local. A harness-native subagent is a thread inside the main runtime rather than an independently authenticated WebSpider principal; it can inherit the parent process environment, so the role-scope instruction explicitly forbids using the helper from a child thread. PTY fallback cannot cryptographically distinguish those internal threads.
 
 ## Context, account allowance, and time awareness
 

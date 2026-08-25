@@ -417,6 +417,10 @@ test('agent launch materializes the inherited project agreement without workspac
   assert.match(controlScript, /agents list/);
   assert.match(controlScript, /portfolio list/);
   assert.match(controlScript, /report --status idle\|working\|blocked\|completed/);
+  assert.match(controlScript, /--notify-master/);
+  assert.match(controlScript, /notify_master: notifyMaster/);
+  assert.match(controlScript, /notify != null && !\['self', 'master', 'none'\]\.includes\(notify\)/);
+  assert.match(controlScript, /\.\.\.\(notify \? \{ notify_target: notify \} : \{\}\)/);
   assert.match(controlScript, /request\('report', 'POST'/);
   assert.match(controlScript, /agents\/' \+ encodeURIComponent\(agent\) \+ '\/messages'/);
   assert.doesNotMatch(controlScript, /billing|subscription|api.?key|reset.?credit|add.?credit/i);

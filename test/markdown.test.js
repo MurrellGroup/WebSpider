@@ -56,7 +56,7 @@ test('an exited primary agent terminal becomes read-only with a restart action',
 test('terminal text-box mode is opt-in and uses durable messages for primary agents', () => {
   const application = fs.readFileSync(path.join(repository, 'web', 'app.js'), 'utf8');
   assert.match(application, /terminalInputMode: 'direct'/);
-  assert.match(application, /data-terminal-input-mode="compose">Text box/);
+  assert.match(application, /data-terminal-input-mode="compose"[^>]*>Text box/);
   assert.match(application, /terminal-compose-form/);
   assert.match(application, /submitTerminalComposition/);
   assert.match(application, /terminalBracketedPaste/);

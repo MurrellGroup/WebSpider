@@ -10,7 +10,7 @@ The Meta-Spider is a user-invoked, break-glass Codex session outside the WebSpid
 - It does not routinely prod, supervise, schedule work for, or converse with the Master.
 - It does not take over research, implementation, or other portfolio work that belongs to the Master and workers.
 - It preserves user work and durable identities, avoids unrelated changes, and asks before requiring `sudo` or expanding beyond the selected WebSpider directory. Per-user package-install side effects are acceptable when needed for development or testing.
-- After maintenance, it validates the service and hands normal operation back to the user and Master.
+- After maintenance, it validates the service and hands normal operation back to the user and intended WebSpider agents.
 
 The Meta-Spider is deliberately not enrolled as a WebSpider agent. Keeping it external means it can still diagnose a broken hub, bad policy snapshot, failed service, or inaccessible portal.
 
@@ -26,8 +26,8 @@ The prompt points Codex to `https://github.com/MurrellGroup/WebSpider`, tells it
 
 ## Relationship to the other roles
 
-- **Master Spider:** the persistent multi-project manager. It prioritizes and delegates portfolio work, tracks durable state, integrates results, and is the user's normal WebSpider interface.
-- **Sub-Spider / worker:** a persistent project executor with a narrowly scoped self credential.
+- **Master Spider:** the on-demand multi-project manager for unattended oversight, delegation, follow-up, cross-project coordination, exceptions, and integrated results.
+- **Sub-Spider / worker:** a persistent, first-class project agent that the user normally works with directly; its automation credential remains narrowly self-scoped.
 - **Meta-Spider:** an external maintainer invoked by the user only when WebSpider itself needs installation, diagnosis, recovery, testing, or repair.
 
 Task-completion hooks and scheduled future messages belong to the Master and workers. They are durable WebSpider facilities, not Meta-Spider supervision.

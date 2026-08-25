@@ -2,13 +2,13 @@ import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import {
-  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalImageCommitKey,
+  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalAttachmentCommitKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.10';
+const PORTAL_VERSION = '0.6.11';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -64,6 +64,8 @@ const state = {
   terminalMathsGeneration: 0,
   terminalImageUploading: false,
   terminalPendingImages: [],
+  terminalFileUploading: false,
+  terminalPendingFiles: [],
   filePath: '',
   fileShowHidden: false,
   activeRoot: null,
@@ -196,12 +198,12 @@ function showWorkerCommand({ project, invite, hub_url: hubURL }, nodeName) {
 }
 
 function showProjectOnboarding() {
-  openModal(`<form id="onboard-project-form"><div class="modal-header"><div><h2>Add research project</h2><p>Create the project and its persistent worker.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Project name<input name="project_name" required maxlength="120"></label><label>Worker machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><label>Description<textarea name="description" maxlength="1000"></textarea></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create project</button></div></div></form>`);
+  openModal(`<form id="onboard-project-form"><div class="modal-header"><div><h2>Add research project</h2><p>Create the project and its persistent Sub-Spider.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Project name<input name="project_name" required maxlength="120"></label><label>Sub-Spider machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><label>Description<textarea name="description" maxlength="1000"></textarea></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create project</button></div></div></form>`);
 }
 
 function showProjectConnection(projectId) {
   const project = state.projects.find((item) => item.id === projectId);
-  openModal(`<form id="connect-project-form" data-project-id="${h(projectId)}"><div class="modal-header"><div><h2>Connect ${h(project?.name || 'project')}</h2><p>Install its persistent worker on the machine that owns the project directory.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Worker machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create worker command</button></div></div></form>`);
+  openModal(`<form id="connect-project-form" data-project-id="${h(projectId)}"><div class="modal-header"><div><h2>Connect ${h(project?.name || 'project')}</h2><p>Install its persistent Sub-Spider on the machine that owns the project directory.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Sub-Spider machine name<input name="node_name" required maxlength="120" placeholder="gpu-box"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Create Sub-Spider command</button></div></div></form>`);
 }
 
 function showTerminalForm() {
@@ -362,7 +364,7 @@ function renderPortfolioRows() {
     const agents = state.agents.filter((agent) => agent.project_id === project.id);
     const worker = agents.find((agent) => agent.orchestration_role === 'worker') || agents[0];
     const status = worker?.work_status || (worker ? worker.state : 'not connected');
-    return `<button class="portfolio-row" data-project-id="${h(project.id)}"><i class="state-dot ${h(worker?.state || 'offline')}"></i><span><strong>${h(project.name)}</strong><small>${h(worker?.status_summary || (worker ? `${worker.node_name} · ${worker.state}` : 'Worker not connected'))}</small></span><span class="status-pill ${h(status)}">${h(status)}</span></button>`;
+    return `<button class="portfolio-row" data-project-id="${h(project.id)}"><i class="state-dot ${h(worker?.state || 'offline')}"></i><span><strong>${h(project.name)}</strong><small>${h(worker?.status_summary || (worker ? `${worker.node_name} · ${worker.state}` : 'Sub-Spider not connected'))}</small></span><span class="status-pill ${h(status)}">${h(status)}</span></button>`;
   }).join('');
 }
 
@@ -385,7 +387,7 @@ async function renderHome() {
   renderSidebar();
   history.replaceState(null, '', '#/overview');
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader('Master Spider', 'Research portfolio and persistent agent fabric', '<button class="primary" data-action="onboard-project">Add project</button><button data-action="refresh">Refresh</button>')}
+    ${pageHeader('Portfolio overview', 'Projects, agents, and unattended work', '<button class="primary" data-action="onboard-project">Add project</button><button data-action="refresh">Refresh</button>')}
     <div class="page-content">
       <div class="summary-strip">
         ${summaryItem(state.summary.projects_active, 'active projects')}
@@ -434,18 +436,18 @@ async function renderProject(projectId) {
   const running = tasks.filter((task) => ['running', 'runnable'].includes(task.state));
   const completed = tasks.filter((task) => task.state === 'succeeded');
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader(project.name, project.description || 'Persistent project workspace and worker state', `${primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open agent</button>` : `<button class="primary" data-action="connect-project" data-project-id="${h(project.id)}">Connect worker</button>`}${canArchive ? `<button data-action="archive-project" data-project-id="${h(project.id)}">Archive</button>` : ''}`)}
+    ${pageHeader(project.name, project.description || 'Persistent project workspace and Sub-Spider state', `${primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open ${primaryAgent.orchestration_role === 'main' ? 'Master' : 'Sub-Spider'}</button>` : `<button class="primary" data-action="connect-project" data-project-id="${h(project.id)}">Connect Sub-Spider</button>`}${canArchive ? `<button data-action="archive-project" data-project-id="${h(project.id)}">Archive</button>` : ''}`)}
     <div class="page-content project-workspace">
       <section class="steer-card">
         <div><p class="eyebrow">STEER THE OUTCOME</p><h2>What should move forward?</h2><p>Give the goal at the level you care about. The agent inherits the project agreement, inspects existing work, and resolves routine implementation choices.</p></div>
-        ${primaryAgent ? `<form id="project-message-form" data-target-agent-id="${h(primaryAgent.id)}" data-thread-id="${h(primaryAgent.active_thread_id)}"><textarea name="message" required placeholder="For example: turn the current results into a submission-ready manuscript draft…"></textarea><div><span>${h(primaryAgent.work_status || 'idle')}${primaryAgent.status_summary ? ` · ${h(primaryAgent.status_summary)}` : ''}</span><button type="submit" class="primary">Start or continue</button></div></form>` : '<div class="empty compact"><div><strong>No worker connected</strong><p>Connect a machine from this project header.</p></div></div>'}
+        ${primaryAgent ? `<form id="project-message-form" data-target-agent-id="${h(primaryAgent.id)}" data-thread-id="${h(primaryAgent.active_thread_id)}"><textarea name="message" required placeholder="For example: turn the current results into a submission-ready manuscript draft…"></textarea><div><span>Direct to ${h(primaryAgent.title || 'agent')} · ${h(primaryAgent.work_status || 'idle')}${primaryAgent.status_summary ? ` · ${h(primaryAgent.status_summary)}` : ''}</span><button type="submit" class="primary">Start or continue</button></div></form>` : '<div class="empty compact"><div><strong>No Sub-Spider connected</strong><p>Connect a machine from this project header.</p></div></div>'}
       </section>
       <div class="project-summary">
         ${summaryItem(agents.length, 'agents')}${summaryItem(running.length, 'active tasks')}${summaryItem(completed.length, 'completed tasks')}${summaryItem(artifacts.artifacts.length, 'kept artifacts')}
       </div>
       <div class="grid-2 project-grid">
-        <section class="panel"><div class="panel-header"><h2>Project agents</h2><span>${agents.length} sessions</span></div><div class="portfolio-list">${agents.map((agent) => `<button class="portfolio-row" data-agent-id="${h(agent.id)}"><i class="state-dot ${h(agent.state)}"></i><span><strong>${h(agent.title || agent.profile_name)}</strong><small>${h(agent.status_summary || `${agent.node_name} · ${agent.state}`)}</small></span><span class="status-pill ${h(agent.work_status)}">${h(agent.work_status)}</span></button>`).join('') || '<div class="empty compact"><div><strong>Waiting for worker</strong></div></div>'}</div></section>
-        <section class="panel policy-card"><div class="panel-header"><h2>Main-agent defaults</h2><span>system r${h(policy.system_revision)} · project r${h(policy.revision)}</span></div><div class="panel-body"><div class="policy-line"><i>1</i><div><strong>Infer routine details</strong><p>${h(policy.summary.autonomy)}</p></div></div><div class="policy-line"><i>2</i><div><strong>Produce the work product</strong><p>${h(policy.summary.work_product)}</p></div></div><div class="policy-line"><i>3</i><div><strong>Respect worker harnesses</strong><p>${h(policy.summary.delegation)}</p></div></div><div class="policy-line"><i>4</i><div><strong>Editable when you ask</strong><p>${h(policy.summary.behavior_control)} Tell the main agent what outcome you want changed; no settings form is required.</p></div></div><div class="policy-line"><i>5</i><div><strong>Weekly account allowance</strong><p>${h(accountUsageLabel(accountUsage))}</p><p>${h(policy.summary.account_quota)}</p></div></div><details class="policy-details"><summary>View the main-agent agreement</summary><div class="markdown-body">${renderMarkdown(policy.rendered_instructions)}</div></details></div></section>
+        <section class="panel"><div class="panel-header"><h2>Project agents</h2><span>${agents.length} sessions</span></div><div class="portfolio-list">${agents.map((agent) => `<button class="portfolio-row" data-agent-id="${h(agent.id)}"><i class="state-dot ${h(agent.state)}"></i><span><strong>${h(agent.title || agent.profile_name)}</strong><small>${h(agent.status_summary || `${agent.node_name} · ${agent.state}`)}</small></span><span class="status-pill ${h(agent.work_status)}">${h(agent.work_status)}</span></button>`).join('') || '<div class="empty compact"><div><strong>Waiting for Sub-Spider</strong></div></div>'}</div></section>
+        <section class="panel policy-card"><div class="panel-header"><h2>Project defaults</h2><span>system r${h(policy.system_revision)} · project r${h(policy.revision)}</span></div><div class="panel-body"><div class="policy-line"><i>1</i><div><strong>Infer routine details</strong><p>${h(policy.summary.autonomy)}</p></div></div><div class="policy-line"><i>2</i><div><strong>Produce the work product</strong><p>${h(policy.summary.work_product)}</p></div></div><div class="policy-line"><i>3</i><div><strong>Respect Sub-Spider harnesses</strong><p>${h(policy.summary.delegation)}</p></div></div><div class="policy-line"><i>4</i><div><strong>Editable when you ask</strong><p>${h(policy.summary.behavior_control)} Ask the Master for broader policy changes, or edit agent instructions directly.</p></div></div><div class="policy-line"><i>5</i><div><strong>Weekly account allowance</strong><p>${h(accountUsageLabel(accountUsage))}</p><p>${h(policy.summary.account_quota)}</p></div></div><details class="policy-details"><summary>View the Master agreement</summary><div class="markdown-body">${renderMarkdown(policy.rendered_instructions)}</div></details><details class="policy-details"><summary>View the Sub-Spider agreement</summary><div class="markdown-body">${renderMarkdown(policy.rendered_worker_instructions)}</div></details></div></section>
       </div>
     </div>
   </div>`;
@@ -483,9 +485,9 @@ async function renderWorkerInstructions() {
   const runningWorkers = state.agents.filter((agent) => agent.orchestration_role !== 'main'
     && ['ready', 'busy'].includes(agent.state));
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader('All sub-spiders', 'Worker-only instructions; the Master Spider does not inherit this text')}
+    ${pageHeader('All sub-spiders', 'Sub-Spider-only instructions; the Master Spider does not inherit this text')}
     <div class="page-content"><section class="panel instruction-card">
-      <div class="panel-header"><h2>Shared worker instructions</h2><span>system r${h(system.revision)}</span></div>
+      <div class="panel-header"><h2>Shared Sub-Spider instructions</h2><span>system r${h(system.revision)}</span></div>
       <form id="worker-instructions-form" class="instruction-editor" data-revision="${h(system.revision)}">
         <label for="worker-global-instructions">One compact instruction per line</label>
         <textarea id="worker-global-instructions" name="instructions" maxlength="4000" placeholder="For example: return benchmark results as CSV.">${h(instructions.join('\n'))}</textarea>
@@ -675,16 +677,29 @@ function currentTerminalImages() {
     && entry.terminalId === terminal.id);
 }
 
+function currentTerminalFiles() {
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+  if (!state.selectedAgent || !terminal) return [];
+  return state.terminalPendingFiles.filter((entry) => entry.agentId === state.selectedAgent.id
+    && entry.terminalId === terminal.id);
+}
+
+function currentTerminalAttachmentCount() {
+  return currentTerminalImages().length + currentTerminalFiles().length;
+}
+
 function renderTerminalImageDraft() {
   const draft = $('#terminal-image-draft');
   if (!draft) return;
   const images = currentTerminalImages();
-  draft.classList.toggle('hidden', images.length === 0);
-  draft.classList.toggle('uploading', state.terminalImageUploading);
+  const files = currentTerminalFiles();
+  const attachments = [...images, ...files];
+  draft.classList.toggle('hidden', attachments.length === 0);
+  draft.classList.toggle('uploading', state.terminalImageUploading || state.terminalFileUploading);
   const names = $('.terminal-image-names', draft);
   const status = $('.terminal-image-status', draft);
   const previews = $('.terminal-image-previews', draft);
-  if (names) names.textContent = images.map((entry) => entry.file.name || 'clipboard image').join(', ');
+  if (names) names.textContent = attachments.map((entry) => entry.filename || entry.file.name || 'clipboard image').join(', ');
   if (previews) {
     previews.replaceChildren(...images.map((entry) => {
       const image = document.createElement('img');
@@ -692,20 +707,26 @@ function renderTerminalImageDraft() {
       image.alt = entry.file.name || 'Staged clipboard image';
       image.title = image.alt;
       return image;
+    }), ...files.map((entry) => {
+      const badge = document.createElement('span');
+      badge.className = 'terminal-file-badge';
+      badge.textContent = entry.filename.split('.').at(-1).slice(0, 5).toUpperCase() || 'FILE';
+      badge.title = entry.filename;
+      return badge;
     }));
   }
-  if (status) status.textContent = state.terminalImageUploading
-    ? `Uploading ${images.length} image${images.length === 1 ? '' : 's'}…`
-    : `Ready · press Enter to upload and send ${images.length === 1 ? 'it' : 'them'}`;
+  if (status) status.textContent = state.terminalImageUploading || state.terminalFileUploading
+    ? `Uploading ${attachments.length} attachment${attachments.length === 1 ? '' : 's'}…`
+    : `Ready · press Enter to upload and send ${attachments.length === 1 ? 'it' : 'them'}`;
 }
 
 function stagePastedTerminalImages(files) {
   const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
-  if (!state.selectedAgent || !terminal || state.terminalImageUploading) return false;
-  const existing = currentTerminalImages();
+  if (!state.selectedAgent || !terminal || state.terminalImageUploading || state.terminalFileUploading) return false;
+  const existingCount = currentTerminalAttachmentCount();
   const images = files.filter(Boolean);
   try {
-    if (existing.length + images.length > 4) throw new Error('Send at most 4 images at a time.');
+    if (existingCount + images.length > 4) throw new Error('Send at most 4 attachments at a time.');
     for (const file of images) {
       if (file.size > 8 * 1024 * 1024) throw new Error('Pasted images must be 8 MiB or smaller.');
       if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
@@ -726,6 +747,36 @@ function stagePastedTerminalImages(files) {
   renderTerminalImageDraft();
   toast(`${images.length} image${images.length === 1 ? '' : 's'} ready · press Enter to send`);
   return images.length > 0;
+}
+
+function stageAttachedTerminalFiles(selectedFiles) {
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+  if (!state.selectedAgent || !terminal || state.terminalImageUploading || state.terminalFileUploading) return false;
+  const files = selectedFiles.filter(Boolean);
+  try {
+    if (currentTerminalAttachmentCount() + files.length > 4) throw new Error('Send at most 4 attachments at a time.');
+    for (const file of files) {
+      const filename = file.name.normalize('NFC');
+      if (!file.size || file.size > 8 * 1024 * 1024) throw new Error('Attached files must contain data and be 8 MiB or smaller.');
+      if (new TextEncoder().encode(filename).length > 160 || filename.trim() !== filename
+        || filename === '.' || filename === '..' || /[\x00-\x1f\x7f/\\]/u.test(filename)) {
+        throw new Error('Choose files with safe names of at most 160 UTF-8 bytes.');
+      }
+    }
+  } catch (error) {
+    toast(friendlyError(error), true);
+    return false;
+  }
+  state.terminalPendingFiles.push(...files.map((file) => ({
+    agentId: state.selectedAgent.id,
+    terminalId: terminal.id,
+    uploadId: `upl_${randomIdentifier()}`,
+    filename: file.name.normalize('NFC'),
+    file,
+  })));
+  renderTerminalImageDraft();
+  toast(`${files.length} file${files.length === 1 ? '' : 's'} ready · press Enter to send`);
+  return files.length > 0;
 }
 
 async function sendStagedTerminalImages() {
@@ -765,6 +816,48 @@ async function sendStagedTerminalImages() {
   return sent === images.length;
 }
 
+async function sendStagedTerminalFiles() {
+  if (state.terminalFileUploading) return false;
+  const files = currentTerminalFiles();
+  if (!files.length || !state.selectedAgent) return files.length === 0;
+  state.terminalFileUploading = true;
+  renderTerminalImageDraft();
+  let sent = 0;
+  try {
+    for (const entry of files) {
+      const { file } = entry;
+      toast(`Uploading ${entry.filename}…`);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await api(`/api/v1/agent-instances/${encodeURIComponent(entry.agentId)}/file-uploads`, {
+        method: 'POST',
+        body: {
+          upload_id: entry.uploadId,
+          terminal_id: entry.terminalId,
+          filename: entry.filename,
+          mime_type: file.type || 'application/octet-stream',
+          data_base64: bytesToBase64(bytes),
+        },
+      });
+      state.terminalPendingFiles = state.terminalPendingFiles.filter((candidate) => candidate.uploadId !== entry.uploadId);
+      sent += 1;
+      renderTerminalImageDraft();
+      toast(`File sent to the agent: ${result.upload.relative_path}`);
+    }
+  } catch (error) {
+    toast(friendlyError(error), true);
+  } finally {
+    state.terminalFileUploading = false;
+    renderTerminalImageDraft();
+  }
+  return sent === files.length;
+}
+
+async function sendStagedTerminalAttachments() {
+  if (currentTerminalImages().length && !await sendStagedTerminalImages()) return false;
+  if (currentTerminalFiles().length && !await sendStagedTerminalFiles()) return false;
+  return true;
+}
+
 document.addEventListener('paste', (event) => {
   if (!event.target.closest('#terminal-output, #terminal-compose')) return;
   const images = [...(event.clipboardData?.items || [])]
@@ -775,6 +868,12 @@ document.addEventListener('paste', (event) => {
   event.preventDefault();
   stagePastedTerminalImages(images);
 }, true);
+
+document.addEventListener('change', (event) => {
+  if (event.target.id !== 'terminal-file-input') return;
+  stageAttachedTerminalFiles([...(event.target.files || [])]);
+  event.target.value = '';
+});
 
 function transmitTerminalInput(data) {
   if (!data) return;
@@ -853,9 +952,9 @@ function handleTerminalData(data) {
 }
 
 function handleTerminalKey(event) {
-  if (terminalImageCommitKey(event, currentTerminalImages().length > 0)) {
+  if (terminalAttachmentCommitKey(event, currentTerminalAttachmentCount() > 0)) {
     event.preventDefault();
-    void sendStagedTerminalImages();
+    void sendStagedTerminalAttachments();
     return false;
   }
   const input = directKeyInput(event, state.terminalKeyboardProtocol);
@@ -997,6 +1096,9 @@ async function renderTerminal(agent) {
   state.selectedTerminalId = terminal.id;
   const agentEnded = ['stopped', 'failed', 'hibernated'].includes(agent.state);
   const interactive = terminal.state === 'attached' && !(terminal.kind === 'primary_agent' && agentEnded);
+  const textBoxPurpose = terminal.kind === 'primary_agent'
+    ? `Draft a durable message directly to ${agent.title || 'this agent'}`
+    : 'Draft text before sending it to this shell';
   if (!['terminal', 'maths', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
     <div class="terminal-session-tabs">${state.terminals.map((item) => {
@@ -1004,10 +1106,10 @@ async function renderTerminal(agent) {
       : item.kind === 'task_shell' && item.label === 'Terminal' ? `Task ${item.id.slice(-4)}` : item.label;
     return `<div class="terminal-tab ${item.id === terminal.id ? 'selected' : ''}"><button class="terminal-select" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i><span>${h(label)}</span></button>${item.kind !== 'primary_agent' ? `<button class="terminal-tab-close" data-action="close-terminal" data-terminal-id="${h(item.id)}" aria-label="Close ${h(label)} terminal tab" title="${item.kind === 'task_shell' ? 'Dismiss task terminal; the task keeps running' : 'Close terminal and stop its shell'}">×</button>` : ''}</div>`;
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
-    ${interactive ? '<div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged image previews"></div><div class="terminal-image-summary"><strong>Image ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged images" title="Discard staged images">×</button></div>' : ''}
-    ${interactive ? '<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="Write before sending to the terminal"></textarea><button class="primary" type="submit">Send</button></form>' : ''}
+    ${interactive ? '<input id="terminal-file-input" class="hidden" type="file" multiple aria-label="Choose files to attach"><div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged attachment previews"></div><div class="terminal-image-summary"><strong>Attachment ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged attachments" title="Discard staged attachments">×</button></div>' : ''}
+    ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}"></textarea><button class="primary" type="submit">Send</button></form>` : ''}
   </section>`;
   renderTerminalImageDraft();
   applyTerminalView();
@@ -1225,7 +1327,7 @@ async function renderInstructions(agent) {
   const policy = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/policy`);
   const activeRevision = policy.effective?.agent_instruction_revision || 0;
   $('#agent-content').innerHTML = `<section class="panel instruction-card">
-    <div class="panel-header"><h2>${agent.orchestration_role === 'main' ? 'Master' : 'Worker'} instructions</h2><span>saved r${h(policy.instruction_revision)} · active r${h(activeRevision)}</span></div>
+    <div class="panel-header"><h2>${agent.orchestration_role === 'main' ? 'Master' : 'Sub-Spider'} instructions</h2><span>saved r${h(policy.instruction_revision)} · active r${h(activeRevision)}</span></div>
     <form id="agent-instructions-form" class="instruction-editor" data-revision="${h(policy.instruction_revision)}">
       <label for="agent-custom-instructions">Custom instructions</label>
       <textarea id="agent-custom-instructions" name="instructions" maxlength="4000" placeholder="A few durable preferences for this agent…">${h(policy.custom_instructions || '')}</textarea>
@@ -1246,7 +1348,7 @@ async function renderMetadata(agent) {
     'Profile': `${agent.profile_name} (${agent.profile_id})`,
     'Project': `${agent.project_name} (${agent.project_id})`,
     'Node': `${agent.node_name} (${agent.node_id})`,
-    'Orchestration role': agent.orchestration_role === 'main' ? 'Main agent' : 'Worker agent',
+    'Orchestration role': agent.orchestration_role === 'main' ? 'On-demand Master' : 'Direct project Sub-Spider',
     'Behavior control': agent.can_edit_behavior ? 'Scoped project + system edits, only by explicit user request' : 'None; native harness defaults are preserved',
     'Logical thread': agent.active_thread_id,
     'Terminal': agent.terminal_id,
@@ -1257,7 +1359,7 @@ async function renderMetadata(agent) {
     'Portal filesystem scope': 'workspace-only',
     'Agent execution scope': 'host user',
     'Instruction snapshot': policy.effective ? `${policy.effective.id} · system r${policy.effective.system_policy_revision} · project r${policy.effective.policy_revision}` : 'Applied when the agent next starts',
-    'Instruction mode': agent.orchestration_role === 'main' ? 'Main-agent defaults and control boundary' : 'Sparse task-relevant constraints; native harness retained',
+    'Instruction mode': agent.orchestration_role === 'main' ? 'On-demand portfolio management and control boundary' : 'Direct project work; native harness retained',
     'Inbound time context': 'Message UTC · delivery UTC · elapsed since prior inbound',
     ...(agent.orchestration_role === 'main' ? {
       'Weekly account allowance': accountUsageLabel(accountUsage),
@@ -1358,7 +1460,9 @@ async function routeFromHash() {
   const agentIndex = parts.indexOf('agents');
   if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
   if (parts[0] === 'projects' && parts[1]) return renderProject(decodeURIComponent(parts[1]));
-  const mostRecentAgent = masterAgent() || state.agents.slice().sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at))[0];
+  const mostRecentAgent = state.agents.slice()
+    .sort((left, right) => new Date(right.last_activity_at || 0) - new Date(left.last_activity_at || 0))[0]
+    || masterAgent();
   if (mostRecentAgent) return renderAgent(mostRecentAgent.id, 'terminal');
   if (state.projects[0]) return renderProject(state.projects[0].id);
   return renderHome();
@@ -1430,6 +1534,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'onboard-project') return showProjectOnboarding();
     if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
     if (action === 'add-terminal') return showTerminalForm();
+    if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'adopt-codex-session') return showCodexSessionForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {
@@ -1445,12 +1550,14 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'discard-terminal-images') {
       const images = currentTerminalImages();
+      const files = currentTerminalFiles();
       images.forEach((entry) => URL.revokeObjectURL(entry.previewUrl));
-      const discarded = new Set(images.map((entry) => entry.uploadId));
+      const discarded = new Set([...images, ...files].map((entry) => entry.uploadId));
       state.terminalPendingImages = state.terminalPendingImages.filter((entry) => !discarded.has(entry.uploadId));
+      state.terminalPendingFiles = state.terminalPendingFiles.filter((entry) => !discarded.has(entry.uploadId));
       renderTerminalImageDraft();
       state.terminalEmulator?.focus();
-      return toast('Staged images discarded.');
+      return toast('Staged attachments discarded.');
     }
     if (action === 'detach-codex-session') {
       await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/codex-session`, { method: 'DELETE' });
@@ -1559,14 +1666,14 @@ document.addEventListener('submit', async (event) => {
     event.preventDefault();
     const textarea = $('#terminal-compose');
     const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
-    const hasImages = currentTerminalImages().length > 0;
+    const hasAttachments = currentTerminalAttachmentCount() > 0;
     if (terminal?.kind === 'primary_agent') {
       const message = textarea?.value || '';
-      if (!message && !hasImages) return;
+      if (!message && !hasAttachments) return;
       const button = event.target.querySelector('button[type="submit"]');
       button.disabled = true;
       try {
-        if (hasImages && !await sendStagedTerminalImages()) return;
+        if (hasAttachments && !await sendStagedTerminalAttachments()) return;
         if (message) await api(`/api/v1/threads/${encodeURIComponent(state.selectedAgent.active_thread_id)}/messages`, {
             method: 'POST',
             headers: { 'idempotency-key': randomIdentifier() },
@@ -1578,7 +1685,7 @@ document.addEventListener('submit', async (event) => {
       finally { button.disabled = false; }
       return;
     }
-    if (hasImages && !await sendStagedTerminalImages()) return;
+    if (hasAttachments && !await sendStagedTerminalAttachments()) return;
     const submitted = submitTerminalComposition(textarea?.value || '');
     if (textarea && submitted) {
       textarea.value = '';

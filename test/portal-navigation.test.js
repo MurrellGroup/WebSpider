@@ -22,11 +22,17 @@ test('portal and hub version are synchronized and version skew is explicit', () 
 
 test('Master Spider navigation opens its terminal and portfolio is separate', () => {
   assert.match(page, /class="nav-master selected" data-action="master"/);
-  assert.match(page, /<strong>Master Spider<\/strong><small>Persistent terminal<\/small>/);
+  assert.match(page, /<strong>Master Spider<\/strong><small>On-demand portfolio manager<\/small>/);
   assert.match(app, /if \(action === 'master'\).*openMasterTerminal\(\)/);
   assert.match(app, /if \(parts\[0\] === 'home'\) return openMasterTerminal\(\)/);
   assert.match(app, /orchestration_role === 'main'.*data-action="overview".*Portfolio/);
   assert.match(app, /history\.replaceState\(null, '', '#\/overview'\)/);
+});
+
+test('an unlinked portal session resumes the most recently active agent instead of forcing the Master', () => {
+  assert.match(app, /const mostRecentAgent = state\.agents\.slice\(\)/);
+  assert.match(app, /sort\(\(left, right\) => new Date\(right\.last_activity_at \|\| 0\)/);
+  assert.match(app, /\|\| masterAgent\(\)/);
 });
 
 test('agent pages expose compact editable custom instructions', () => {
@@ -49,10 +55,10 @@ test('Codex agents expose existing-session adoption with registered-root wording
   assert.match(app, /codex-session.*method: 'DELETE'/s);
 });
 
-test('one browser editor manages worker-only instructions without changing the Master', () => {
+test('one browser editor manages Sub-Spider-only instructions without changing the Master', () => {
   assert.match(page, /data-action="show-worker-instructions"/);
   assert.match(app, /id="worker-instructions-form"/);
-  assert.match(app, /Worker-only instructions; the Master Spider does not inherit this text/);
+  assert.match(app, /Sub-Spider-only instructions; the Master Spider does not inherit this text/);
   assert.match(app, /requested_instructions: \{ workers: instructions \}/);
   assert.match(app, /orchestration_role !== 'main'/);
   assert.match(app, /Save & restart workers/);
@@ -63,6 +69,15 @@ test('project onboarding uses the current hub route', () => {
   assert.match(page, /data-action="onboard-project" title="Add project"/);
   assert.match(app, /if \(action === 'onboard-project'\) return showProjectOnboarding\(\)/);
   assert.match(app, /api\('\/api\/v1\/projects\/onboard'/);
+});
+
+test('project pages present the Sub-Spider as a direct first-class interaction target', () => {
+  assert.match(app, /Open \$\{primaryAgent\.orchestration_role === 'main' \? 'Master' : 'Sub-Spider'\}/);
+  assert.match(app, /Direct to \$\{h\(primaryAgent\.title \|\| 'agent'\)\}/);
+  assert.match(app, /<h2>Project defaults<\/h2>/);
+  assert.match(app, /View the Master agreement/);
+  assert.match(app, /View the Sub-Spider agreement/);
+  assert.match(app, /policy\.rendered_worker_instructions/);
 });
 
 test('mobile navigation keeps project actions available and More opens the navigation drawer', () => {
@@ -159,14 +174,30 @@ test('pasting a clipboard image stages it and Enter uploads it to the agent work
   assert.match(app, /addEventListener\('paste'/);
   assert.match(app, /stagePastedTerminalImages\(images\);\n\}, true\);/);
   assert.match(app, /item\.type\.startsWith\('image\/'\)/);
-  assert.match(app, /terminalImageCommitKey\(event, currentTerminalImages\(\)\.length > 0\)/);
-  assert.match(app, /void sendStagedTerminalImages\(\)/);
+  assert.match(app, /terminalAttachmentCommitKey\(event, currentTerminalAttachmentCount\(\) > 0\)/);
+  assert.match(app, /void sendStagedTerminalAttachments\(\)/);
   assert.match(app, /Ready · press Enter to upload and send/);
   assert.match(app, /URL\.createObjectURL\(file\)/);
   assert.match(app, /class="terminal-image-previews"/);
   assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(entry\.agentId\)\}\/uploads/);
   assert.match(app, /data_base64: bytesToBase64\(bytes\)/);
   assert.match(app, /Image sent to the agent/);
+});
+
+test('browser file attachments stage for the selected agent and send only on plain Enter', () => {
+  assert.match(app, /data-action="choose-terminal-files"/);
+  assert.match(app, /id="terminal-file-input"[^>]*type="file"[^>]*multiple/);
+  assert.match(app, /stageAttachedTerminalFiles/);
+  assert.match(app, /\/file-uploads/);
+  assert.match(app, /File sent to the agent/);
+  assert.match(app, /event\.target\.id === 'terminal-compose' && event\.key === 'Enter' && !event\.shiftKey/);
+  assert.match(app, /if \(hasAttachments && !await sendStagedTerminalAttachments\(\)\) return/);
+});
+
+test('every primary agent Text box is described and delivered as a direct durable message', () => {
+  assert.match(app, /terminal\.kind === 'primary_agent'[\s\S]*Draft a durable message directly to/);
+  assert.match(app, /if \(terminal\?\.kind === 'primary_agent'\)/);
+  assert.match(app, /state\.selectedAgent\.active_thread_id/);
 });
 
 test('file browser can reveal hidden workspace files explicitly', () => {

@@ -7,8 +7,8 @@ export function clipboardPasteShortcut(event) {
   return Boolean(event.metaKey) !== Boolean(event.ctrlKey) && (event.metaKey || event.ctrlKey);
 }
 
-export function terminalImageCommitKey(event, hasPendingImages = false) {
-  return Boolean(hasPendingImages) && event?.type === 'keydown' && event.key === 'Enter'
+export function terminalAttachmentCommitKey(event, hasPendingAttachments = false) {
+  return Boolean(hasPendingAttachments) && event?.type === 'keydown' && event.key === 'Enter'
     && !event.shiftKey && !event.isComposing;
 }
 
@@ -22,6 +22,10 @@ export function directKeyInput(event, keyboardProtocol = false) {
   // from firing, so clipboard images can only be pasted from the context menu.
   if (clipboardPasteShortcut(event)) return null;
   const key = String(event.key || '');
+  if (keyboardProtocol && key === 'Enter' && event.shiftKey
+    && !event.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    return kittySequence(13, 2);
+  }
   if (!event.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey && [...key].length === 1) return key;
   if (!keyboardProtocol || !(event.ctrlKey || event.altKey || event.metaKey) || [...key].length !== 1) return null;
   const modifiers = 1

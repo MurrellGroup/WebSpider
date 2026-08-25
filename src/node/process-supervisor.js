@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 
-const MASTER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
+const WEBSPIDER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
 const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
 const DARWIN_PTY_WRITE_CHUNK_BYTES = 512;
 const WRITE_PACING = new Int32Array(new SharedArrayBuffer(4));
@@ -241,7 +241,7 @@ async function main() {
     || (resource === 'notes' && ['list', 'show'].includes(action))
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -269,14 +269,14 @@ async function main() {
     const agent = option('--agent') || process.env.WEBSPIDER_AGENT_INSTANCE_ID;
     const argvJSON = option('--argv-json');
     const title = option('--title');
-    const notify = option('--notify') || 'master';
+    const notify = option('--notify');
     const completionMessage = option('--completion-message');
     const delaySeconds = Number(option('--delay-seconds') || 0);
     let argv;
     try { argv = JSON.parse(argvJSON || ''); } catch { console.error('--argv-json must contain valid JSON'); process.exit(2); }
     if (!agent || !Array.isArray(argv) || !argv.length || argv.some((argument) => typeof argument !== 'string')
       || !Number.isInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 86_400
-      || !['self', 'master', 'none'].includes(notify)) {
+      || (notify != null && !['self', 'master', 'none'].includes(notify))) {
       console.error('tasks run requires --argv-json with a non-empty string array, optional --agent ID, --delay-seconds 0..86400, and --notify self|master|none');
       process.exit(2);
     }
@@ -285,7 +285,7 @@ async function main() {
       argv,
       title,
       delay_seconds: delaySeconds,
-      notify_target: notify,
+      ...(notify ? { notify_target: notify } : {}),
       completion_message: completionMessage,
     }), null, 2));
     return;
@@ -368,12 +368,13 @@ async function main() {
     const status = option('--status');
     const summaryOption = option('--summary');
     const file = option('--file');
+    const notifyMaster = process.argv.includes('--notify-master');
     if (!['idle', 'working', 'blocked', 'completed'].includes(status) || (!summaryOption && !file) || (summaryOption && file)) {
       console.error('report requires --status idle|working|blocked|completed and exactly one of --summary TEXT or --file PATH');
       process.exit(2);
     }
     const summary = file ? (await import('node:fs')).readFileSync(file, 'utf8') : summaryOption;
-    console.log(JSON.stringify(await request('report', 'POST', { status, summary }), null, 2));
+    console.log(JSON.stringify(await request('report', 'POST', { status, summary, notify_master: notifyMaster }), null, 2));
     return;
   }
   if (resource === 'agents') {
@@ -612,9 +613,9 @@ export class ProcessSupervisor extends EventEmitter {
         fs.closeSync(prior);
       }
     }
-    const guideEnvironment = kind === 'agent' && policySnapshot?.agent_role === 'main'
+    const guideEnvironment = kind === 'agent'
       ? (() => {
-        const guide = this.rootService.writeUserGuide(rootId, fs.readFileSync(MASTER_USER_GUIDE));
+        const guide = this.rootService.writeUserGuide(rootId, fs.readFileSync(WEBSPIDER_USER_GUIDE));
         return { WEBSPIDER_USER_GUIDE: path.join(root.canonical, guide.relative_path) };
       })()
       : {};

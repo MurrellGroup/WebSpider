@@ -157,7 +157,7 @@ test('document handoffs reject a symlinked reserved inbox', (t) => {
   assert.equal(fs.existsSync(path.join(value.outside, 'inbox')), false);
 });
 
-test('the package-owned Master guide is refreshed atomically inside the workspace', (t) => {
+test('the package-owned agent guide is refreshed atomically inside the workspace', (t) => {
   const value = fixture();
   t.after(() => {
     value.service.close();
@@ -172,7 +172,7 @@ test('the package-owned Master guide is refreshed atomically inside the workspac
   assert.equal(fs.readFileSync(guidePath, 'utf8'), 'WebSpider guide version two\n');
 });
 
-test('the Master guide rejects a symlinked reserved WebSpider path', (t) => {
+test('the agent guide rejects a symlinked reserved WebSpider path', (t) => {
   const value = fixture();
   fs.symlinkSync(value.outside, path.join(value.root, '.webspider'));
   t.after(() => {
@@ -204,4 +204,29 @@ test('clipboard images are checksum-verified and written privately inside the wo
   assert.throws(() => value.service.writeImageUpload('awr_test', {
     uploadId: 'upl_wrongtype12345678', mimeType: 'image/jpeg', bytes, sha256,
   }), (error) => error.code === 'WS_UPLOAD_INVALID');
+});
+
+test('browser file attachments preserve safe names and stay private inside the workspace', (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const bytes = Buffer.from('%PDF-1.4\nattached paper\n%%EOF\n');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const upload = value.service.writeFileUpload('awr_test', {
+    uploadId: 'upl_fileattachment1234', filename: 'draft paper.pdf',
+    mimeType: 'application/pdf', bytes, sha256,
+  });
+  assert.equal(upload.relative_path, '.webspider/uploads/upl_fileattachment1234-draft paper.pdf');
+  assert.deepEqual(fs.readFileSync(path.join(value.root, upload.relative_path)), bytes);
+  assert.equal(fs.statSync(path.join(value.root, upload.relative_path)).mode & 0o777, 0o600);
+  assert.equal(value.service.writeFileUpload('awr_test', {
+    uploadId: 'upl_fileattachment1234', filename: 'draft paper.pdf',
+    mimeType: 'application/pdf', bytes, sha256,
+  }).duplicate, true);
+  assert.throws(() => value.service.writeFileUpload('awr_test', {
+    uploadId: 'upl_badfilename123456', filename: '../paper.pdf',
+    mimeType: 'application/pdf', bytes, sha256,
+  }), (error) => error.code === 'WS_VALIDATION');
 });

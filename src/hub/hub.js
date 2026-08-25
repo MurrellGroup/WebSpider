@@ -14,6 +14,7 @@ import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecr
 import { makeId, nowISO, randomToken } from '../lib/ids.js';
 import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/project-policy.js';
 import { agentLaunchArguments } from '../lib/agent-profile.js';
+import { decodeFileBase64, validateFileUpload } from '../lib/file-upload.js';
 import { decodeImageBase64, validateImageUpload } from '../lib/image-upload.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -231,7 +232,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.10', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: '0.6.11', portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
@@ -421,6 +422,7 @@ export class Hub {
         overrides: project.policy_overrides,
         summary: summarizeProjectPolicy(project.policy),
         rendered_instructions: renderProjectInstructions(project, { role: 'main' }),
+        rendered_worker_instructions: renderProjectInstructions(project, { role: 'worker' }),
       };
     });
     route('POST', '/api/v1/projects/:id/agents', async (ctx) => {
@@ -619,7 +621,9 @@ export class Hub {
       invariant(typeof title === 'string' && title.trim().length > 0 && title.length <= 200,
         'WS_VALIDATION', 'title must be a non-empty string of at most 200 characters.');
       const notifyTarget = body.notify_target
-        || (body.notify_master === false ? 'none' : 'master');
+        || (body.notify_master === false
+          ? 'none'
+          : (body.notify_master === true || source.orchestration_role === 'main' ? 'master' : 'self'));
       invariant(['none', 'self', 'master'].includes(notifyTarget), 'WS_VALIDATION',
         'notify_target must be none, self, or master.');
       const completionMessage = body.completion_message == null ? '' : body.completion_message;
@@ -768,6 +772,8 @@ export class Hub {
 
     route('POST', '/api/v1/agent-control/report', async (ctx) => {
       const body = await readJSON(ctx.request, 65_536);
+      invariant(body.notify_master == null || typeof body.notify_master === 'boolean',
+        'WS_VALIDATION', 'notify_master must be a boolean when supplied.');
       const agent = this.database.updateAgentWorkStatus(
         ctx.principal.agent_instance_id,
         body.status,
@@ -777,7 +783,7 @@ export class Hub {
       const master = this.database.getAgent('agt_master')
         || this.database.listAgents().find((candidate) => candidate.orchestration_role === 'main');
       let notification = null;
-      if (master && master.id !== agent.id) {
+      if (body.notify_master === true && master && master.id !== agent.id) {
         notification = this.database.createMessage({
           threadId: master.active_thread_id,
           actorId: ctx.principal.principal_id,
@@ -1159,6 +1165,67 @@ export class Hub {
         targetId: agent.id,
         projectId: agent.project_id,
         newState: { upload_id: body.upload_id, relative_path: upload.relative_path, mime_type: upload.mime_type, size_bytes: upload.size_bytes },
+      });
+      if (!message.duplicate) queueMicrotask(() => this.#dispatchMessage(message.message.id).catch((error) => this.#logError(error)));
+      return { upload, message: message.message, duplicate: upload.duplicate && message.duplicate };
+    });
+    route('POST', '/api/v1/agent-instances/:id/file-uploads', async (ctx) => {
+      const body = await readJSON(ctx.request, 12 * 1024 * 1024);
+      const agent = this.database.getAgent(ctx.params.id);
+      invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+      invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Archived projects cannot receive file uploads.', 409);
+      const terminal = this.database.getTerminal(body.terminal_id);
+      invariant(terminal?.agent_instance_id === agent.id, 'WS_FORBIDDEN', 'Terminal does not belong to this agent.', 403);
+      const root = this.database.listAgentRoots(agent.id)[0];
+      invariant(root, 'WS_ROOT_NOT_FOUND', 'Agent workspace root is unavailable.', 404);
+      invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation is offline; reconnect it before attaching a file.', 503);
+      const bytes = decodeFileBase64(body.data_base64);
+      const validated = validateFileUpload({
+        uploadId: body.upload_id,
+        filename: body.filename,
+        mimeType: body.mime_type,
+        bytes,
+      });
+      const upload = await this.broker.request(root.node_id, 'files.upload', {
+        root_id: root.node_root_id,
+        upload_id: body.upload_id,
+        filename: validated.filename,
+        mime_type: validated.mime_type,
+        data_base64: body.data_base64,
+        sha256: validated.sha256,
+      }, { timeoutMs: 60_000 });
+      const messageText = [
+        '[WebSpider file upload]',
+        'The user attached a file to this agent.',
+        `Local path: ${upload.relative_path}`,
+        `Original name: ${upload.filename}`,
+        `MIME type: ${upload.mime_type}`,
+        `Size: ${upload.size_bytes} bytes`,
+        `SHA-256: ${upload.sha256}`,
+        'Inspect the local file when answering the user.',
+      ].join('\n');
+      const message = this.database.createMessage({
+        threadId: agent.active_thread_id,
+        actorId: ctx.principal.principal_id,
+        deliveryRole: 'user',
+        displaySender: 'You (file attachment)',
+        contentParts: [{ type: 'text', text: messageText }],
+        wakePolicy: 'ensure_running',
+        idempotencyKey: `file-upload:${body.upload_id}`,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.file_upload',
+        targetType: 'agent_instance',
+        targetId: agent.id,
+        projectId: agent.project_id,
+        newState: {
+          upload_id: body.upload_id,
+          relative_path: upload.relative_path,
+          filename: upload.filename,
+          mime_type: upload.mime_type,
+          size_bytes: upload.size_bytes,
+        },
       });
       if (!message.duplicate) queueMicrotask(() => this.#dispatchMessage(message.message.id).catch((error) => this.#logError(error)));
       return { upload, message: message.message, duplicate: upload.duplicate && message.duplicate };

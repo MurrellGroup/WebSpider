@@ -17,6 +17,8 @@ Hard safety and permission boundaries remain enforced by WebSpider. Reducing bur
 
 A second invariant applies to delegation: central coordination must not become remote-agent micromanagement. Worker harnesses are already tuned for their environments. WebSpider communicates the objective and only the constraints that materially protect the requested result; it does not restate generic planning, tool-use, reporting, or style doctrine.
 
+A third invariant applies to interaction topology: direct user-to-Sub-Spider project work and Master-managed portfolio work are both first-class. The user should not have to route ordinary project conversation through the Master. The Master becomes central when explicitly entrusted with unattended oversight, delegation, follow-up, cross-project coordination, exceptions, or integration. Routine direct worker status must not consume the Master context.
+
 ## Audit findings and corrections
 
 | Surface | Previous burden | Correction |
@@ -27,7 +29,9 @@ A second invariant applies to delegation: central coordination must not become r
 | Project setup | Project record contained only a name and free-form labels | Create an academic-first working agreement automatically, with structured policy and human-readable rendering |
 | Agent spawn | No durable record of the defaults an agent received | Resolve and persist an immutable policy snapshot for every launch |
 | Codex instructions | Adapter-specific integration would be required | Compose existing global guidance with the project agreement in a private managed `CODEX_HOME/AGENTS.md` |
-| Landing page | Opened on fabric operations | Open the most recently active agent conversation; keep the operational home available |
+| Landing page | Opened on fabric operations or forced the Master | Open the most recently active agent terminal; keep the Master and operational overview one click away |
+| Direct project work | Treated workers mainly as Master-controlled executors | Make every Sub-Spider a first-class persistent user interface with direct Terminal, durable Text box/Conversation messages, files, attachments, and project-local status |
+| Master context | Every worker lifecycle report interrupted the Master | Persist worker status without a Master message by default; require explicit notification for delegated results, requested milestones, blockers, material risks, or actionable decisions |
 | Project steering | Required navigating to an agent before expressing intent | Add a project-level outcome box that selects the active agent and safe delivery behavior automatically |
 | Message delivery | Exposed four scheduling choices on every message | Use “next safe point” by default; move alternate delivery semantics under progressive disclosure |
 | Agent controls | Wake and stop were equally prominent | Sending wakes automatically; show Resume only when needed and place Stop under agent actions |
@@ -44,7 +48,7 @@ A second invariant applies to delegation: central coordination must not become r
 | Account actions | Provider usage surfaces can colocate observation with reset or payment actions | Make all resets, token refreshes, credits, billing, plan, authentication, entitlement, and API-funding actions human-only; expose no agent command or endpoint for them |
 | Time awareness | Queued and triggered messages did not tell the agent how much time had passed | Add source, UTC timestamp, and elapsed time to every delivered inbound envelope automatically |
 
-## Central default policy
+## Shared default policy
 
 Every project receives an effective policy even when the user provides only a workspace. Built-in defaults are overlaid first by system overrides and then by project overrides. The defaults cover:
 
@@ -63,7 +67,7 @@ Every project receives an effective policy even when the user provides only a wo
 
 Customization is not part of the critical path. The user can ask the main agent to make a project-specific or system-wide change without specifying a JSON schema. The main agent inspects current values, makes the narrowest patch, supplies the user-request reason, and reports restart impact. Independent system and project revisions affect new launches; running sessions visibly become stale rather than silently changing mid-run.
 
-Workers cannot edit policy. Their launch instructions deliberately exclude central orchestration doctrine and behavior-control details.
+Workers cannot edit policy. Their launch instructions deliberately exclude central orchestration doctrine and behavior-control details, while explicitly recognizing direct user instructions as normal authoritative project work.
 
 ## Progressive-disclosure rule
 

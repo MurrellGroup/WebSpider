@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalImageCommitKey,
+  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalAttachmentCommitKey,
 } from '../web/terminal-input.js';
 
 test('rapid printable keydowns bypass the hidden terminal textarea without losing characters', () => {
@@ -19,6 +19,8 @@ test('modified Kitty keys remain encoded while ordinary shortcuts stay xterm-own
   assert.equal(directKeyInput({ type: 'keydown', key: 'c', ctrlKey: true }, true), kittySequence(99, 5));
   assert.equal(directKeyInput({ type: 'keydown', key: 'c', ctrlKey: true }, false), null);
   assert.equal(directKeyInput({ type: 'keydown', key: 'x', altKey: true, shiftKey: true }, true), kittySequence(120, 4));
+  assert.equal(directKeyInput({ type: 'keydown', key: 'Enter', shiftKey: true }, true), kittySequence(13, 2));
+  assert.equal(directKeyInput({ type: 'keydown', key: 'Enter' }, true), null);
 });
 
 test('clipboard paste shortcuts stay browser-owned when Kitty keyboard mode is active', () => {
@@ -36,11 +38,11 @@ test('clipboard paste shortcuts stay browser-owned when Kitty keyboard mode is a
 });
 
 test('a staged image commits exactly on an unmodified Enter keydown', () => {
-  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter' }, true), true);
-  assert.equal(terminalImageCommitKey({ type: 'keyup', key: 'Enter' }, true), false);
-  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter', shiftKey: true }, true), false);
-  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter', isComposing: true }, true), false);
-  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter' }, false), false);
+  assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter' }, true), true);
+  assert.equal(terminalAttachmentCommitKey({ type: 'keyup', key: 'Enter' }, true), false);
+  assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter', shiftKey: true }, true), false);
+  assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter', isComposing: true }, true), false);
+  assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter' }, false), false);
 });
 
 test('terminal data always queues and requests control when no precursor event did so', () => {

@@ -523,14 +523,25 @@ test('worker hooks are self-confined, restart-durable, and can notify self or ma
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       argv: [process.execPath, '-e', 'process.exit(0)'],
-      notify_target: 'self',
       completion_message: 'Worker-local completion hook',
     }),
   });
   assert.equal(selfTask.response.status, 200);
+  assert.equal(selfTask.body.specification.notify_target, 'self');
   await waitUntil(() => hub.database.getTask(selfTask.body.id).state === 'runnable');
   const workerTaskList = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, token);
   assert.deepEqual(workerTaskList.body.tasks.map((task) => task.id), [selfTask.body.id]);
+
+  hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_master_hooks', ['tasks:write']);
+  const delegatedTask = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, 'wsa_master_hooks', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: worker.id,
+      argv: [process.execPath, '-e', 'process.exit(0)'],
+    }),
+  });
+  assert.equal(delegatedTask.response.status, 200);
+  assert.equal(delegatedTask.body.specification.notify_target, 'master');
 
   const toMaster = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders`, token, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -658,10 +669,27 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.match(imageUpload.body.message.content_parts[0].text, /Inspect the local image/);
   assert.match(imageUpload.body.message.content_parts[0].text, /\.webspider\/uploads\/upl_e2eclipboard123456\.png/);
 
+  const attachedPdf = Buffer.from('%PDF-1.4\nBrowser attachment\n%%EOF\n');
+  const fileUpload = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}/file-uploads`, listening.ownerToken, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      upload_id: 'upl_e2efileattach123456', terminal_id: bootstrap.agent.terminal_id,
+      filename: 'analysis draft.pdf', mime_type: 'application/pdf', data_base64: attachedPdf.toString('base64'),
+    }),
+  });
+  assert.equal(fileUpload.response.status, 200);
+  assert.equal(fileUpload.body.upload.relative_path, '.webspider/uploads/upl_e2efileattach123456-analysis draft.pdf');
+  assert.deepEqual(fs.readFileSync(path.join(workspace, fileUpload.body.upload.relative_path)), attachedPdf);
+  assert.equal(fs.statSync(path.join(workspace, fileUpload.body.upload.relative_path)).mode & 0o777, 0o600);
+  assert.match(fileUpload.body.message.content_parts[0].text, /Inspect the local file/);
+  assert.match(fileUpload.body.message.content_parts[0].text, /analysis draft\.pdf/);
+
   const policy = await jsonFetch(`${listening.url}/api/v1/projects/${bootstrap.project.id}/policy`, listening.ownerToken);
   assert.equal(policy.response.status, 200);
   assert.equal(policy.body.policy.principle, 'minimize_user_burden');
-  assert.match(policy.body.rendered_instructions, /persistent multi-project manager/);
+  assert.match(policy.body.rendered_instructions, /on-demand multi-project Master Spider/);
+  assert.match(policy.body.rendered_worker_instructions, /instructions arrive directly, are authoritative, and bypass the Master/);
   const policyUpdate = await jsonFetch(`${listening.url}/api/v1/projects/${bootstrap.project.id}/policy`, listening.ownerToken, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -947,6 +975,8 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   assert.equal(worker.project_id, onboard.body.project.id);
   assert.equal(worker.node_id, enrolled.node_id);
   assert.equal(node.database.getProcessByAgent(worker.id)?.state, 'running');
+  assert.match(fs.readFileSync(path.join(remoteWorkspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'),
+    /Direct project mode/);
 
   hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_portfolio_master', ['portfolio:read', 'agents:read', 'messages:write']);
   const portfolio = await jsonFetch(`${listening.url}/api/v1/agent-control/portfolio`, 'wsa_portfolio_master');
@@ -966,8 +996,20 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   });
   assert.equal(report.response.status, 200);
   assert.equal(hub.database.getAgent(worker.id).work_status, 'working');
-  assert(hub.database.listMessages(bootstrap.agent.active_thread_id)
+  assert.equal(report.body.notification, null);
+  assert(!hub.database.listMessages(bootstrap.agent.active_thread_id)
     .some((message) => message.content_parts[0].text.includes('Analysis is running on the GPU.')));
+
+  const escalatedReport = await jsonFetch(`${listening.url}/api/v1/agent-control/report`, 'wsa_worker_report', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      status: 'blocked', summary: 'GPU allocation needs a Master decision.', notify_master: true,
+    }),
+  });
+  assert.equal(escalatedReport.response.status, 200);
+  assert(escalatedReport.body.notification?.message);
+  assert(hub.database.listMessages(bootstrap.agent.active_thread_id)
+    .some((message) => message.content_parts[0].text.includes('GPU allocation needs a Master decision.')));
 
   const shellTab = await jsonFetch(`${listening.url}/api/v1/agent-instances/${worker.id}/terminals`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' },

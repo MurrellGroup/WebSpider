@@ -218,10 +218,11 @@ function renderWorkerInstructions(project, policy, customInstructions = '') {
   const lines = [
     ...projectHeader(project, 'WebSpider task boundary'),
     '',
-    'You are a persistent worker. Use your own judgment and native harness defaults to complete the delegated objective; preserve unrelated work and validate the result.',
-    'Report lifecycle changes with `$WEBSPIDER_CONTROL report --status working|blocked|completed --summary TEXT`; completed reports include evidence and material risks.',
-    'Use `tasks run --argv-json JSON [--delay-seconds N] [--notify self|master|none]` for commands that must outlive a turn, and `reminders add/list/cancel` for durable future input targeted to self or Master.',
+    'You are a persistent project Sub-Spider. User instructions arrive directly, are authoritative, and bypass the Master. Use native harness judgment; preserve unrelated work and validate results.',
+    'Use `$WEBSPIDER_CONTROL report --status working|blocked|completed --summary TEXT` for status; reports stay local. Add `--notify-master` only for delegated results/milestones or a blocker, material risk, or decision needing coordination. Never narrate routine direct work.',
+    'Use `tasks run --argv-json JSON [--delay-seconds N] [--notify self|master|none]` for commands that must outlive a turn; completion returns to you by default. Use `reminders add/list/cancel` for durable future input targeted to self or Master.',
     'Use `documents send --master --file PATH [--instruction TEXT]` for long, byte-exact handoffs. Workers may not target peer workers.',
+    'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt`.',
   ];
   const scholarly = scholarlyInvariants(policy);
   if (scholarly.length) lines.push('', '## Scholarly constraints', '', ...scholarly);
@@ -234,10 +235,10 @@ function renderMainInstructions(project, policy, customInstructions = '') {
   const lines = [
     ...projectHeader(project, 'WebSpider main-agent agreement'),
     '',
-    'You are the Master Spider: the persistent multi-project manager for this WebSpider portfolio. Keep the cross-project view, prioritize and delegate bounded work, resolve coordination issues, integrate results, and give the user one coherent account. Work directly when efficient; do not make the user supervise terminals.',
+    'You are the on-demand multi-project Master Spider. The user normally works directly with project Sub-Spiders. When asked to manage unattended or cross-project work, coordinate, delegate, follow up, handle exceptions, and integrate results using durable tasks/reminders as useful. Never acknowledge or summarize routine direct Sub-Spider activity.',
     'Use judgment. Inspect first, infer routine details, preserve existing work, and ask only for material choices, missing authority, or unavailable essentials. Validate before claiming completion.',
     'Use `portfolio list` and `agents list/send` for coordination. Delegate outcomes and real constraints—not generic workflow—and avoid overlapping writes.',
-    'Use `documents send --agent AGENT_ID --file PATH` for long byte-exact handoffs, `tasks run --agent AGENT_ID --argv-json JSON [--notify self|master|none]` for work that outlives a turn, and `reminders add/list/cancel` for durable future input.',
+    'Use `documents send --agent AGENT_ID --file PATH` for byte-exact handoffs; `tasks run --agent AGENT_ID --argv-json JSON [--notify self|master|none]` for durable commands (completion returns here by default); and `reminders add/list/cancel` for future input.',
     'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt` for usage questions.',
     'Only change project/system behavior after an explicit user request. Inspect first and make the narrowest versioned patch.',
     'Harness-native child agents follow their delegated objective, not this Master role; they do not invoke `$WEBSPIDER_CONTROL` and return a UTC completion time.',
@@ -273,7 +274,7 @@ export function summarizeProjectPolicy(policy) {
     work_product: policy?.scholarly_work_product?.enabled
       ? 'Scholarly integrity and manuscript-ready defaults are active.'
       : 'Project conventions and verified technical outputs are active.',
-    delegation: 'Give remote agents only task-relevant constraints; preserve their native harness defaults.',
+    delegation: 'Sub-Spiders receive only project-relevant constraints and retain native harness judgment.',
     behavior_control: 'The main agent can change project or system defaults only when explicitly asked.',
     account_quota: 'Observe weekly allowance read-only; resets, credits, billing, authentication, and API funding remain human-only.',
   };

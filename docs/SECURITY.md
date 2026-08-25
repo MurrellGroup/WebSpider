@@ -45,6 +45,7 @@ Directory listings may show symlink metadata, but a blocked target is not follow
 - Downloads are attachments with `nosniff` and a sandboxed content policy.
 - Raw terminal bytes are handled by xterm. The separate Maths view reads xterm's parsed text buffer, assigns it through `textContent`, preserves terminal whitespace, and invokes a locally bundled MathJax only on recognized TeX delimiters; it never interprets terminal text as HTML or Markdown.
 - Clipboard images are owner-only, capped at 8 MiB, restricted to PNG/JPEG/GIF/WebP, checked against file signatures and SHA-256 on both hub and node, and atomically written mode `0600` beneath the target workspace's symlink-confined `.webspider/uploads/` directory. SVG is intentionally rejected.
+- Browser file attachments are owner-only, capped at four staged files and 8 MiB per file, checksum-verified on both hub and node, assigned an unguessable upload prefix, and atomically written mode `0600` beneath the selected agent workspace's symlink-confined `.webspider/uploads/` directory. Filenames are basename-only and bounded; uploaded bytes are never executed by the upload path.
 - Inbound agent envelopes use hub-generated ISO UTC timestamps and elapsed durations. Display sources are flattened to one bounded line before delivery; stored user content is not rewritten.
 - Conversation and Markdown-file rendering use the same dependency-free escaping pipeline; arbitrary HTML and image embedding are not supported.
 - Terminal titles, automatic links, clipboard control, and same-origin active file rendering are not implemented.
@@ -78,7 +79,7 @@ The built-in tests cover:
 - detached process exit/log/output behavior;
 - unauthenticated API denial, CSRF enforcement, restrictive CSP;
 - a real signed outbound node connection and end-to-end root file request.
-- project-bound worker enrollment, multiple project roots on one signed node, persistent worker status reports, master notification, and independent shell tabs;
+- project-bound worker enrollment, multiple project roots on one signed node, persistent worker status reports, explicit master notification, and independent shell tabs;
 - project-policy inference, inheritance, versioning, and launch snapshots;
 - layered system/project overrides, revision-conflict rejection, main-only control tokens, route confinement, and revocation;
 - role-specific sparse worker instructions, separate `/status` and `/usage weekly` awareness, observed weekly-allowance snapshots, and timestamped inbound envelopes;

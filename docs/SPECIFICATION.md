@@ -21,6 +21,8 @@ The user experience should feel like a cross between:
 - a distributed message bus: agents on different computers can send durable messages and tasks to one another;
 - a personal "master spider": one privileged central agent can supervise all projects and sub-agents without the user manually hopping between machines.
 
+WebSpider deliberately supports two equal interaction modes. In direct project mode, the user opens a persistent Sub-Spider and works with it without routing conversation through the Master. In managed portfolio mode, the user engages the Master for unattended oversight, delegation, follow-up, cross-project coordination, exceptions, and integrated results. Routine direct Sub-Spider status must not consume Master context.
+
 The key architectural decision is that **the orchestration state must not live in the terminal or in the master LLM's context**. WebSpider itself is the source of truth. Terminals, ACP sessions, model conversations, tasks, files, and browser connections are views or execution mechanisms attached to durable WebSpider objects.
 
 The recommended v1 implementation is:
@@ -39,7 +41,7 @@ The recommended v1 implementation is:
 - optional A2A gateways for independently hosted remote agents;
 - durable messages, durable tasks, event-triggered wake-up, approvals, artifacts, audit logs, and per-agent project-root file browsing.
 
-A user should be able to open WebSpider from a laptop, phone, or another browser simultaneously, enter the master-spider portal, then click any project, task, or agent and immediately:
+A user should be able to open WebSpider from a laptop, phone, or another browser simultaneously, resume the last active agent or click any project, task, Master, or Sub-Spider and immediately:
 
 1. see what the agent is doing;
 2. watch the structured agent interaction and/or raw terminal;
@@ -74,38 +76,43 @@ WebSpider MUST provide all of the following:
    - It can spawn agents, delegate tasks, send messages, wait on work, retrieve results, and react to completion events.
    - It does not receive raw database credentials or node credentials.
 
-4. **Cross-machine agent communication**
+4. **First-class direct project agents**
+   - Every Sub-Spider is a normal user-facing project interface, not only a Master-controlled executor.
+   - Direct user messages reach the selected Sub-Spider without passing through or notifying the Master.
+   - Durable primary-agent messaging, terminal control, files, attachments, tasks, and recovery work for Sub-Spiders as well as the Master.
+
+5. **Cross-machine agent communication**
    - An agent on machine A can message or delegate a task to an agent on machine B through durable WebSpider mailboxes and tasks.
    - Messages persist while nodes are offline and are delivered after reconnect according to policy.
 
-5. **Message injection and wake-up**
+6. **Message injection and wake-up**
    - Human users, agents, triggers, and external jobs can inject messages into an agent's logical conversation.
    - Such messages can wake a hibernated/stopped agent, queue behind a busy turn, or explicitly interrupt if allowed.
    - The audit log always records the real actor even if the target model sees the message in a user-message role.
 
-6. **Deep click-through observability**
+7. **Deep click-through observability**
    - From the master portal, the user can click into every individual agent/session.
    - They can watch structured messages, tool activity, plans, task state, and terminal output in real time.
    - They can inject messages into the selected session.
 
-7. **Project-root filesystem inspection**
+8. **Project-root filesystem inspection**
    - Each agent/session exposes a browser file explorer for its authorized workspace/project roots.
    - The user can list directories, preview safe file types, inspect metadata, search within the root, and download files.
    - There MUST NOT be an API that lets the browser specify an arbitrary host absolute path.
    - Path traversal, symlink escape, magic-link escape, and related attacks must be prevented server-side.
    - Files outside authorized roots must remain inaccessible even if a malicious browser modifies requests.
 
-8. **Multi-device access**
+9. **Multi-device access**
    - Multiple browsers can watch the same agent/session simultaneously.
    - Structured chat/task state is shared immediately.
    - Multiple terminals can be attached read-only; terminal input is controlled by a lease to avoid conflicting keystrokes/resizes.
 
-9. **Simple installation**
+10. **Simple installation**
    - The hub and node roles are subcommands of one binary.
    - A first machine should be able to start WebSpider with one command.
    - Joining another machine should require only a hub URL and one-time enrollment token or an equivalent secure join flow.
 
-10. **Reasonable security behind a VPN/tailnet**
+11. **Reasonable security behind a VPN/tailnet**
     - WebSpider does not need to be engineered as hostile-internet multi-tenant SaaS in v1.
     - Nevertheless, it must authenticate users and nodes, authorize actions, restrict file roots, defend WebSockets, protect secrets, and maintain audit history.
 
@@ -426,7 +433,8 @@ The browser application is served by the hub and must work as both desktop SPA a
 
 Primary views:
 
-- Master Spider Home;
+- most recently active agent;
+- Master Spider / portfolio management;
 - Projects;
 - Agent/session detail;
 - Task graph/list;
@@ -846,9 +854,9 @@ Artifact
 
 This is a core product feature, not a diagnostics afterthought.
 
-## 8.1 Master Spider Home
+## 8.1 Active-agent home and Master access
 
-The default landing page is the master-spider thread with a live operational summary.
+With no explicit deep link, the portal resumes the most recently active agent. The Master remains a permanent one-click navigation target and owns the portfolio operational summary. This avoids forcing ordinary direct project work through the Master while preserving immediate access to managed portfolio mode.
 
 Desktop layout:
 
