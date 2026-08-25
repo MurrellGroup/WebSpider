@@ -684,7 +684,7 @@ document.addEventListener('paste', (event) => {
   if (!images.length) return;
   event.preventDefault();
   void uploadPastedTerminalImages(images);
-});
+}, true);
 
 function transmitTerminalInput(data) {
   if (!data) return;

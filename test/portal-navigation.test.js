@@ -139,6 +139,7 @@ test('Maths mode preserves the xterm transcript and typesets only equations', ()
 
 test('pasting a clipboard image uploads it to the agent workspace and sends its path', () => {
   assert.match(app, /addEventListener\('paste'/);
+  assert.match(app, /uploadPastedTerminalImages\(images\);\n\}, true\);/);
   assert.match(app, /item\.type\.startsWith\('image\/'\)/);
   assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(state\.selectedAgent\.id\)\}\/uploads/);
   assert.match(app, /data_base64: bytesToBase64\(bytes\)/);
