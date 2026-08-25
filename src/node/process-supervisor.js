@@ -3,10 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 
 const MASTER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
+const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
+const DARWIN_PTY_WRITE_CHUNK_BYTES = 512;
+const WRITE_PACING = new Int32Array(new SharedArrayBuffer(4));
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
@@ -24,6 +28,33 @@ function alive(pid) {
   } catch {
     return false;
   }
+}
+
+function hostBootIdentity() {
+  try {
+    const linux = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    if (linux) return `linux:${linux}`;
+  } catch { /* not Linux */ }
+  if (process.platform === 'darwin') {
+    const value = spawnSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8' }).stdout?.trim();
+    if (value) return `darwin:${value}`;
+  }
+  return null;
+}
+
+function processIdentity(pid) {
+  if (!pid) return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const closing = stat.lastIndexOf(')');
+    const fields = stat.slice(closing + 2).trim().split(/\s+/);
+    if (fields[19]) return `linux-start:${fields[19]}`;
+  } catch { /* not Linux or process exited */ }
+  if (process.platform === 'darwin') {
+    const value = spawnSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' }).stdout?.trim();
+    if (value) return `darwin-start:${value}`;
+  }
+  return null;
 }
 
 function inheritedUserEnvironment(environment = process.env) {
@@ -49,6 +80,11 @@ function stopGroup(pid, signal = 'SIGTERM') {
   try { process.kill(-pid, signal); } catch {
     try { process.kill(pid, signal); } catch { /* already exited */ }
   }
+}
+
+function stopRecordedGroup(pid, identity, signal = 'SIGTERM') {
+  if (!pid || !identity || processIdentity(pid) !== identity) return;
+  stopGroup(pid, signal);
 }
 
 export function sanitizeInput(bytes, maxBytes = 64 * 1024) {
@@ -110,9 +146,9 @@ function usableCodexInstruction(home) {
   return '';
 }
 
-function materializeCodexHome(contextDirectory, renderedInstructions, environment) {
+function materializeCodexHome(contextDirectory, renderedInstructions, environment, { sessionSource = 'managed' } = {}) {
   const inheritedHome = path.resolve(environment.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
-  const managedHome = path.join(contextDirectory, 'codex-home');
+  const managedHome = path.join(contextDirectory, sessionSource === 'user' ? 'codex-home-user-session' : 'codex-home');
   fs.mkdirSync(managedHome, { recursive: true, mode: 0o700 });
   if (fs.existsSync(inheritedHome) && inheritedHome !== managedHome) {
     for (const entry of fs.readdirSync(inheritedHome, { withFileTypes: true })) {
@@ -124,6 +160,13 @@ function materializeCodexHome(contextDirectory, renderedInstructions, environmen
       } catch { /* optional state remains available through the inherited process environment */ }
     }
   }
+  if (sessionSource === 'user') {
+    const inheritedSessions = path.join(inheritedHome, 'sessions');
+    invariant(fs.statSync(inheritedSessions, { throwIfNoEntry: false })?.isDirectory(),
+      'WS_CODEX_SESSION_NOT_FOUND', 'No user Codex sessions are available on this workstation.', 404);
+    const sessions = path.join(managedHome, 'sessions');
+    if (!fs.existsSync(sessions)) fs.symlinkSync(inheritedSessions, sessions, 'dir');
+  }
   const inheritedInstructions = usableCodexInstruction(inheritedHome);
   const combined = [
     inheritedInstructions ? '# Inherited Codex user guidance\n\n' + inheritedInstructions : '',
@@ -131,6 +174,33 @@ function materializeCodexHome(contextDirectory, renderedInstructions, environmen
   ].filter(Boolean).join('\n\n---\n\n');
   fs.writeFileSync(path.join(managedHome, 'AGENTS.md'), combined, { mode: 0o600 });
   return managedHome;
+}
+
+function codexExecutable(argv) {
+  return Array.isArray(argv) && path.basename(String(argv[0] || '')).toLowerCase().includes('codex');
+}
+
+function hasCodexSession(home) {
+  const root = path.join(home, 'sessions');
+  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) return false;
+  const pending = [root];
+  let inspected = 0;
+  while (pending.length && inspected < 10_000) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      inspected += 1;
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) return true;
+      if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+    }
+  }
+  return false;
+}
+
+export function codexResumeArgv(argv, rootPath, session) {
+  invariant(codexExecutable(argv), 'WS_ADAPTER_UNAVAILABLE', 'This agent profile does not launch Codex.', 409);
+  invariant(session && ['last', 'id'].includes(session.selector), 'WS_VALIDATION', 'A Codex resume selector is required.');
+  const selector = session.selector === 'last' ? ['--last'] : [session.session_id];
+  return [argv[0], 'resume', '-C', rootPath, ...argv.slice(1), ...selector];
 }
 
 const CONTROL_SCRIPT = `#!/usr/bin/env node
@@ -406,7 +476,7 @@ function materializeControl(directory, control) {
 }
 
 function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
-  argv = [], environment = {}, agentControl = null, recoveryContext = null,
+  argv = [], environment = {}, agentControl = null, recoveryContext = null, codexSession = null,
 } = {}) {
   if (!agentInstanceId || !snapshot?.rendered_instructions) return {};
   const directory = path.join(stateDir, 'agent-context', agentInstanceId);
@@ -437,7 +507,9 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
     fs.writeFileSync(recoveryPath, recoveryContext, { mode: 0o600 });
     output.WEBSPIDER_RECOVERY_CONTEXT = recoveryPath;
   }
-  output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment);
+  output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment, {
+    sessionSource: codexSession?.source || 'managed',
+  });
   return output;
 }
 
@@ -448,6 +520,7 @@ export class ProcessSupervisor extends EventEmitter {
     this.database = database;
     this.rootService = rootService;
     this.pollMs = pollMs;
+    this.hostBootId = hostBootIdentity();
     this.timer = null;
     this.polling = false;
     fs.mkdirSync(path.join(stateDir, 'processes'), { recursive: true, mode: 0o700 });
@@ -469,12 +542,23 @@ export class ProcessSupervisor extends EventEmitter {
     for (const runtime of this.database.listProcesses()) {
       if (fs.existsSync(runtime.exitFile)) {
         this.database.finishProcess(runtime.id, 'exited', runtime.completionReported);
-        stopGroup(runtime.keeperPid);
-      } else if (alive(runtime.pid)) {
+        stopRecordedGroup(runtime.keeperPid, runtime.keeperProcessIdentity);
+      } else if (runtime.hostBootId && this.hostBootId && runtime.hostBootId !== this.hostBootId) {
+        this.database.finishProcess(runtime.id, 'lost', runtime.completionReported);
+      } else if (alive(runtime.pid)
+        && (!runtime.processIdentity || runtime.processIdentity === processIdentity(runtime.pid))) {
+        if (!runtime.hostBootId || !runtime.processIdentity) {
+          this.database.upsertProcess({
+            ...runtime,
+            hostBootId: this.hostBootId,
+            processIdentity: processIdentity(runtime.pid),
+            keeperProcessIdentity: processIdentity(runtime.keeperPid),
+          });
+        }
         this.database.finishProcess(runtime.id, 'running', runtime.completionReported);
       } else {
         this.database.finishProcess(runtime.id, 'lost', runtime.completionReported);
-        stopGroup(runtime.keeperPid);
+        stopRecordedGroup(runtime.keeperPid, runtime.keeperProcessIdentity);
       }
     }
   }
@@ -482,7 +566,7 @@ export class ProcessSupervisor extends EventEmitter {
   launch({
     id = makeId('run'), kind = 'agent', agentInstanceId = null, taskId = null,
     terminalId = null, rootId, argv, environment = {}, policySnapshot = null,
-    agentControl = null, columns = 120, rows = 36,
+    agentControl = null, codexSession = null, columns = 120, rows = 36,
   }) {
     invariant(rootId, 'WS_VALIDATION', 'A workspace root is required.');
     const root = this.rootService.getRoot(rootId);
@@ -534,17 +618,24 @@ export class ProcessSupervisor extends EventEmitter {
         return { WEBSPIDER_USER_GUIDE: path.join(root.canonical, guide.relative_path) };
       })()
       : {};
+    const automaticCodexRecovery = !codexSession && previousRuntime?.state === 'lost' && codexExecutable(argv)
+      ? { source: 'managed', selector: 'last', automatic: true }
+      : null;
+    const requestedCodexSession = codexSession || automaticCodexRecovery;
     const policyEnvironment = kind === 'agent'
       ? materializePolicyContext(this.stateDir, agentInstanceId, policySnapshot, {
-        argv, environment, agentControl, recoveryContext,
+        argv, environment, agentControl, recoveryContext, codexSession: requestedCodexSession,
       })
       : {};
-    const wrappedCommand = commandString(argv);
+    const resumeCodex = requestedCodexSession && codexExecutable(argv)
+      && (!requestedCodexSession.automatic || hasCodexSession(policyEnvironment.CODEX_HOME));
+    const launchArgv = resumeCodex ? codexResumeArgv(argv, root.canonical, requestedCodexSession) : argv;
+    const wrappedCommand = commandString(launchArgv);
     const scriptCommand = process.platform === 'darwin'
-      ? 'script -q /dev/null /bin/sh -c "$1"'
+      ? 'expect -f "$4" "$1"'
       : 'script -qefc "$1" /dev/null';
     const wrapper = `${scriptCommand}; code=$?; /bin/kill -TERM -- "-$3" 2>/dev/null || /bin/kill -TERM "$3" 2>/dev/null || true; printf "%s" "$code" > "$2"; exit "$code"`;
-    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid)], {
+    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid), EXPECT_BRIDGE], {
       cwd: root.canonical,
       detached: true,
       stdio: [inputFd, outputFd, outputFd],
@@ -573,10 +664,13 @@ export class ProcessSupervisor extends EventEmitter {
       taskId,
       terminalId,
       rootId,
-      argv,
+      argv: launchArgv,
       pid: child.pid,
       pgid: child.pid,
       keeperPid: keeper.pid,
+      hostBootId: this.hostBootId,
+      processIdentity: processIdentity(child.pid),
+      keeperProcessIdentity: processIdentity(keeper.pid),
       inputFifo,
       outputLog,
       exitFile,
@@ -596,7 +690,14 @@ export class ProcessSupervisor extends EventEmitter {
     const fd = fs.openSync(runtime.inputFifo, fs.constants.O_WRONLY);
     try {
       let written = 0;
-      while (written < safe.length) written += fs.writeSync(fd, safe, written, safe.length - written);
+      while (written < safe.length) {
+        const remaining = safe.length - written;
+        const length = process.platform === 'darwin' ? Math.min(DARWIN_PTY_WRITE_CHUNK_BYTES, remaining) : remaining;
+        written += fs.writeSync(fd, safe, written, length);
+        // macOS Expect's `interact` relay has no producer backpressure and can discard a
+        // large FIFO burst. Bounded pacing keeps every chunk below the PTY input queue.
+        if (process.platform === 'darwin' && written < safe.length) Atomics.wait(WRITE_PACING, 0, 0, 1);
+      }
       invariant(written === safe.length, 'WS_TERMINAL_INPUT_UNCERTAIN', 'The terminal accepted only part of the input.', 502);
     } finally {
       fs.closeSync(fd);
@@ -641,8 +742,8 @@ export class ProcessSupervisor extends EventEmitter {
   stopProcess(id, signal = 'SIGTERM') {
     const runtime = this.database.getProcess(id);
     invariant(runtime, 'WS_NOT_FOUND', 'Managed process not found.', 404);
-    stopGroup(runtime.pgid, signal);
-    stopGroup(runtime.keeperPid, signal);
+    stopRecordedGroup(runtime.pgid, runtime.processIdentity, signal);
+    stopRecordedGroup(runtime.keeperPid, runtime.keeperProcessIdentity, signal);
     this.database.finishProcess(id, 'stopping', runtime.completionReported);
     return { state: 'stopping' };
   }

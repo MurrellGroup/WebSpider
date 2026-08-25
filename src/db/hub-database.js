@@ -138,6 +138,8 @@ function agentRow(row) {
     status_updated_at: row.status_updated_at,
     custom_instructions: row.custom_instructions || '',
     instruction_revision: Number(row.instruction_revision || 1),
+    codex_session: decode(row.codex_session_json),
+    codex_capable: path.basename(String(row.profile_executable || '')).toLowerCase().includes('codex'),
   };
 }
 
@@ -343,7 +345,8 @@ export class HubDatabase extends EventEmitter {
         status_summary TEXT NOT NULL DEFAULT '',
         status_updated_at TEXT,
         custom_instructions TEXT NOT NULL DEFAULT '',
-        instruction_revision INTEGER NOT NULL DEFAULT 1
+        instruction_revision INTEGER NOT NULL DEFAULT 1,
+        codex_session_json TEXT
       );
 
       CREATE TABLE IF NOT EXISTS agent_control_tokens (
@@ -633,6 +636,7 @@ export class HubDatabase extends EventEmitter {
     if (!agentColumns.has('status_updated_at')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN status_updated_at TEXT');
     if (!agentColumns.has('custom_instructions')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN custom_instructions TEXT NOT NULL DEFAULT ''");
     if (!agentColumns.has('instruction_revision')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN instruction_revision INTEGER NOT NULL DEFAULT 1');
+    if (!agentColumns.has('codex_session_json')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN codex_session_json TEXT');
     const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
     if (!joinColumns.has('metadata_json')) this.db.exec("ALTER TABLE join_tokens ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
     const rootColumns = new Set(this.db.prepare('PRAGMA table_info(workspace_roots)').all().map((column) => column.name));
@@ -1296,7 +1300,8 @@ export class HubDatabase extends EventEmitter {
   }
 
   getAgent(id) {
-    const row = this.db.prepare(`SELECT a.*, p.name AS profile_name, pr.name AS project_name, pr.archived_at AS project_archived_at,
+    const row = this.db.prepare(`SELECT a.*, p.name AS profile_name, p.executable AS profile_executable,
+      pr.name AS project_name, pr.archived_at AS project_archived_at,
       n.display_name AS node_name, t.title AS title FROM agent_instances a
       JOIN agent_profiles p ON p.id = a.profile_id
       JOIN projects pr ON pr.id = a.project_id
@@ -1324,6 +1329,30 @@ export class HubDatabase extends EventEmitter {
     invariant(this.getAgent(id), 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     this.db.prepare('UPDATE agent_instances SET orchestration_role = ? WHERE id = ?').run(role, id);
     if (role !== 'main') this.revokeAgentControlTokens(id);
+    return this.getAgent(id);
+  }
+
+  setAgentCodexSession(id, session, actor = 'owner:local') {
+    const agent = this.getAgent(id);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(agent.codex_capable, 'WS_ADAPTER_UNAVAILABLE', 'This agent profile does not launch Codex.', 409);
+    let normalized = null;
+    if (session) {
+      invariant(session.source === 'user', 'WS_VALIDATION', 'Only user-owned Codex sessions can be adopted explicitly.');
+      invariant(['last', 'id'].includes(session.selector), 'WS_VALIDATION', 'Choose the latest project session or provide a session ID.');
+      let sessionId = null;
+      if (session.selector === 'id') {
+        sessionId = String(session.session_id || '').trim();
+        invariant(sessionId.length > 0 && sessionId.length <= 200 && !/[\x00-\x1f\x7f]/u.test(sessionId),
+          'WS_VALIDATION', 'Codex session ID or name must contain 1-200 printable characters.');
+      }
+      normalized = { source: 'user', selector: session.selector, session_id: sessionId };
+    }
+    this.db.prepare('UPDATE agent_instances SET codex_session_json = ? WHERE id = ?')
+      .run(normalized ? encode(normalized) : null, id);
+    this.appendEvent('agent', id, 'agent.codex_session.configured.v1', actor, id, {
+      configured: Boolean(normalized), selector: normalized?.selector || null,
+    });
     return this.getAgent(id);
   }
 

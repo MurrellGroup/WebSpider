@@ -17,6 +17,9 @@ function fixture() {
   fs.writeFileSync(path.join(root, 'results', 'summary.txt'), 'summary needle\n');
   fs.writeFileSync(path.join(root, '.hidden'), 'hidden');
   fs.writeFileSync(path.join(root, 'unsafe.html'), '<script>alert(1)</script>');
+  fs.writeFileSync(path.join(root, 'figure.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+  fs.writeFileSync(path.join(root, 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><circle r="4"/></svg>');
+  fs.writeFileSync(path.join(root, 'paper.pdf'), Buffer.from('%PDF-1.4\n%%EOF\n'));
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'TOP SECRET');
   fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'external-link'));
   fs.symlinkSync(path.join(root, 'README.md'), path.join(root, 'internal-link'));
@@ -72,6 +75,21 @@ test('active content is never returned through the preview API', async (t) => {
   await assert.rejects(() => value.service.preview('awr_test', 'unsafe.html'), (error) => error.code === 'WS_PREVIEW_UNSAFE');
   const download = await value.service.readFile('awr_test', 'unsafe.html');
   assert.match(download.bytes.toString('utf8'), /script/);
+});
+
+test('media previews are root-confined and allow images, SVG, and PDF without treating SVG as text', async (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  assert.deepEqual((await value.service.previewMedia('awr_test', 'figure.png')).bytes, Buffer.from('89504e470d0a1a0a', 'hex'));
+  assert.match((await value.service.previewMedia('awr_test', 'diagram.svg')).bytes.toString('utf8'), /<svg/);
+  assert.match((await value.service.previewMedia('awr_test', 'paper.pdf')).bytes.toString('utf8'), /^%PDF/);
+  await assert.rejects(() => value.service.preview('awr_test', 'diagram.svg'), (error) => error.code === 'WS_PREVIEW_UNSAFE');
+  await assert.rejects(() => value.service.previewMedia('awr_test', 'README.md'), (error) => error.code === 'WS_PREVIEW_UNSUPPORTED');
+  await assert.rejects(() => value.service.previewMedia('awr_test', '../outside/secret.txt'),
+    (error) => ['WS_PREVIEW_UNSUPPORTED', 'WS_PATH_ESCAPE_BLOCKED'].includes(error.code));
 });
 
 test('contained-only policy may follow an internal symlink but never an external one', async (t) => {

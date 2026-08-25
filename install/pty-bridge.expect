@@ -1,6 +1,7 @@
 #!/usr/bin/expect -f
 
 set timeout -1
+match_max 131072
 if {$argc != 1} {
   puts stderr "WebSpider PTY bridge requires one shell command."
   exit 2

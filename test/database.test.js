@@ -259,6 +259,26 @@ test('project policy is defaulted, versioned, and snapshotted for agent launches
   assert.equal(snapshot.content_hash.length, 64);
 });
 
+test('an agent can persist an explicit user Codex resume selector only for Codex profiles', (t) => {
+  const { database, agent } = databaseFixture(t);
+  assert.equal(agent.codex_capable, false);
+  assert.throws(() => database.setAgentCodexSession(agent.id, { source: 'user', selector: 'last' }),
+    (error) => error.code === 'WS_ADAPTER_UNAVAILABLE');
+  database.createProfile({ id: 'apf_codex', name: 'Codex', adapterKind: 'pty', executable: '/usr/local/bin/codex' });
+  const codex = database.createAgent({
+    id: 'agt_codex', profileId: 'apf_codex', projectId: 'prj_test', nodeId: 'nod_test',
+    root: { id: 'awr_codex', logical_name: 'workspace' },
+  });
+  assert.equal(codex.codex_capable, true);
+  const configured = database.setAgentCodexSession(codex.id, {
+    source: 'user', selector: 'id', session_id: '01a00000-0000-0000-0000-000000000002',
+  });
+  assert.deepEqual(configured.codex_session, {
+    source: 'user', selector: 'id', session_id: '01a00000-0000-0000-0000-000000000002',
+  });
+  assert.equal(database.setAgentCodexSession(codex.id, null).codex_session, null);
+});
+
 test('system defaults remain layered beneath project overrides with optimistic revisions', (t) => {
   const { database } = databaseFixture(t);
   const system = database.getSystemPolicy();

@@ -282,7 +282,7 @@ async function joinNode(options) {
   logJSON({ enrolled: true, node_id: enrollment.node_id, state_dir: nodeStateDir, roots });
 }
 
-async function attachNodeRoot(options) {
+export async function attachNodeRoot(options) {
   if (!options.token) throw new Error('node attach requires --token');
   const nodeStateDir = path.resolve(options['state-dir'] || path.join(defaultStateDir(), 'node'));
   const identity = loadOrCreateIdentity(nodeStateDir);
@@ -308,7 +308,20 @@ async function attachNodeRoot(options) {
       root: { id: root.id, name: root.display_name },
     }),
   });
-  if (!response.ok) throw new Error(`Project attachment failed: ${await response.text()}`);
+  if (!response.ok) {
+    const failure = await response.text();
+    let code = null;
+    try { code = JSON.parse(failure)?.error?.code; } catch { /* retain the server response below */ }
+    if (response.status === 401 && code === 'WS_NODE_UNKNOWN') {
+      return joinNode({
+        ...options,
+        hub,
+        workspace,
+        name: options.name || config.displayName || os.hostname(),
+      });
+    }
+    throw new Error(`Project attachment failed: ${failure}`);
+  }
   const result = await response.json();
   const retainedRoots = existingNodeRoots(config.roots || []);
   writeNodeConfig(nodeStateDir, {
@@ -444,7 +457,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.6.2\n\n`);
+  process.stdout.write(`WebSpider 0.6.3\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);

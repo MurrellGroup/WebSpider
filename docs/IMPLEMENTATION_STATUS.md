@@ -11,13 +11,14 @@ The current repository is an executable secure vertical slice, not a claim that 
 | Hub and node roles | Complete | One CLI entry point; nodes connect outbound. |
 | Node enrollment | Complete | Hashed one-time token, expiry, Ed25519 identity, replay window, epoch fencing. |
 | Project and agent roots | Complete | Hub stores logical root metadata; node alone maps root IDs to host paths. |
-| Detached terminal process | Complete with substitute | Native PTY bridge (`script` on Linux, `expect` on macOS) + FIFO + detached process group replaces tmux in this runtime. State/log/exit markers reconcile after daemon restart. |
-| Machine-reboot agent recovery | Complete for PTY fallback reconstruction | Reconnected nodes send runtime inventory. Missing previously-running main or worker agents restart under their profile policy, receive the tail of the prior terminal log through `WEBSPIDER_RECOVERY_CONTEXT`, and receive one durable recovery message. Native third-party in-flight turns are reconstructed, not magically resumed. |
+| Detached terminal process | Complete with substitute | Native PTY bridge + FIFO + detached process group replaces tmux in this runtime. State/log/exit markers reconcile after daemon restart; host boot IDs and process-start identities fence PID reuse. |
+| Machine-reboot agent recovery | Complete for Codex session resume + PTY reconstruction | Reconnected nodes send runtime inventory. Missing previously-running Codex agents resume the latest session in their per-agent managed Codex home and registered root; every replacement also receives the bounded terminal tail and one durable recovery message. An interrupted turn can still require reconciliation. |
+| Existing Codex session adoption | Complete | The owner can select the latest cwd-scoped user session or provide a UUID/name. Node-side launch adds `codex resume -C <registered-root>` and an isolated instruction home references the workstation user's session store; no arbitrary host path crosses the Hub API. |
 | Multi-view terminal | Complete | Bundled xterm.js ANSI/VT rendering, direct browser keyboard input, Codex/Kitty enhanced-key translation, browser-to-PTY resize propagation, live/snapshot watch path, and one controller lease with stale-epoch rejection. |
 | Screen-like terminal tabs | Complete | Every agent has one addressable primary Codex terminal plus independently named login-shell tabs for monitoring and ad hoc commands. Auxiliary shells never receive orchestration messages. |
 | SQLite persistence | Complete | WAL, foreign keys, synchronous FULL, busy timeout, hub and node schemas. |
 | Durable event replay | Complete | Global and scope sequences; replay-then-live WebSocket. |
-| Root-safe files | Complete for implemented platform | List, stat, text preview, download, search, Git status; no absolute-path API. See security notes. |
+| Root-safe files | Complete for implemented platform | List, stat, text preview, isolated inline PNG/JPEG/GIF/WebP/SVG/PDF preview, download, search, Git status; no absolute-path API. See security notes. |
 | Tailscale | Deployment integration | Loopback default and documented Tailscale Serve setup; embedded `tsnet` is not included. |
 
 ## Phase B — structured agents and messaging

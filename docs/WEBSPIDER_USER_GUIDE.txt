@@ -162,13 +162,16 @@ Hub service restarted or temporarily offline
     Running node PTYs continue. Nodes reconnect, replay durable events, and queued messages/tasks resume.
 
 Node daemon restarted
-    Existing detached PTYs normally survive. The node reconciles process IDs, FIFOs, output offsets, and exit markers, then reports its runtime inventory to the Hub.
+    Existing detached PTYs normally survive. The node reconciles the host boot ID, process start identity, process ID, FIFO, output offset, and exit marker before reporting its runtime inventory. A reused PID is never accepted as the old agent.
 
 Whole node machine rebooted
-    PTY processes do not survive. WebSpider detects the missing runtime and, when restart policy permits, launches a replacement agent. It supplies up to the last 200,000 bytes of the prior terminal log through $WEBSPIDER_RECOVERY_CONTEXT and injects a durable recovery message.
+    PTY processes do not survive. WebSpider detects the missing runtime and, when restart policy permits, launches a replacement agent. For Codex profiles, it first resumes the latest session from that WebSpider agent's dedicated Codex home, pinned to the registered project root. It also supplies up to the last 200,000 bytes of the prior terminal log through $WEBSPIDER_RECOVERY_CONTEXT and injects a durable recovery message.
 
 Important limitation
-    Machine-reboot recovery reconstructs work; it does not guarantee continuation of the exact in-flight Codex turn. Managed Codex session files and terminal logs are node-local. WebSpider currently launches a replacement Codex rather than automatically selecting an old Codex session.
+    A session resume restores the Codex conversation, but an in-flight turn interrupted between checkpoints may still need reconciliation from the terminal tail and durable WebSpider thread. Managed Codex session files and terminal logs are node-local; they survive a reboot only when the machine's WebSpider state directory survives.
+
+Adopting a pre-existing Codex session
+    Open the agent's Agent actions menu and choose Adopt Codex session. Select the latest session for that project or enter its UUID/name. WebSpider uses that workstation user's normal Codex session store while keeping WebSpider's compact instructions in an isolated Codex home. It always supplies the registered project directory to `codex resume -C`; the browser never accepts an arbitrary host path. The chosen external session remains associated with that agent until detached from the same dialog.
 
 Disk loss or corrupted state
     Not covered by restart recovery. Hub state, every node's WebSpider state, and project workspaces require independent backups on other storage. The current package does not yet provide a built-in webspider backup/restore command.
@@ -199,6 +202,9 @@ For code or results:
 
 Before rebooting a node intentionally:
     Ask the worker to save/commit, report status, and stop at a clean boundary. A daemon/service restart is much less disruptive than a machine reboot.
+
+After an unexpected reboot:
+    Wait for the node to reconnect. The agent should return in the same Codex conversation and receive one WebSpider recovery message. Check its Conversation and Activity tabs before sending duplicate work.
 
 10. Service and connectivity checks
 -----------------------------------

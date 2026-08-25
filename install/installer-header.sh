@@ -126,6 +126,7 @@ if [ -n "$node_hub" ]; then
   if [ -n "$join_token" ]; then
     if [ -s "$node_state_dir/config.json" ] && [ -s "$node_state_dir/identity.json" ]; then
       set -- node attach --hub "$node_hub" --token "$join_token" --workspace "$workspace" --state-dir "$node_state_dir"
+      if [ -n "$node_name" ]; then set -- "$@" --name "$node_name"; fi
     else
       set -- node join --hub "$node_hub" --token "$join_token" --workspace "$workspace" --state-dir "$node_state_dir"
       if [ -n "$node_name" ]; then set -- "$@" --name "$node_name"; fi

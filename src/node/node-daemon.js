@@ -289,6 +289,10 @@ export class NodeDaemon extends EventEmitter {
         return this.rootService.stat(payload.root_id, payload.path || '');
       case 'files.preview':
         return this.rootService.preview(payload.root_id, payload.path);
+      case 'files.preview-media': {
+        const file = await this.rootService.previewMedia(payload.root_id, payload.path, { maxBytes: payload.max_bytes });
+        return { ...file, bytes: undefined, data: file.bytes.toString('base64') };
+      }
       case 'files.download': {
         const file = await this.rootService.readFile(payload.root_id, payload.path, { maxBytes: payload.max_bytes });
         return { ...file, bytes: undefined, data: file.bytes.toString('base64') };
@@ -316,6 +320,7 @@ export class NodeDaemon extends EventEmitter {
           environment: payload.environment,
           policySnapshot: payload.policy_snapshot,
           agentControl: payload.agent_control,
+          codexSession: payload.codex_session,
         });
         return { runtime };
       }

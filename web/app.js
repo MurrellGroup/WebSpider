@@ -4,7 +4,7 @@ import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.2';
+const PORTAL_VERSION = '0.6.3';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -196,6 +196,16 @@ function showProjectConnection(projectId) {
 
 function showTerminalForm() {
   openModal(`<form id="add-terminal-form"><div class="modal-header"><div><h2>New terminal</h2><p>${h(state.selectedAgent?.node_name || '')}</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid"><label>Tab name<input name="label" required maxlength="80" value="Monitor"></label><div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Open terminal</button></div></div></form>`);
+}
+
+function showCodexSessionForm() {
+  const agent = state.selectedAgent;
+  openModal(`<form id="codex-session-form"><div class="modal-header"><div><h2>Adopt an existing Codex session</h2><p>${h(agent.node_name)} · always resumes inside this agent's registered project directory.</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid">
+    <label class="checkbox-row"><input type="checkbox" name="use_last" checked> Use the latest Codex session for this project</label>
+    <label>Session UUID or name<input name="session_id" maxlength="200" placeholder="Optional when latest is selected"></label>
+    <p class="muted">The session must already exist for the same user on this workstation. Adopting it restarts this agent; project instructions and workspace confinement still apply.</p>
+    <div class="modal-actions">${agent.codex_session ? '<button type="button" class="secondary" data-action="detach-codex-session">Stop adopting external session</button>' : ''}<button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Adopt & restart</button></div>
+  </div></form>`);
 }
 
 function showLogin() {
@@ -492,11 +502,13 @@ async function renderAgent(agentId, tab = 'terminal') {
   renderSidebar();
   const agent = state.selectedAgent;
   const resumable = ['stopped', 'failed', 'hibernated'].includes(agent.state);
+  const codexAction = agent.codex_capable ? '<button data-action="adopt-codex-session">Adopt Codex session…</button>' : '';
+  const actionMenu = `<details class="action-menu"><summary>Agent actions</summary><div>${codexAction}${resumable ? '' : '<button class="danger" data-action="stop-agent">Stop agent</button>'}</div></details>`;
   $('#main-view').innerHTML = `<div class="page">
     ${pageHeader(agent.title || agent.profile_name, `${agent.project_name} · ${agent.node_name} · ${agent.work_status}${agent.status_summary ? ` · ${agent.status_summary}` : ''}`, `
       <span class="status-pill ${h(agent.state)}">${h(agent.state)}</span>
       ${agent.orchestration_role === 'main' ? '<button class="mobile-primary" data-action="overview">Portfolio</button>' : ''}
-      ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : `<details class="action-menu"><summary>Agent actions</summary><div><button class="danger" data-action="stop-agent">Stop agent</button></div></details>`}`)}
+      ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : ''}${codexAction || !resumable ? actionMenu : ''}`)}
     <nav class="tabs">${agentTabs()}</nav>
     <div id="agent-content" class="page-content ${tab === 'terminal' ? 'terminal-page-content' : ''}"><div class="loading">Loading ${h(tab)}…</div></div>
   </div>`;
@@ -962,7 +974,7 @@ async function renderFiles(agent) {
     $('#agent-content').innerHTML = '<div class="empty"><div><strong>No exposed root</strong><p>This agent has no project root available to the portal.</p></div></div>';
     return;
   }
-  $('#agent-content').innerHTML = `<div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a safe text file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  $('#agent-content').innerHTML = `<div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, or PDF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
   await loadDirectory();
 }
 
@@ -981,10 +993,35 @@ async function previewFile(name) {
   const relative = state.filePath ? `${state.filePath}/${name}` : name;
   state.previewPath = relative;
   const markdown = /\.(?:md|markdown|qmd|rmd)$/i.test(relative);
+  const image = /\.(?:png|jpe?g|gif|webp|svg)$/i.test(relative);
+  const pdf = /\.pdf$/i.test(relative);
   state.previewMode = markdown ? 'rendered' : 'source';
   $('#preview-header').innerHTML = `<strong>${h(relative)}</strong><div class="preview-actions">${markdown ? '<div class="preview-mode-switch"><button data-preview-mode="rendered" class="selected">Readable</button><button data-preview-mode="source">Source</button></div>' : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
+  if (image || pdf) {
+    const source = `/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/media-preview?path=${encodeURIComponent(relative)}`;
+    content.className = 'preview-content media-preview';
+    content.replaceChildren();
+    if (image) {
+      const element = document.createElement('img');
+      element.className = 'image-preview';
+      element.alt = `Preview of ${relative}`;
+      element.src = source;
+      content.append(element);
+    } else {
+      const element = document.createElement('iframe');
+      element.className = 'document-preview';
+      element.title = `Preview of ${relative}`;
+      element.src = source;
+      content.append(element);
+      const fallback = document.createElement('p');
+      fallback.className = 'muted media-preview-fallback';
+      fallback.textContent = 'If your browser cannot display this PDF, use Download.';
+      content.append(fallback);
+    }
+    return;
+  }
   try {
     const preview = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/preview?path=${encodeURIComponent(relative)}`);
     content.dataset.source = preview.content;
@@ -1067,6 +1104,9 @@ async function renderMetadata(agent) {
     'Logical thread': agent.active_thread_id,
     'Terminal': agent.terminal_id,
     'Resumability': agent.resumability,
+    ...(agent.codex_capable ? { 'Codex session': agent.codex_session
+      ? `External ${agent.codex_session.selector === 'last' ? 'latest-in-project' : agent.codex_session.session_id}`
+      : 'WebSpider-managed; crash recovery resumes the latest local session when available' } : {}),
     'Portal filesystem scope': 'workspace-only',
     'Agent execution scope': 'host user',
     'Instruction snapshot': policy.effective ? `${policy.effective.id} · system r${policy.effective.system_policy_revision} · project r${policy.effective.policy_revision}` : 'Applied when the agent next starts',
@@ -1243,6 +1283,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'onboard-project') return showProjectOnboarding();
     if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
     if (action === 'add-terminal') return showTerminalForm();
+    if (action === 'adopt-codex-session') return showCodexSessionForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {
       const copied = await copyControlValue($('#worker-command'));
@@ -1254,6 +1295,13 @@ document.addEventListener('click', async (event) => {
       if (state.selectedTerminalId === terminalId) state.selectedTerminalId = state.selectedAgent.terminal_id;
       toast('Terminal tab closed.');
       return renderTerminal(state.selectedAgent);
+    }
+    if (action === 'detach-codex-session') {
+      await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/codex-session`, { method: 'DELETE' });
+      closeModal();
+      await loadData();
+      toast('External Codex session detached; future crash recovery uses WebSpider-managed sessions.');
+      return renderAgent(state.selectedAgent.id, state.tab);
     }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
     if (action === 'show-nodes') { closeMobileSidebar(); return renderNodes(); }
@@ -1433,6 +1481,27 @@ document.addEventListener('submit', async (event) => {
       state.selectedTerminalId = terminal.id;
       return renderTerminal(state.selectedAgent);
     } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
+  if (event.target.id === 'codex-session-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const useLast = Boolean(form.get('use_last'));
+    const sessionId = String(form.get('session_id') || '').trim();
+    if (!useLast && !sessionId) return toast('Enter a Codex session UUID/name or select latest.', true);
+    const button = event.target.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const agentId = state.selectedAgent.id;
+      await api(`/api/v1/agent-instances/${encodeURIComponent(agentId)}:resume-codex`, {
+        method: 'POST', body: { use_last: useLast, session_id: sessionId || null },
+      });
+      closeModal();
+      await loadData();
+      toast('Codex session adopted in the registered project directory.');
+      return renderAgent(agentId, 'terminal');
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
     return;
   }
   if (event.target.id === 'agent-instructions-form') {

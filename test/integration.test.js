@@ -4,9 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
+
+const execFileAsync = promisify(execFile);
 
 function onceWithTimeout(emitter, event, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
@@ -32,6 +36,43 @@ async function jsonFetch(url, ownerToken, options = {}) {
   const body = await response.json();
   return { response, body };
 }
+
+test('an installer attachment re-enrolls a node identity forgotten by a rebuilt hub', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-stale-node-'));
+  const workspace = path.join(directory, 'workspace');
+  const nodeState = path.join(directory, 'node');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(nodeState);
+  const staleIdentity = { nodeId: 'nod_from_previous_hub', ...generateNodeIdentity() };
+  fs.writeFileSync(path.join(nodeState, 'identity.json'), JSON.stringify(staleIdentity), { mode: 0o600 });
+  fs.writeFileSync(path.join(nodeState, 'config.json'), JSON.stringify({
+    hubURL: 'http://127.0.0.1:1', displayName: 'Recovered workstation', roots: [],
+  }), { mode: 0o600 });
+
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const project = hub.database.createProject({ name: 'Recovered project' });
+  const token = 'wsj_recover_stale_identity';
+  hub.database.createJoinToken('Recovered workstation', token, 60_000, { project_id: project.id });
+  const listening = await hub.listen();
+  t.after(async () => {
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const result = await execFileAsync(process.execPath, [
+    path.resolve('bin/webspider.js'), 'node', 'attach',
+    '--hub', listening.url, '--token', token, '--workspace', workspace,
+    '--state-dir', nodeState, '--name', 'Recovered workstation',
+  ]);
+  assert.match(result.stdout, /"enrolled": true/);
+  const identity = JSON.parse(fs.readFileSync(path.join(nodeState, 'identity.json'), 'utf8'));
+  const config = JSON.parse(fs.readFileSync(path.join(nodeState, 'config.json'), 'utf8'));
+  assert.notEqual(identity.nodeId, staleIdentity.nodeId);
+  assert.equal(hub.database.getNode(identity.nodeId, true).display_name, 'Recovered workstation');
+  assert.equal(config.hubURL, listening.url);
+  assert.equal(config.roots[0].path, workspace);
+  assert.equal(hub.database.listAgents(project.id).length, 1);
+});
 
 test('inbound agent messages include source, UTC time, elapsed context, and observed weekly allowance', () => {
   const formatted = formatInboundMessage({
@@ -276,6 +317,59 @@ test('a missing previously-running agent is restarted and receives a durable rec
   assert(hub.database.listEvents(0).some((event) => event.payload?.reason === 'runtime_missing_after_node_reconnect'));
 });
 
+test('the owner can adopt a remote Codex session and WebSpider pins it to the registered workspace', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-adopt-session-api-'));
+  const workspace = path.join(directory, 'workspace');
+  const userCodexHome = path.join(directory, 'user-codex-home');
+  const sessionDirectory = path.join(userCodexHome, 'sessions', '2026', '08', '25');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sessionDirectory, 'existing.jsonl'), '{}\n');
+  const fakeCodex = path.join(directory, 'codex');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf "%s\\n" "$@" > api-adopted-args.txt\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const priorCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = userCodexHome;
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_adopt_session', publicKey: identity.publicKey, workspace, rootId: 'awr_adopt_session',
+    agentProfile: { id: 'apf_adopt_session', name: 'Codex test', adapterKind: 'pty', executable: fakeCodex, arguments: [] },
+  });
+  const listening = await hub.listen();
+  const node = new NodeDaemon({
+    stateDir: path.join(directory, 'node'), hubURL: listening.url,
+    nodeId: 'nod_adopt_session', displayName: 'Adopt session node',
+    publicKey: identity.publicKey, privateKey: identity.privateKey,
+    roots: [{ id: 'awr_adopt_session', path: workspace }], reconnect: false,
+  });
+  node.on('error', () => {});
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+  t.after(async () => {
+    const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
+    if (runtime?.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await node.stop(); await hub.close();
+    if (priorCodexHome == null) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = priorCodexHome;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const adopted = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}:resume-codex`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ use_last: true }),
+  });
+  assert.equal(adopted.response.status, 200);
+  assert.deepEqual(adopted.body.codex_session, { source: 'user', selector: 'last', session_id: null });
+  await waitUntil(() => fs.existsSync(path.join(workspace, 'api-adopted-args.txt')));
+  assert.deepEqual(fs.readFileSync(path.join(workspace, 'api-adopted-args.txt'), 'utf8').trim().split('\n'), [
+    'resume', '-C', workspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '--last',
+  ]);
+  const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
+  assert.deepEqual(runtime.argv.slice(0, 4), [fakeCodex, 'resume', '-C', workspace]);
+});
+
 test('a main agent can queue delayed command work while its target node is offline', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-offline-task-'));
   const workspace = path.join(directory, 'workspace');
@@ -444,6 +538,8 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
   fs.writeFileSync(path.join(workspace, 'report.txt'), 'durable result\n');
+  fs.writeFileSync(path.join(workspace, 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><circle r="4"/></svg>');
+  fs.writeFileSync(path.join(workspace, 'paper.pdf'), Buffer.from('%PDF-1.4\n%%EOF\n'));
   const identity = generateNodeIdentity();
   const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
   const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_e2e', publicKey: identity.publicKey, workspace, rootId: 'awr_e2e' });
@@ -476,6 +572,22 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const list = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/entries`, listening.ownerToken);
   assert.equal(list.response.status, 200);
   assert(list.body.entries.some((entry) => entry.name === 'report.txt'));
+
+  const svgPreview = await fetch(`${listening.url}/api/v1/roots/awr_e2e/media-preview?path=diagram.svg`, {
+    headers: { authorization: `Bearer ${listening.ownerToken}` },
+  });
+  assert.equal(svgPreview.status, 200);
+  assert.equal(svgPreview.headers.get('content-type'), 'image/svg+xml');
+  assert.match(svgPreview.headers.get('content-disposition'), /^inline/);
+  assert.match(svgPreview.headers.get('content-security-policy'), /sandbox/);
+  assert.match(svgPreview.headers.get('content-security-policy'), /frame-ancestors 'self'/);
+  assert.match(await svgPreview.text(), /<svg/);
+  const pdfPreview = await fetch(`${listening.url}/api/v1/roots/awr_e2e/media-preview?path=paper.pdf`, {
+    headers: { authorization: `Bearer ${listening.ownerToken}` },
+  });
+  assert.equal(pdfPreview.status, 200);
+  assert.equal(pdfPreview.headers.get('content-type'), 'application/pdf');
+  assert.match(Buffer.from(await pdfPreview.arrayBuffer()).toString('utf8'), /^%PDF/);
 
   const unauthenticated = await fetch(`${listening.url}/api/v1/projects`);
   assert.equal(unauthenticated.status, 401);

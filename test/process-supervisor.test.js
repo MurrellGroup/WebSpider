@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { NodeDatabase } from '../src/db/node-database.js';
 import { RootedFileService } from '../src/node/root-fs.js';
-import { ProcessSupervisor, sanitizeInput } from '../src/node/process-supervisor.js';
+import { codexResumeArgv, ProcessSupervisor, sanitizeInput } from '../src/node/process-supervisor.js';
 
 function waitForCompletion(supervisor, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
@@ -28,6 +28,10 @@ async function waitUntil(predicate, timeoutMs = 5_000) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error('Timed out waiting for condition');
+}
+
+function aliveForTest(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 test('terminal input preserves interactive control-key sequences', () => {
@@ -98,6 +102,9 @@ test('a surviving PTY process is reconciled and controlled after node-daemon res
     id: 'run_survivor', kind: 'agent', agentInstanceId: 'agt_survivor', terminalId: 'trm_survivor',
     rootId: 'awr_runtime', argv: ['/bin/sh'],
   });
+  assert(runtime.hostBootId);
+  assert(runtime.processIdentity);
+  assert(runtime.keeperProcessIdentity);
   supervisor.input('trm_survivor', Buffer.from('echo before-restart\n'));
   await waitUntil(() => supervisor.snapshot('trm_survivor').text.includes('before-restart'));
 
@@ -123,6 +130,31 @@ test('a surviving PTY process is reconciled and controlled after node-daemon res
     supervisor.stop();
     roots.close();
     database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+});
+
+test('reconciliation never attaches a recorded PTY from a different machine boot', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-boot-fence-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_boot_fence', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  const runtime = supervisor.launch({
+    id: 'run_boot_fence', kind: 'agent', agentInstanceId: 'agt_boot_fence', terminalId: 'trm_boot_fence',
+    rootId: 'awr_boot_fence', argv: ['/bin/sh'],
+  });
+  database.db.prepare("UPDATE processes SET host_boot_id = 'different-boot' WHERE id = ?").run(runtime.id);
+  supervisor.reconcile();
+  assert.equal(database.getProcess(runtime.id).state, 'lost');
+  database.upsertProcess({ ...runtime, state: 'running' });
+  supervisor.stopProcess(runtime.id, 'SIGTERM');
+  await waitUntil(() => !aliveForTest(runtime.pid));
+  t.after(() => {
+    supervisor.stop(); roots.close(); database.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
 });
@@ -243,6 +275,89 @@ test('a replacement agent receives bounded recovery context from its prior runti
   const recovery = fs.readFileSync(path.join(directory, 'agent-context', 'agt_recovery', 'RECOVERY_CONTEXT.txt'), 'utf8');
   assert.match(recovery, /prior-session-marker/);
   assert.match(recovery, /Previous WebSpider runtime: run_prior/);
+});
+
+test('an adopted user Codex session resumes from the registered root with an isolated instruction home', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-adopt-codex-'));
+  const workspace = path.join(directory, 'workspace');
+  const inheritedCodexHome = path.join(directory, 'user-codex-home');
+  const sessionDirectory = path.join(inheritedCodexHome, 'sessions', '2026', '08', '25');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sessionDirectory, 'existing.jsonl'), '{}\n');
+  const fakeCodex = path.join(directory, 'codex');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf "%s\\n" "$@" > adopted-args.txt\nprintf "%s" "$CODEX_HOME" > adopted-home.txt\npwd > adopted-cwd.txt\ntest -L "$CODEX_HOME/sessions"\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_adopt', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop(); roots.close(); database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(codexResumeArgv([fakeCodex, '--sandbox', 'danger-full-access'], workspace, {
+    selector: 'id', session_id: '01a00000-0000-0000-0000-000000000001',
+  }), [fakeCodex, 'resume', '-C', workspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001']);
+  const completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_adopted', kind: 'agent', agentInstanceId: 'agt_adopted', terminalId: 'trm_adopted',
+    rootId: 'awr_adopt', argv: [fakeCodex, '--sandbox', 'danger-full-access'],
+    environment: { CODEX_HOME: inheritedCodexHome },
+    codexSession: { source: 'user', selector: 'id', session_id: '01a00000-0000-0000-0000-000000000001' },
+    policySnapshot: {
+      id: 'pol_adopted', project_id: 'prj_adopted', agent_role: 'worker', policy_revision: 1,
+      content_hash: 'adopted', policy: {}, rendered_instructions: '# Adopted session test',
+    },
+  });
+  assert.equal((await completion).exit_status, 0);
+  assert.deepEqual(fs.readFileSync(path.join(workspace, 'adopted-args.txt'), 'utf8').trim().split('\n'), [
+    'resume', '-C', workspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001',
+  ]);
+  assert.equal(fs.readFileSync(path.join(workspace, 'adopted-cwd.txt'), 'utf8').trim(), workspace);
+  const adoptedHome = fs.readFileSync(path.join(workspace, 'adopted-home.txt'), 'utf8');
+  assert.equal(fs.realpathSync(path.join(adoptedHome, 'sessions')), fs.realpathSync(path.join(inheritedCodexHome, 'sessions')));
+  assert.match(fs.readFileSync(path.join(adoptedHome, 'AGENTS.md'), 'utf8'), /Adopted session test/);
+});
+
+test('a lost managed Codex process automatically resumes its latest dedicated session', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-resume-codex-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const fakeCodex = path.join(directory, 'codex');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nif [ "$1" = resume ]; then printf "%s\\n" "$@" > crash-resume-args.txt; else mkdir -p "$CODEX_HOME/sessions/2026/08/25"; printf "{}\\n" > "$CODEX_HOME/sessions/2026/08/25/session.jsonl"; fi\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([{ id: 'awr_crash_resume', path: workspace }]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    supervisor.stop(); roots.close(); database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const policySnapshot = {
+    id: 'pol_crash_resume', project_id: 'prj_crash_resume', agent_role: 'worker', policy_revision: 1,
+    content_hash: 'resume', policy: {}, rendered_instructions: '# Crash resume test',
+  };
+  let completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_before_crash', kind: 'agent', agentInstanceId: 'agt_crash_resume', terminalId: 'trm_crash_resume',
+    rootId: 'awr_crash_resume', argv: [fakeCodex], policySnapshot,
+  });
+  assert.equal((await completion).exit_status, 0);
+  database.finishProcess('run_before_crash', 'lost', false);
+  completion = waitForCompletion(supervisor);
+  supervisor.launch({
+    id: 'run_after_crash', kind: 'agent', agentInstanceId: 'agt_crash_resume', terminalId: 'trm_crash_resume',
+    rootId: 'awr_crash_resume', argv: [fakeCodex], policySnapshot,
+  });
+  assert.equal((await completion).exit_status, 0);
+  assert.deepEqual(fs.readFileSync(path.join(workspace, 'crash-resume-args.txt'), 'utf8').trim().split('\n'), [
+    'resume', '-C', workspace, '--last',
+  ]);
 });
 
 test('agent launch materializes the inherited project agreement without workspace setup', async (t) => {

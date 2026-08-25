@@ -40,6 +40,15 @@ test('agent pages expose compact editable custom instructions', () => {
   assert.match(app, /Instructions unchanged/);
 });
 
+test('Codex agents expose existing-session adoption with registered-root wording', () => {
+  assert.match(app, /data-action="adopt-codex-session"/);
+  assert.match(app, /id="codex-session-form"/);
+  assert.match(app, /latest Codex session for this project/);
+  assert.match(app, /registered project directory/);
+  assert.match(app, /:resume-codex/);
+  assert.match(app, /codex-session.*method: 'DELETE'/s);
+});
+
 test('one browser editor manages worker-only instructions without changing the Master', () => {
   assert.match(page, /data-action="show-worker-instructions"/);
   assert.match(app, /id="worker-instructions-form"/);
@@ -151,4 +160,14 @@ test('file browser can reveal hidden workspace files explicitly', () => {
   assert.match(app, /hidden=\$\{state\.fileShowHidden\}/);
   assert.match(app, /data-action="toggle-hidden-files"/);
   assert.match(app, /Show hidden/);
+});
+
+test('file viewer renders safe inline image, SVG, and PDF previews', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /\(\?:png\|jpe\?g\|gif\|webp\|svg\)/);
+  assert.match(app, /media-preview\?path=/);
+  assert.match(app, /document\.createElement\('img'\)/);
+  assert.match(app, /document\.createElement\('iframe'\)/);
+  assert.match(styles, /\.image-preview/);
+  assert.match(styles, /\.document-preview/);
 });

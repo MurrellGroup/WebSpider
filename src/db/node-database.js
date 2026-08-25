@@ -37,6 +37,9 @@ export class NodeDatabase {
         pid INTEGER NOT NULL,
         pgid INTEGER NOT NULL,
         keeper_pid INTEGER,
+        host_boot_id TEXT,
+        process_identity TEXT,
+        keeper_process_identity TEXT,
         input_fifo TEXT NOT NULL,
         output_log TEXT NOT NULL,
         exit_file TEXT NOT NULL,
@@ -58,6 +61,9 @@ export class NodeDatabase {
     `);
     const processColumns = this.db.prepare('PRAGMA table_info(processes)').all().map((column) => column.name);
     if (!processColumns.includes('keeper_pid')) this.db.exec('ALTER TABLE processes ADD COLUMN keeper_pid INTEGER');
+    if (!processColumns.includes('host_boot_id')) this.db.exec('ALTER TABLE processes ADD COLUMN host_boot_id TEXT');
+    if (!processColumns.includes('process_identity')) this.db.exec('ALTER TABLE processes ADD COLUMN process_identity TEXT');
+    if (!processColumns.includes('keeper_process_identity')) this.db.exec('ALTER TABLE processes ADD COLUMN keeper_process_identity TEXT');
   }
 
   close() { this.db.close(); }
@@ -84,15 +90,18 @@ export class NodeDatabase {
 
   upsertProcess(process) {
     this.db.prepare(`INSERT INTO processes
-      (id, kind, agent_instance_id, task_id, terminal_id, root_id, argv_json, pid, pgid, keeper_pid, input_fifo,
-       output_log, exit_file, state, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, kind, agent_instance_id, task_id, terminal_id, root_id, argv_json, pid, pgid, keeper_pid,
+       host_boot_id, process_identity, keeper_process_identity, input_fifo, output_log, exit_file, state, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, pgid=excluded.pgid, state=excluded.state,
+        keeper_pid=excluded.keeper_pid, host_boot_id=excluded.host_boot_id,
+        process_identity=excluded.process_identity, keeper_process_identity=excluded.keeper_process_identity,
         updated_at=excluded.updated_at`)
       .run(process.id, process.kind, process.agentInstanceId || null, process.taskId || null,
         process.terminalId || null, process.rootId || null, JSON.stringify(process.argv), process.pid,
-        process.pgid, process.keeperPid || null, process.inputFifo, process.outputLog, process.exitFile, process.state,
-        process.createdAt, nowISO());
+        process.pgid, process.keeperPid || null, process.hostBootId || null, process.processIdentity || null,
+        process.keeperProcessIdentity || null,
+        process.inputFifo, process.outputLog, process.exitFile, process.state, process.createdAt, nowISO());
   }
 
   listProcesses() {
@@ -107,6 +116,9 @@ export class NodeDatabase {
       pid: Number(row.pid),
       pgid: Number(row.pgid),
       keeperPid: row.keeper_pid == null ? null : Number(row.keeper_pid),
+      hostBootId: row.host_boot_id || null,
+      processIdentity: row.process_identity || null,
+      keeperProcessIdentity: row.keeper_process_identity || null,
       inputFifo: row.input_fifo,
       outputLog: row.output_log,
       exitFile: row.exit_file,

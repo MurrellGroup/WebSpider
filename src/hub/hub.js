@@ -56,6 +56,7 @@ const MIME = new Map([
   ['.jpg', 'image/jpeg'],
   ['.jpeg', 'image/jpeg'],
   ['.gif', 'image/gif'],
+  ['.webp', 'image/webp'],
   ['.pdf', 'application/pdf'],
   ['.md', 'text/markdown; charset=utf-8'],
   ['.txt', 'text/plain; charset=utf-8'],
@@ -230,7 +231,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.2', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: '0.6.3', portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
@@ -938,8 +939,10 @@ export class Hub {
     }, { auth: false, csrf: false });
     route('POST', '/api/v1/nodes/attach-root', async (ctx) => {
       const body = await readJSON(ctx.request);
+      invariant(body.node_id && body.timestamp && body.nonce && body.signature,
+        'WS_AUTH_REQUIRED', 'Incomplete node attachment request.', 401);
       const node = this.database.getNode(body.node_id, true);
-      invariant(node && body.timestamp && body.nonce && body.signature, 'WS_AUTH_REQUIRED', 'Incomplete node attachment request.', 401);
+      invariant(node, 'WS_NODE_UNKNOWN', 'This node identity is not registered with this hub.', 401);
       invariant(Math.abs(Date.now() - Number(body.timestamp)) <= 300_000, 'WS_AUTH_REQUIRED', 'Node attachment signature is stale.', 401);
       invariant(verifyNodeHello(node.public_key, body.node_id, body.timestamp, body.nonce, body.signature),
         'WS_AUTH_REQUIRED', 'Invalid node attachment signature.', 401);
@@ -1066,6 +1069,34 @@ export class Hub {
       };
     });
     route('POST', '/api/v1/agent-instances/:id:wake', async (ctx) => this.#wakeAgent(ctx.params.id, ctx.principal.principal_id));
+    route('POST', '/api/v1/agent-instances/:id:resume-codex', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      let agent = this.database.setAgentCodexSession(ctx.params.id, {
+        source: 'user',
+        selector: body.use_last ? 'last' : 'id',
+        session_id: body.session_id,
+      }, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.codex_session.adopt',
+        targetType: 'agent_instance', targetId: agent.id, projectId: agent.project_id,
+        newState: { selector: agent.codex_session.selector },
+      });
+      if (!['stopped', 'failed', 'hibernated'].includes(agent.state)) {
+        await this.#stopAgent(agent.id, ctx.principal.principal_id);
+      }
+      agent = await this.#wakeAgent(agent.id, ctx.principal.principal_id);
+      return agent;
+    });
+    route('DELETE', '/api/v1/agent-instances/:id/codex-session', async (ctx) => {
+      const agent = this.database.setAgentCodexSession(ctx.params.id, null, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.codex_session.detach',
+        targetType: 'agent_instance', targetId: agent.id, projectId: agent.project_id,
+      });
+      return agent;
+    });
     route('POST', '/api/v1/agent-instances/:id:stop', async (ctx) => this.#stopAgent(ctx.params.id, ctx.principal.principal_id));
     route('POST', '/api/v1/agent-instances/:id:restart', async (ctx) => {
       await this.#stopAgent(ctx.params.id, ctx.principal.principal_id);
@@ -1259,6 +1290,27 @@ export class Hub {
     }, 'files.list'));
     route('GET', '/api/v1/roots/:id/stat', async (ctx) => this.#fileRequest(ctx, 'files.stat', { path: ctx.url.searchParams.get('path') || '' }, 'files.stat'));
     route('GET', '/api/v1/roots/:id/preview', async (ctx) => this.#fileRequest(ctx, 'files.preview', { path: ctx.url.searchParams.get('path') }, 'files.preview'));
+    route('GET', '/api/v1/roots/:id/media-preview', async (ctx) => {
+      const relativePath = ctx.url.searchParams.get('path');
+      const result = await this.#fileRequest(ctx, 'files.preview-media', {
+        path: relativePath, max_bytes: 64 * 1024 * 1024,
+      }, 'files.preview_media');
+      const bytes = Buffer.from(result.data, 'base64');
+      const mimeType = fileMime(result.name);
+      invariant(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'application/pdf'].includes(mimeType),
+        'WS_PREVIEW_UNSUPPORTED', 'This file type has no inline preview.', 415);
+      ctx.response.writeHead(200, {
+        'content-type': mimeType,
+        'content-length': bytes.length,
+        'content-disposition': contentDisposition(result.name).replace(/^attachment/, 'inline'),
+        etag: result.etag,
+        'x-content-type-options': 'nosniff',
+        'cache-control': 'private, no-store',
+        'content-security-policy': "default-src 'none'; img-src 'self' data:; frame-ancestors 'self'; sandbox",
+      });
+      ctx.response.end(bytes);
+      return undefined;
+    });
     route('GET', '/api/v1/roots/:id/search', async (ctx) => this.#fileRequest(ctx, 'files.search', {
       path: ctx.url.searchParams.get('path') || '',
       query: ctx.url.searchParams.get('query'),
@@ -1709,6 +1761,7 @@ export class Hub {
         environment: profile.environment,
         policy_snapshot: policySnapshot,
         agent_control: agentControl,
+        codex_session: agent.codex_session,
       }, { timeoutMs: 30_000 });
       if (started?.runtime?.id) this.agentRuntimes.set(agent.id, started.runtime.id);
       this.database.setTerminalState(agent.terminal_id, 'attached');
@@ -2086,7 +2139,7 @@ export class Hub {
   async #fileRequest(ctx, command, payload, auditAction) {
     const root = this.database.getRoot(ctx.params.id);
     invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
-    if (command === 'files.preview') invariant(root.allow_preview, 'WS_FORBIDDEN', 'Preview is disabled for this root.', 403);
+    if (['files.preview', 'files.preview-media'].includes(command)) invariant(root.allow_preview, 'WS_FORBIDDEN', 'Preview is disabled for this root.', 403);
     if (command === 'files.download') invariant(root.allow_download, 'WS_FORBIDDEN', 'Download is disabled for this root.', 403);
     if (command === 'files.search') invariant(root.allow_search, 'WS_FORBIDDEN', 'Search is disabled for this root.', 403);
     let decision = 'allowed';

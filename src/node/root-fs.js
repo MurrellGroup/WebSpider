@@ -13,6 +13,7 @@ const {
 } = fs.constants;
 
 const ACTIVE_PREVIEW_EXTENSIONS = new Set(['.html', '.htm', '.svg', '.js', '.mjs', '.cjs']);
+const MEDIA_PREVIEW_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.pdf']);
 const TEXT_EXTENSIONS = new Set([
   '', '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.csv', '.tsv',
   '.log', '.go', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.rs', '.java', '.c', '.h',
@@ -457,6 +458,10 @@ export class RootedFileService {
   async readFile(rootId, relativePath, { maxBytes = this.maxDownloadBytes } = {}) {
     const root = this.getRoot(rootId);
     invariant(root.allowDownload, 'WS_FORBIDDEN', 'Downloads are disabled for this root.', 403);
+    return this.#readFile(root, relativePath, maxBytes);
+  }
+
+  async #readFile(root, relativePath, maxBytes) {
     const opened = await this.#open(root, relativePath, 'file');
     try {
       invariant(opened.stat.size <= maxBytes, 'WS_FILE_TOO_LARGE', `File exceeds the ${maxBytes}-byte transfer limit.`, 413);
@@ -479,7 +484,7 @@ export class RootedFileService {
     const extension = path.extname(relativePath).toLowerCase();
     invariant(!ACTIVE_PREVIEW_EXTENSIONS.has(extension), 'WS_PREVIEW_UNSAFE', 'Active content is download-only.', 415);
     invariant(TEXT_EXTENSIONS.has(extension), 'WS_PREVIEW_UNSUPPORTED', 'This file type is download-only.', 415);
-    const file = await this.readFile(rootId, relativePath, { maxBytes: this.maxTextPreviewBytes });
+    const file = await this.#readFile(root, relativePath, this.maxTextPreviewBytes);
     let text;
     try {
       text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes);
@@ -496,6 +501,14 @@ export class RootedFileService {
       size: file.size,
       etag: file.etag,
     };
+  }
+
+  async previewMedia(rootId, relativePath, { maxBytes = this.maxDownloadBytes } = {}) {
+    const root = this.getRoot(rootId);
+    invariant(root.allowPreview, 'WS_FORBIDDEN', 'Previews are disabled for this root.', 403);
+    const extension = path.extname(relativePath).toLowerCase();
+    invariant(MEDIA_PREVIEW_EXTENSIONS.has(extension), 'WS_PREVIEW_UNSUPPORTED', 'This file type has no inline preview.', 415);
+    return this.#readFile(root, relativePath, Math.min(maxBytes, this.maxDownloadBytes));
   }
 
   async search(rootId, query, relativePath = '', options = {}) {
