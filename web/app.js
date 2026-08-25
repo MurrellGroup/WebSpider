@@ -1,12 +1,14 @@
 import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
-import { clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence } from './terminal-input.js';
+import {
+  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalImageCommitKey,
+} from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.8';
+const PORTAL_VERSION = '0.6.9';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -851,7 +853,7 @@ function handleTerminalData(data) {
 }
 
 function handleTerminalKey(event) {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && currentTerminalImages().length) {
+  if (terminalImageCommitKey(event, currentTerminalImages().length > 0)) {
     event.preventDefault();
     void sendStagedTerminalImages();
     return false;

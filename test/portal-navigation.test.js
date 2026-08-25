@@ -159,7 +159,7 @@ test('pasting a clipboard image stages it and Enter uploads it to the agent work
   assert.match(app, /addEventListener\('paste'/);
   assert.match(app, /stagePastedTerminalImages\(images\);\n\}, true\);/);
   assert.match(app, /item\.type\.startsWith\('image\/'\)/);
-  assert.match(app, /event\.key === 'Enter'.*currentTerminalImages\(\)\.length/s);
+  assert.match(app, /terminalImageCommitKey\(event, currentTerminalImages\(\)\.length > 0\)/);
   assert.match(app, /void sendStagedTerminalImages\(\)/);
   assert.match(app, /Ready · press Enter to upload and send/);
   assert.match(app, /URL\.createObjectURL\(file\)/);

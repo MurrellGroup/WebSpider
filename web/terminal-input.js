@@ -7,6 +7,11 @@ export function clipboardPasteShortcut(event) {
   return Boolean(event.metaKey) !== Boolean(event.ctrlKey) && (event.metaKey || event.ctrlKey);
 }
 
+export function terminalImageCommitKey(event, hasPendingImages = false) {
+  return Boolean(hasPendingImages) && event?.type === 'keydown' && event.key === 'Enter'
+    && !event.shiftKey && !event.isComposing;
+}
+
 // Printable physical-key input does not need xterm's hidden textarea. Capturing it at
 // keydown avoids browser/IME focus transitions silently swallowing fast ordinary typing.
 // Composition, dead keys, navigation keys, and non-Kitty shortcuts remain xterm-owned.

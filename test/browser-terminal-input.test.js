@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence } from '../web/terminal-input.js';
+import {
+  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalImageCommitKey,
+} from '../web/terminal-input.js';
 
 test('rapid printable keydowns bypass the hidden terminal textarea without losing characters', () => {
   const expected = Array.from({ length: 2_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join('');
@@ -31,6 +33,14 @@ test('clipboard paste shortcuts stay browser-owned when Kitty keyboard mode is a
   }
   assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'v', ctrlKey: true, altKey: true }), false);
   assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'c', metaKey: true }), false);
+});
+
+test('a staged image commits exactly on an unmodified Enter keydown', () => {
+  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter' }, true), true);
+  assert.equal(terminalImageCommitKey({ type: 'keyup', key: 'Enter' }, true), false);
+  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter', shiftKey: true }, true), false);
+  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter', isComposing: true }, true), false);
+  assert.equal(terminalImageCommitKey({ type: 'keydown', key: 'Enter' }, false), false);
 });
 
 test('terminal data always queues and requests control when no precursor event did so', () => {
