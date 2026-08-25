@@ -1704,7 +1704,11 @@ export class HubDatabase extends EventEmitter {
     invariant(lease, 'WS_TERMINAL_LEASE_REQUIRED', 'Take control before sending terminal input.', 409);
     invariant(lease.id === leaseId && Number(lease.lease_epoch) === Number(epoch) && lease.principal_id === principalId,
       'WS_TERMINAL_LEASE_STALE', 'Terminal control lease is stale.', 409);
-    invariant(new Date(lease.expires_at) > new Date(), 'WS_TERMINAL_LEASE_STALE', 'Terminal control lease expired.', 409);
+    // An expired row may be renewed by its exact prior controller when nobody has taken
+    // it over. A takeover replaces the row/id/epoch above, so the old client stays fenced.
+    // This prevents background-tab timer throttling from discarding the first new key.
+    invariant(renew || new Date(lease.expires_at) > new Date(),
+      'WS_TERMINAL_LEASE_STALE', 'Terminal control lease expired.', 409);
     if (renew) {
       lease.expires_at = new Date(Date.now() + 15_000).toISOString();
       this.db.prepare('UPDATE terminal_leases SET expires_at = ? WHERE id = ?').run(lease.expires_at, lease.id);

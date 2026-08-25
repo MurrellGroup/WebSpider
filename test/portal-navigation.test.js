@@ -109,11 +109,13 @@ test('project navigation does not intercept controls inside project forms', () =
 
 test('terminal pages begin in watch mode and acquire control only on interaction', () => {
   const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
+  const terminalInput = fs.readFileSync(path.join(repository, 'web', 'terminal-input.js'), 'utf8');
   assert.match(app, /interactive \? 'Take control' : 'Not running'/);
   assert.doesNotMatch(app, /frame\.type === 'ATTACHED'.*LEASE_REQUEST/);
   assert.match(app, /function requestTerminalLease\(\)/);
   assert.match(app, /if \(terminalInputMode\).*requestTerminalLease\(\)/s);
-  assert.match(app, /function handleTerminalData\(data\)[\s\S]*!state\.terminalLease && !state\.terminalLeaseRequested/);
+  assert.match(app, /function handleTerminalData\(data\)[\s\S]*enqueueTerminalData/);
+  assert.match(terminalInput, /if \(!controlled && !requestPending\) requestControl\?\.\(\);[\s\S]*enqueue\?\.\(data\)/);
   assert.match(app, /addEventListener\('pointerdown', requestTerminalLease\)/);
   assert.match(app, /emulator\.onData\(handleTerminalData\)/);
   assert.doesNotMatch(app, /emulator\.onData\(queueTerminalInput\)/);

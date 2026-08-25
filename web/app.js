@@ -1,10 +1,11 @@
 import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
+import { directKeyInput, enqueueTerminalData, kittySequence } from './terminal-input.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.3';
+const PORTAL_VERSION = '0.6.4';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -766,23 +767,18 @@ function queueTerminalInput(data) {
 }
 
 function handleTerminalData(data) {
-  if (!state.terminalLease && !state.terminalLeaseRequested) return;
-  queueTerminalInput(data);
-}
-
-function kittySequence(codePoint, modifiers = 1) {
-  return `\u001b[${codePoint}${modifiers === 1 ? '' : `;${modifiers}`}u`;
+  enqueueTerminalData(data, {
+    controlled: Boolean(state.terminalLease),
+    requestPending: state.terminalLeaseRequested,
+    requestControl: requestTerminalLease,
+    enqueue: queueTerminalInput,
+  });
 }
 
 function handleTerminalKey(event) {
-  if (!state.terminalKeyboardProtocol || event.type !== 'keydown') return true;
-  if (!(event.ctrlKey || event.altKey || event.metaKey) || [...event.key].length !== 1) return true;
-  const modifiers = 1
-    + (event.shiftKey ? 1 : 0)
-    + (event.altKey ? 2 : 0)
-    + (event.ctrlKey ? 4 : 0)
-    + (event.metaKey ? 8 : 0);
-  queueTerminalInput(kittySequence(event.key.codePointAt(0), modifiers));
+  const input = directKeyInput(event, state.terminalKeyboardProtocol);
+  if (input == null) return true;
+  handleTerminalData(input);
   return false;
 }
 

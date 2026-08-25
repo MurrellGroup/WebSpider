@@ -173,9 +173,13 @@ test('terminal leases fence stale controllers', (t) => {
   assert.throws(() => database.acquireTerminalLease(agent.terminal_id, 'owner:phone'), (error) => error.code === 'WS_TERMINAL_LEASE_REQUIRED');
   assert(database.validateTerminalLease(agent.terminal_id, first.id, first.lease_epoch, 'owner:laptop'));
   assert.throws(() => database.validateTerminalLease(agent.terminal_id, first.id, first.lease_epoch - 1, 'owner:laptop'), (error) => error.code === 'WS_TERMINAL_LEASE_STALE');
-  assert.equal(database.releaseTerminalLease(agent.terminal_id, first.id, 'owner:laptop'), true);
+  database.db.prepare('UPDATE terminal_leases SET expires_at = ? WHERE id = ?').run('1970-01-01T00:00:00.000Z', first.id);
+  const renewed = database.validateTerminalLease(agent.terminal_id, first.id, first.lease_epoch, 'owner:laptop');
+  assert(new Date(renewed.expires_at) > new Date());
+  database.db.prepare('UPDATE terminal_leases SET expires_at = ? WHERE id = ?').run('1970-01-01T00:00:00.000Z', first.id);
   const second = database.acquireTerminalLease(agent.terminal_id, 'owner:phone');
-  assert(second.lease_epoch >= 1);
+  assert(second.lease_epoch > first.lease_epoch);
+  assert.throws(() => database.validateTerminalLease(agent.terminal_id, first.id, first.lease_epoch, 'owner:laptop'), (error) => error.code === 'WS_TERMINAL_LEASE_STALE');
 });
 
 test('task and event state survives database reopen', (t) => {
