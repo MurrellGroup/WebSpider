@@ -63,6 +63,6 @@ cp "$WEBSPIDER_FAKE_BOOTSTRAP" "$output"
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(fs.readFileSync(capture, 'utf8').trim().split('\n'), [
-    '--node', 'http://100.64.0.1:7340', '--workspace', workspace, '--state-dir', '/private/node-state',
+    '--node', 'http://100.64.0.1:7340', '--workspace', fs.realpathSync(workspace), '--state-dir', '/private/node-state',
   ]);
 });
