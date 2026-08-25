@@ -117,6 +117,7 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(app, /function handleTerminalData\(data\)[\s\S]*enqueueTerminalData/);
   assert.match(terminalInput, /if \(!controlled && !requestPending\) requestControl\?\.\(\);[\s\S]*enqueue\?\.\(data\)/);
   assert.match(app, /const input = directKeyInput\(event,[\s\S]*event\.preventDefault\(\);[\s\S]*handleTerminalData\(input\)/);
+  assert.match(app, /socket\.addEventListener\('open',[\s\S]*terminalPendingInput\.length[\s\S]*requestTerminalLease\(\)/);
   assert.match(app, /addEventListener\('pointerdown', requestTerminalLease\)/);
   assert.match(app, /emulator\.onData\(handleTerminalData\)/);
   assert.doesNotMatch(app, /emulator\.onData\(queueTerminalInput\)/);

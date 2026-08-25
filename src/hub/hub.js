@@ -231,7 +231,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.5', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: '0.6.6', portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);

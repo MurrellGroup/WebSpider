@@ -5,7 +5,7 @@ import { directKeyInput, enqueueTerminalData, kittySequence } from './terminal-i
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.5';
+const PORTAL_VERSION = '0.6.6';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -893,6 +893,9 @@ async function renderTerminal(agent) {
   state.terminalSequence = 0;
   const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminal.id)}?attachment=${encodeURIComponent(attachment)}`);
   state.terminalSocket = socket;
+  socket.addEventListener('open', () => {
+    if (state.terminalPendingInput.length || state.terminalInputBuffer) requestTerminalLease();
+  });
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
