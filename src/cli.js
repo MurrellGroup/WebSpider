@@ -76,6 +76,15 @@ function logJSON(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+export async function hubSynchronizedTimestamp(hubURL, fetchImpl = fetch) {
+  const response = await fetchImpl(new URL('/healthz', hubURL));
+  if (!response.ok) throw new Error(`Could not synchronize with the hub clock: HTTP ${response.status}`);
+  const health = await response.json();
+  const timestamp = Date.parse(health.time);
+  if (!Number.isFinite(timestamp)) throw new Error('Could not synchronize with the hub clock: invalid health timestamp');
+  return timestamp;
+}
+
 function quickAccessURL(url, ownerToken) {
   const value = new URL(url);
   value.hash = `access_token=${encodeURIComponent(ownerToken)}`;
@@ -278,9 +287,9 @@ async function attachNodeRoot(options) {
     throw new Error(`Workspace does not exist: ${workspace}`);
   }
   const root = { id: makeId('awr'), path: workspace, display_name: path.basename(workspace) || 'workspace' };
-  const timestamp = Date.now();
-  const nonce = randomBytes(18).toString('base64url');
   const hub = options.hub || config.hubURL;
+  const timestamp = await hubSynchronizedTimestamp(hub);
+  const nonce = randomBytes(18).toString('base64url');
   const response = await fetch(new URL('/api/v1/nodes/attach-root', hub), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -403,7 +412,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.6.1\n\n`);
+  process.stdout.write(`WebSpider 0.6.2\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);

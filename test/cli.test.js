@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveAgentProfile, writeNodeConfig } from '../src/cli.js';
+import { hubSynchronizedTimestamp, resolveAgentProfile, writeNodeConfig } from '../src/cli.js';
 
 test('the default profile is a persistent login shell', () => {
   const profile = resolveAgentProfile();
@@ -40,4 +40,27 @@ test('node configuration updates preserve newly attached project roots', (t) => 
   const stored = JSON.parse(fs.readFileSync(path.join(directory, 'config.json'), 'utf8'));
   assert.deepEqual(stored.roots.map((root) => root.id), ['awr_one', 'awr_two']);
   assert.equal(fs.statSync(path.join(directory, 'config.json')).mode & 0o777, 0o600);
+});
+
+test('project attachment signatures use hub time instead of the worker clock', async () => {
+  let requestedURL;
+  const timestamp = await hubSynchronizedTimestamp('http://100.64.0.1:7340', async (url) => {
+    requestedURL = url.href;
+    return {
+      ok: true,
+      async json() { return { status: 'ok', time: '2026-08-25T08:09:10.123Z' }; },
+    };
+  });
+  assert.equal(requestedURL, 'http://100.64.0.1:7340/healthz');
+  assert.equal(timestamp, Date.parse('2026-08-25T08:09:10.123Z'));
+});
+
+test('project attachment refuses an invalid hub clock response', async () => {
+  await assert.rejects(
+    () => hubSynchronizedTimestamp('http://100.64.0.1:7340', async () => ({
+      ok: true,
+      async json() { return { status: 'ok', time: 'not-a-time' }; },
+    })),
+    /invalid health timestamp/,
+  );
 });

@@ -3,7 +3,7 @@ import { randomIdentifier } from './random.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.1';
+const PORTAL_VERSION = '0.6.2';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -144,6 +144,22 @@ function closeModal() {
 function workerInstallCommand(invite, nodeName) {
   const bootstrap = 'https://github.com/MurrellGroup/WebSpider/releases/latest/download/WebSpider_Install.run';
   return `i=$(mktemp);curl --http1.1 -fL --retry 5 -o "$i" ${bootstrap}&&sh "$i" --node ${shellQuote(invite.hub_url)} --token ${shellQuote(invite.token)} --workspace "$PWD" --name ${shellQuote(nodeName)}`;
+}
+
+async function copyControlValue(control) {
+  if (!control) return false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(control.value);
+      return true;
+    } catch {
+      // Plain HTTP and restrictive browser policies may reject the modern API.
+    }
+  }
+  control.focus();
+  control.select();
+  control.setSelectionRange?.(0, control.value.length);
+  return typeof document.execCommand === 'function' && document.execCommand('copy');
 }
 
 function showWorkerCommand({ project, invite, hub_url: hubURL }, nodeName) {
@@ -987,8 +1003,8 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {
-      await navigator.clipboard.writeText($('#worker-command').value);
-      return toast('Worker command copied');
+      const copied = await copyControlValue($('#worker-command'));
+      return toast(copied ? 'Worker command copied' : 'Command selected; press Ctrl/Cmd+C to copy it.', !copied);
     }
     if (action === 'close-terminal') {
       await api(`/api/v1/terminals/${encodeURIComponent(state.selectedTerminalId)}:stop`, { method: 'POST' });

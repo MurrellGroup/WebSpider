@@ -32,3 +32,10 @@ test('project onboarding uses the current hub route', () => {
   assert.match(app, /if \(action === 'onboard-project'\) return showProjectOnboarding\(\)/);
   assert.match(app, /api\('\/api\/v1\/projects\/onboard'/);
 });
+
+test('worker command copy supports plain HTTP without the Clipboard API', () => {
+  assert.match(app, /navigator\.clipboard\?\.writeText/);
+  assert.match(app, /control\.select\(\)/);
+  assert.match(app, /document\.execCommand\('copy'\)/);
+  assert.match(app, /Command selected; press Ctrl\/Cmd\+C to copy it\./);
+});
