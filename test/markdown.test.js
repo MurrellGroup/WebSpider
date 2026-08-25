@@ -48,12 +48,12 @@ test('markdown and terminal rendering remain safe for untrusted output', () => {
 test('an exited primary agent terminal becomes read-only with a restart action', () => {
   const application = fs.readFileSync(path.join(repository, 'web', 'app.js'), 'utf8');
   assert.match(application, /Restart agent/);
-  assert.match(application, /frame\.type === 'ATTACHED' && interactive/);
+  assert.match(application, /interactive \? 'Take control' : 'Not running'/);
   assert.match(application, /if \(interactive\) state\.terminalInputSubscription/);
   assert.match(application, /state\.selectedAgent\.state !== previousAgentState/);
 });
 
-test('terminal text-box mode is opt-in and sends composed text through the PTY', () => {
+test('terminal text-box mode is opt-in and uses durable messages for primary agents', () => {
   const application = fs.readFileSync(path.join(repository, 'web', 'app.js'), 'utf8');
   assert.match(application, /terminalInputMode: 'direct'/);
   assert.match(application, /data-terminal-input-mode="compose">Text box/);
@@ -61,4 +61,9 @@ test('terminal text-box mode is opt-in and sends composed text through the PTY',
   assert.match(application, /submitTerminalComposition/);
   assert.match(application, /terminalBracketedPaste/);
   assert.match(application, /\\u001b\[200~/);
+  assert.match(application, /transmitTerminalInput\(payload\)/);
+  assert.match(application, /terminalCompositionTimer = setTimeout/);
+  assert.match(application, /queueTerminalInput\('\\r'\)/);
+  assert.match(application, /terminal\?\.kind === 'primary_agent'/);
+  assert.match(application, /idempotency-key.*randomIdentifier/s);
 });

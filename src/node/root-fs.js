@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 
 const {
@@ -120,6 +121,67 @@ export class RootedFileService {
     const root = this.roots.get(rootId);
     invariant(root, 'WS_ROOT_NOT_FOUND', 'Workspace root is unavailable.', 404);
     return root;
+  }
+
+  writeInbox(rootId, { documentId, filename, bytes, sha256 }) {
+    const root = this.getRoot(rootId);
+    invariant(typeof documentId === 'string' && /^doc_[A-Za-z0-9_-]{8,80}$/.test(documentId),
+      'WS_VALIDATION', 'A valid document ID is required.');
+    invariant(typeof filename === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(filename)
+      && ['.txt', '.md', '.markdown'].includes(path.extname(filename).toLowerCase()),
+    'WS_VALIDATION', 'Inbox documents require a safe .txt, .md, or .markdown filename.');
+    invariant(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 512 * 1024,
+      'WS_REQUEST_TOO_LARGE', 'Inbox document must contain between 1 byte and 512 KiB.', 413);
+    let decoded;
+    try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch {
+      throw new WebSpiderError('WS_VALIDATION', 'Inbox document must be valid UTF-8 text.', 400);
+    }
+    invariant(!decoded.includes('\0'), 'WS_VALIDATION', 'Inbox documents must be UTF-8 text without NUL bytes.');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    invariant(digest === sha256, 'WS_VALIDATION', 'Inbox document checksum does not match.');
+
+    const rootPath = this.#currentRoot(root);
+    let directory = root.anchor;
+    for (const component of ['.webspider', 'inbox']) {
+      directory = path.join(directory, component);
+      try {
+        const stat = fs.lstatSync(directory);
+        invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'The reserved WebSpider inbox path is not a real directory.', 403);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        fs.mkdirSync(directory, { mode: 0o700 });
+      }
+      const resolved = fs.realpathSync(directory);
+      invariant(within(rootPath, resolved), 'WS_PATH_ESCAPE_BLOCKED', 'Inbox path escaped the workspace root.', 403);
+    }
+
+    const storedName = `${documentId}-${filename}`;
+    const relativePath = `.webspider/inbox/${storedName}`;
+    const destination = path.join(directory, storedName);
+    try {
+      const stat = fs.lstatSync(destination);
+      invariant(stat.isFile() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+        'Inbox destination is not a regular file.', 403);
+      const existing = fs.readFileSync(destination);
+      invariant(createHash('sha256').update(existing).digest('hex') === digest,
+        'WS_CONFLICT', 'Document ID already exists with different content.', 409);
+      return { document_id: documentId, relative_path: relativePath, filename, sha256: digest, size_bytes: bytes.length, duplicate: true };
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
+    const temporary = path.join(directory, `.document-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, destination);
+      fs.chmodSync(destination, 0o600);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* renamed or already removed */ }
+    }
+    const resolved = fs.realpathSync(destination);
+    invariant(within(rootPath, resolved), 'WS_PATH_ESCAPE_BLOCKED', 'Inbox document escaped the workspace root.', 403);
+    return { document_id: documentId, relative_path: relativePath, filename, sha256: digest, size_bytes: bytes.length, duplicate: false };
   }
 
   #candidate(root, parts) {

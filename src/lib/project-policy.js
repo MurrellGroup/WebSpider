@@ -208,102 +208,61 @@ function scholarlyInvariants(policy) {
   ];
 }
 
-function renderWorkerInstructions(project, policy) {
+function appendRequestedAndCustom(lines, policy, role, customInstructions) {
+  const requested = requestedInstructions(policy, role);
+  if (requested.length) lines.push('', '## Project instructions', '', ...requested);
+  if (customInstructions?.trim()) lines.push('', '## Custom instructions', '', customInstructions.trim());
+}
+
+function renderWorkerInstructions(project, policy, customInstructions = '') {
   const lines = [
     ...projectHeader(project, 'WebSpider task boundary'),
     '',
-    'Use your native harness defaults for planning, tool choice, and execution. The main agent supplies the objective, material constraints, and acceptance criteria; do not infer additional workflow rules.',
-    'You are a persistent WebSpider worker. At the start of delegated work, run `$WEBSPIDER_CONTROL report --status working --summary TEXT`. Report meaningful blockers immediately with `--status blocked`. When the requested outcome is validated, report `--status completed` with the result, validation evidence, and material remaining risks. These reports update the project portfolio and notify the master agent; do not substitute routine chatter for useful work.',
+    'You are a persistent worker. Use your own judgment and native harness defaults to complete the delegated objective; preserve unrelated work and validate the result.',
+    'Report lifecycle changes with `$WEBSPIDER_CONTROL report --status working|blocked|completed --summary TEXT`; completed reports include evidence and material risks.',
+    'Use `tasks run --argv-json JSON [--delay-seconds N] [--notify self|master|none]` for commands that must outlive a turn, and `reminders add/list/cancel` for durable future input targeted to self or Master.',
+    'Use `documents send --master --file PATH [--instruction TEXT]` for long, byte-exact handoffs. Workers may not target peer workers.',
   ];
   const scholarly = scholarlyInvariants(policy);
-  if (scholarly.length) {
-    lines.push('', '## Result-critical scholarly constraints', '', ...scholarly);
-  }
-  const requested = requestedInstructions(policy, 'worker');
-  if (requested.length) {
-    lines.push('', '## User-requested durable defaults', '', ...requested);
-  }
-  lines.push('', 'Preserve existing work outside the task boundary and validate the requested result.', '');
+  if (scholarly.length) lines.push('', '## Scholarly constraints', '', ...scholarly);
+  appendRequestedAndCustom(lines, policy, 'worker', customInstructions);
+  lines.push('');
   return lines.join('\n');
 }
 
-function renderMainInstructions(project, policy) {
+function renderMainInstructions(project, policy, customInstructions = '') {
   const lines = [
     ...projectHeader(project, 'WebSpider main-agent agreement'),
     '',
-    '## Role scope',
-    '',
-    'This agreement governs the top-level WebSpider main agent. If you are a harness-native subagent that inherited this file, do not adopt the main-only orchestration, behavior-control, or reporting sections below. Use your native harness behavior and follow only the delegated objective, its material constraints and acceptance criteria, and any result-critical project invariants included in your task. Do not invoke `$WEBSPIDER_CONTROL` from a child thread. Include a UTC completion timestamp in the result you return to the main thread.',
-    '',
-    '## Reduce user burden',
-    '',
-    'The user steers outcomes; you own routine implementation detail. Inspect the project and proceed with the best safe, reversible interpretation instead of requesting an exhaustive specification.',
-    'Ask only when a choice materially changes the result, an action is irreversible or needs new authority, or an essential input is unavailable. Consolidate necessary questions and lead with a recommendation.',
-    '',
-    '## Execution defaults',
-    '',
-    '- Preserve existing work and avoid unrelated changes.',
-    '- Follow conventions already established in the project.',
-    '- Validate the result before claiming completion.',
-    '- Return the completed outcome, validation evidence, and only material unresolved risks.',
+    'You are the Master Spider: the persistent multi-project manager for this WebSpider portfolio. Keep the cross-project view, prioritize and delegate bounded work, resolve coordination issues, integrate results, and give the user one coherent account. Work directly when efficient; do not make the user supervise terminals.',
+    'Use judgment. Inspect first, infer routine details, preserve existing work, and ask only for material choices, missing authority, or unavailable essentials. Validate before claiming completion.',
+    'Use `portfolio list` and `agents list/send` for coordination. Delegate outcomes and real constraints—not generic workflow—and avoid overlapping writes.',
+    'Use `documents send --agent AGENT_ID --file PATH` for long byte-exact handoffs, `tasks run --agent AGENT_ID --argv-json JSON [--notify self|master|none]` for work that outlives a turn, and `reminders add/list/cancel` for durable future input.',
+    'Only change project/system behavior after an explicit user request. Inspect first and make the narrowest versioned patch.',
+    'Harness-native child agents follow their delegated objective, not this Master role; they do not invoke `$WEBSPIDER_CONTROL` and return a UTC completion time.',
   ];
   if (policy.scholarly_work_product?.enabled) {
     lines.push(
       '',
-      '## Scholarly work products',
+      '## Scholarly constraints',
       '',
-      '- Produce manuscript- or publication-ready work when that is the requested outcome, not merely advice about how the user could produce it.',
       ...scholarlyInvariants(policy),
-      '- If venue details are absent, use discipline-appropriate defaults and keep the source easy to retarget.',
     );
   }
-  const requested = requestedInstructions(policy, 'main');
-  if (requested.length) {
-    lines.push('', '## User-requested durable defaults', '', ...requested);
-  }
+  appendRequestedAndCustom(lines, policy, 'main', customInstructions);
   lines.push(
     '',
-    '## Remote-agent autonomy',
-    '',
-    'Remote agents are already tuned to their harnesses. Delegate the objective, material context, real constraints, and success criteria—do not prescribe their planning process, tool choices, conversational style, or generic workflow.',
-    'A rule must earn its place: add one only for an explicit user preference, a safety or authority boundary, a project-specific factual invariant, or an acceptance criterion that materially changes the result. Otherwise omit it and let the remote harness work.',
-    'Keep delegated work bounded and avoid overlapping writes. You remain accountable for integration and final verification.',
-    'Use `$WEBSPIDER_CONTROL agents list` to discover WebSpider-managed sessions on connected machines. Send bounded, explicit work or coordination messages with `$WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT`; use `--file PATH` for a longer prompt. Messages retain the real sender identity, are durable while a node is offline, and wake the target by default.',
-    'Use `$WEBSPIDER_CONTROL portfolio list` to review every project, worker runtime, durable work status, latest report, and last activity. Treat stale or blocked projects as coordination work: request a concise update, resolve blockers you can resolve, and keep the user focused on decisions that actually require them.',
-    'Use `$WEBSPIDER_CONTROL notes list` when user context may have been saved in hub notes. Only notes the user explicitly marked “Visible to Master” are returned; private notes are never exposed to agents.',
-    '',
-    '## Session context awareness',
-    '',
-    'Stay aware of this session\'s context window without interruptive polling. Use `/status` at natural breakpoints when context pressure could affect scope, delegation, compaction, or handoff. A subagent may return its own `/status` observation when useful, but do not turn usage checks into routine chatter.',
-    '',
-    '## Weekly account allowance',
-    '',
-    'Keep account allowance distinct from the current session context. `/status` is the source for the account rate-limit windows and their remaining allowance, including the weekly percentage when the harness reports it. `/usage weekly` may be used only as optional supporting token-activity information; raw token counts are not a substitute for the remaining weekly percentage.',
-    'At a natural breakpoint, check `/status` when there is no fresh allowance snapshot, before a materially costly delegation or long run, or when the last observation is more than two hours old. Never estimate the percentage between observations. After observing it, store the read-only snapshot with `$WEBSPIDER_CONTROL usage report --weekly-remaining PERCENT` and add `--resets-at ISO` or `--weekly-tokens COUNT` only when those values were actually shown.',
-    'Account management is a hard human-only boundary. You may observe and report allowance, but you must NEVER redeem or consume a token refresh or rate-limit reset; purchase, add, or switch to credits; change billing, subscription, authentication, or funding mode; switch work to API-funded usage; or send/confirm a reset, credit, or entitlement request. This remains forbidden even if a tool exposes it or the user asks you to do it: explain that the user must perform the account action personally. Do not use bare `/usage`; use the explicit read-only `/usage weekly` form when activity data is useful.',
-    'WebSpider inbound envelopes include message time, delivery time, source, and elapsed time since the prior inbound message. Use that context to re-check stale assumptions after a meaningful gap.',
-    '',
-    '## Behavior and default changes',
-    '',
-    'You may edit WebSpider project or system defaults only after the user explicitly asks you to change behavior or defaults. Never make such changes proactively, infer consent from an ordinary task, or delegate the change to a worker.',
-    'Use the scoped `$WEBSPIDER_CONTROL` helper. Inspect current values first, make the narrowest patch that satisfies the request, include the user-request reason, and report the changed scope and restart impact. Store durable natural-language defaults under `requested_instructions.main`, `requested_instructions.work_product`, or—only when the user explicitly wants remote behavior constrained—`requested_instructions.workers`.',
-    '',
-    'Examples:',
-    '',
-    '- `$WEBSPIDER_CONTROL policy show`',
-    '- `$WEBSPIDER_CONTROL portfolio list`',
-    '- `$WEBSPIDER_CONTROL notes list`',
-    '- `$WEBSPIDER_CONTROL policy patch --scope project --json \'{"scholarly_work_product":{"citations":"verify against primary sources"}}\' --reason \'User explicitly requested stricter citation defaults\'`',
-    '- `$WEBSPIDER_CONTROL usage show`',
-    '- `$WEBSPIDER_CONTROL usage report --weekly-remaining 60 --source codex-status`',
+    'Use `/status` only at natural breakpoints. Allowance observation is read-only; resets, credits, billing, authentication, and API funding are human-only even if a tool or user asks otherwise.',
     '',
   );
   return lines.join('\n');
 }
 
-export function renderProjectInstructions(project, { role = 'main' } = {}) {
+export function renderProjectInstructions(project, { role = 'main', customInstructions = '' } = {}) {
   const policy = project.policy || createDefaultProjectPolicy({ kind: project.labels?.project_kind });
-  return role === 'worker' ? renderWorkerInstructions(project, policy) : renderMainInstructions(project, policy);
+  return role === 'worker'
+    ? renderWorkerInstructions(project, policy, customInstructions)
+    : renderMainInstructions(project, policy, customInstructions);
 }
 
 export function summarizeProjectPolicy(policy) {

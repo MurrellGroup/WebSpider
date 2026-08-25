@@ -27,6 +27,24 @@ function alive(pid) {
   }
 }
 
+function inheritedUserEnvironment(environment = process.env) {
+  const account = os.userInfo();
+  const values = {
+    HOME: environment.HOME || account.homedir || os.homedir(),
+    USER: environment.USER || account.username,
+    LOGNAME: environment.LOGNAME || environment.USER || account.username,
+    SHELL: environment.SHELL || account.shell || '/bin/sh',
+  };
+  for (const key of [
+    'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+    'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR',
+    'DBUS_SESSION_BUS_ADDRESS', 'SSH_AUTH_SOCK',
+  ]) {
+    if (environment[key]) values[key] = environment[key];
+  }
+  return values;
+}
+
 function stopGroup(pid, signal = 'SIGTERM') {
   if (!pid || !alive(pid)) return;
   try { process.kill(-pid, signal); } catch {
@@ -147,11 +165,14 @@ async function main() {
   const valid = (resource === 'policy' && ['show', 'patch'].includes(action))
     || (resource === 'usage' && ['show', 'report'].includes(action))
     || (resource === 'agents' && ['list', 'send'].includes(action))
+    || (resource === 'documents' && action === 'send')
+    || (resource === 'tasks' && ['list', 'run'].includes(action))
+    || (resource === 'reminders' && ['list', 'add', 'cancel'].includes(action))
     || (resource === 'portfolio' && action === 'list')
     || (resource === 'notes' && ['list', 'show'].includes(action))
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -169,6 +190,109 @@ async function main() {
       process.exit(2);
     }
     console.log(JSON.stringify(await request('notes/' + encodeURIComponent(note)), null, 2));
+    return;
+  }
+  if (resource === 'tasks') {
+    if (action === 'list') {
+      console.log(JSON.stringify(await request('tasks'), null, 2));
+      return;
+    }
+    const agent = option('--agent') || process.env.WEBSPIDER_AGENT_INSTANCE_ID;
+    const argvJSON = option('--argv-json');
+    const title = option('--title');
+    const notify = option('--notify') || 'master';
+    const completionMessage = option('--completion-message');
+    const delaySeconds = Number(option('--delay-seconds') || 0);
+    let argv;
+    try { argv = JSON.parse(argvJSON || ''); } catch { console.error('--argv-json must contain valid JSON'); process.exit(2); }
+    if (!agent || !Array.isArray(argv) || !argv.length || argv.some((argument) => typeof argument !== 'string')
+      || !Number.isInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 86_400
+      || !['self', 'master', 'none'].includes(notify)) {
+      console.error('tasks run requires --argv-json with a non-empty string array, optional --agent ID, --delay-seconds 0..86400, and --notify self|master|none');
+      process.exit(2);
+    }
+    console.log(JSON.stringify(await request('tasks', 'POST', {
+      agent_id: agent,
+      argv,
+      title,
+      delay_seconds: delaySeconds,
+      notify_target: notify,
+      completion_message: completionMessage,
+    }), null, 2));
+    return;
+  }
+  if (resource === 'reminders') {
+    if (action === 'list') {
+      console.log(JSON.stringify(await request('reminders'), null, 2));
+      return;
+    }
+    if (action === 'cancel') {
+      const reminder = option('--reminder');
+      if (!reminder) {
+        console.error('reminders cancel requires --reminder ID');
+        process.exit(2);
+      }
+      console.log(JSON.stringify(await request('reminders/' + encodeURIComponent(reminder) + ':cancel', 'POST', {}), null, 2));
+      return;
+    }
+    const messageOption = option('--message');
+    const file = option('--file');
+    const title = option('--title');
+    const delayOption = option('--delay-seconds');
+    const everyOption = option('--every-seconds');
+    const maxRunsOption = option('--max-runs');
+    const target = option('--target') || 'self';
+    if ((!messageOption && !file) || (messageOption && file) || (delayOption == null && everyOption == null)
+      || !['self', 'master'].includes(target)) {
+      console.error('reminders add requires exactly one of --message TEXT or --file PATH, a delay or interval, and optional --target self|master');
+      process.exit(2);
+    }
+    const delaySeconds = delayOption == null ? undefined : Number(delayOption);
+    const everySeconds = everyOption == null ? undefined : Number(everyOption);
+    const maxRuns = maxRunsOption == null ? undefined : Number(maxRunsOption);
+    if ((delaySeconds != null && (!Number.isInteger(delaySeconds) || delaySeconds < 1 || delaySeconds > 2_592_000))
+      || (everySeconds != null && (!Number.isInteger(everySeconds) || everySeconds < 1 || everySeconds > 2_592_000))
+      || (maxRuns != null && (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 10_000))) {
+      console.error('reminder delay/interval must be 1..2592000 seconds and max runs must be 1..10000');
+      process.exit(2);
+    }
+    const message = file ? (await import('node:fs')).readFileSync(file, 'utf8') : messageOption;
+    console.log(JSON.stringify(await request('reminders', 'POST', {
+      message,
+      title,
+      delay_seconds: delaySeconds,
+      every_seconds: everySeconds,
+      max_runs: maxRuns,
+      delivery_target: target,
+    }), null, 2));
+    return;
+  }
+  if (resource === 'documents') {
+    const agent = option('--agent') || (process.argv.includes('--master') ? 'master' : undefined);
+    const file = option('--file');
+    const name = option('--name');
+    const instruction = option('--instruction');
+    const wake = option('--wake') || 'ensure_running';
+    if (!agent || !file || !['ensure_running', 'queue_only', 'interrupt'].includes(wake)) {
+      console.error('documents send requires --agent ID or --master, --file PATH, and optional --wake ensure_running|queue_only|interrupt');
+      process.exit(2);
+    }
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const crypto = await import('node:crypto');
+    const bytes = fs.readFileSync(file);
+    const filename = name || path.basename(file);
+    if (!bytes.length || bytes.length > 512 * 1024 || !['.txt', '.md', '.markdown'].includes(path.extname(filename).toLowerCase())) {
+      console.error('documents send accepts a non-empty .txt, .md, or .markdown file of at most 512 KiB');
+      process.exit(2);
+    }
+    console.log(JSON.stringify(await request('agents/' + encodeURIComponent(agent) + '/documents', 'POST', {
+      filename,
+      data_base64: bytes.toString('base64'),
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      instruction,
+      wake_policy: wake,
+    }), null, 2));
     return;
   }
   if (resource === 'report') {
@@ -419,6 +543,7 @@ export class ProcessSupervisor extends EventEmitter {
       detached: true,
       stdio: [inputFd, outputFd, outputFd],
       env: {
+        ...inheritedUserEnvironment(),
         PATH: process.env.PATH,
         TERM: 'xterm-256color',
         COLUMNS: String(columns),

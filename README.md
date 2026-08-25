@@ -31,6 +31,16 @@ sh ~/Downloads/WebSpider_Install_0.6.2_linux_x64.run --workspace /path/to/projec
 
 No separate runtime or package-manager setup is part of either user workflow.
 
+### Codex-managed setup (Meta-Spider)
+
+As an alternative, start Codex CLI in a directory dedicated to WebSpider maintenance and paste the following prompt. This creates an external, break-glass maintainer; it does not add another agent to the WebSpider portfolio.
+
+```text
+You are the Meta-Spider for WebSpider: a user-invoked, break-glass maintainer outside the WebSpider agent hierarchy. Work only inside the directory where I started you, except for per-user install/package-manager side effects needed to build or test WebSpider. Use https://github.com/MurrellGroup/WebSpider. Read every applicable AGENTS.md and docs/META_SPIDER.md before acting. Keep the source clone separate from any live WebSpider test-project directory. Set up or repair this machine as the WebSpider hub as I request, preserve durable state and user work, verify that only the intended WebSpider service is running, and install browser-test tooling locally when needed. You are not the Master Spider and do not perform ordinary portfolio/project work. Do not routinely prod or supervise the Master; reach into Master or worker sessions only when I explicitly request diagnosis/repair or when bounded interaction is needed to validate that repair. Ask before sudo or expanding beyond this directory, and hand normal operation back to me and the Master when maintenance is complete.
+```
+
+After installation, `webspider meta-spider prompt --workspace "$PWD"` prints the complete reusable role prompt. See [Meta-Spider maintenance role](docs/META_SPIDER.md).
+
 Open `http://127.0.0.1:7340`. The **Master Spider** control opens its persistent terminal; **Portfolio** in that terminal's header opens the project overview. Closing the browser does not stop the managed agent or detached tasks.
 
 ### Remote server
@@ -104,6 +114,8 @@ The command downloads the matching native installer, enrolls the machine with th
 
 After enrollment, the project and worker appear in the portfolio automatically. Closing the browser, restarting the hub, or rebooting the worker machine does not discard their durable identity or status. A worker reports `working`, `blocked`, `completed`, or `idle`; reports update the portal and notify the master.
 
+When a project is finished, stop its agents and shell tabs and finish or cancel its active tasks, then select **Archive** on the project page. Archived projects leave the active portfolio but retain their WebSpider history and can be restored from **Archived**. Permanent deletion is available only from that archived view, requires typing the exact project name, and removes WebSpider's project records. It never deletes the project's workspace or user files. The Master Spider project cannot be archived or deleted.
+
 The generated command has this shape and is intentionally one physical line:
 
 ```bash
@@ -143,16 +155,23 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - `webspider up` bootstraps a local project, primary agent, logical thread, terminal, workspace root, and default project agreement.
 - Academic-project context is inferred from bounded workspace signals such as manuscript, bibliography, Quarto, LaTeX, notebook, results, and figure assets. When signals are sparse, the academic-first default remains usable without requiring answers.
 - Every agent launch receives a versioned immutable, role-aware policy snapshot. Codex launches receive a managed `CODEX_HOME` that preserves existing user-level guidance and configuration while adding the compiled WebSpider instructions through native `AGENTS.md` discovery.
-- The main agent owns portfolio orchestration and integration. It can query durable project/worker status and send provenance-preserving instructions to registered worker agents; queued messages survive offline nodes and wake stopped workers when requested.
-- Remote workers receive only their task boundary, result-critical invariants, and a self-report credential. They can update only their own durable work status and cannot list the portfolio, command other agents, edit policy, or access owner APIs.
+- Each agent page has an **Instructions** tab for concise, per-agent custom guidance. Save it for the next launch or save and restart immediately; revision conflicts are rejected and the active snapshot remains visible.
+- **Sub-spider instructions** in the sidebar edits one compact worker-only instruction list inherited by every registered worker, never the Master. It can be saved for later launches or applied by restarting the currently running workers.
+- Automatically managed Codex profiles run noninteractively with `approval_policy=never` and `sandbox_mode=danger-full-access`; this matches WebSpider's existing PTY host-user trust boundary and prevents an unavailable Linux user-namespace sandbox from turning durable work into an unattended approval loop. Explicit profile arguments always take precedence.
+- The Master Spider is the user's durable multi-project manager. It owns portfolio prioritization, bounded delegation, stalled-work follow-up, cross-project coordination, result integration, and one coherent user-facing account. It can query durable project/worker status and send provenance-preserving instructions to registered workers; queued messages survive offline nodes and wake stopped workers when requested.
+- Remote workers receive only their task boundary, result-critical invariants, and a self-confined credential. They can report their own durable status, run/list detached commands only in their own registered workspace, and create/list/cancel hooks owned by themselves. Hook delivery is limited to that worker or the Master. Workers cannot list the portfolio, command peers, edit policy, or access owner APIs.
+- Detached task completion can inject a durable user-role hook containing the task ID, custom completion text, and result into either the scheduling agent or the Master. One-shot or recurring future messages are persisted as reminder tasks, survive hub restarts and offline destinations, and can be listed or cancelled from the scoped helper.
+- Long text/Markdown instructions and results use durable document handoffs instead of terminal pastes. The destination node writes a checksum-verified mode-`0600` copy under the target workspace's reserved `.webspider/inbox/`, then injects a short message naming its document ID and local path. Offline delivery and matching retries are durable and idempotent; workers can hand documents back only to the Master.
 - When the user explicitly asks to change behavior or defaults, the main agent can inspect and patch project- or system-level policy through its broader scoped helper. Revisions are optimistic and changes are audited. Harness-native child threads are explicitly de-scoped from the main-only agreement.
 - The main agent treats session context and account allowance as different budgets. It uses `/status` at natural breakpoints for context and the reported weekly rate-limit percentage; `/usage weekly` is optional supporting token activity, never a substitute for percent remaining. Read-only observations are timestamped and shown in later inbound envelopes and the portal.
 - Account management is always human-only. Agents cannot redeem token refreshes or rate-limit resets, buy/add/switch credits, change billing, plan, or authentication, move work to API-funded usage, or request entitlements—even if a provider surface happens to expose those actions.
 - The portal defaults to the selected agent's live terminal. The login shell remains alive when the browser disconnects, and Codex runs inside it without a WebSpider conversation layer. Additional named shell tabs are independent processes for monitoring and ad hoc commands; only the primary agent process receives orchestration messages.
-- Terminal input defaults to direct xterm control. The optional text-box composer supports mouse editing before sending and negotiates bracketed-paste behavior with the active terminal program.
+- Terminal input defaults to direct xterm control. The optional text-box composer supports mouse editing and lets large bracketed pastes settle before sending Enter.
 - Hub notes remain private plaintext files by default. Only notes explicitly marked visible enter the main agent's read-only allowlist; worker agents have no notes scope.
+- Archived projects are excluded from the active portfolio and cannot receive new tasks, messages, agents, shells, or control tokens. Archive revokes existing project control tokens; permanent deletion is archived-only, exact-name confirmed, and deliberately leaves workspace files untouched.
 - Conversations, Markdown-family files, and the terminal's Readable view render sanitized Markdown and browser-native MathML. The primary terminal view uses a bundled xterm.js emulator for ANSI/VT rendering and direct keyboard input.
 - Managed commands use an isolated native PTY bridge (`script` on Linux and `expect` on macOS), named input FIFO, detached process group, append-only terminal log, and atomic exit-status marker.
+- Agent, shell, and detached-task processes inherit a narrow standard per-user environment (`HOME`, user identity, shell, locale, XDG runtime/data paths, and user bus when available) without copying arbitrary secrets. Persistent service PATHs always include the installation bin directory and `~/.local/bin`, so Codex remains discoverable after boot or an agent-driven per-user upgrade.
 - A node restart reconciles persisted process IDs, log offsets, FIFOs, and exit markers. A hub outage does not terminate a detached process.
 - Every node reconnect reports its reconciled runtime inventory. Previously-running agents missing after a machine reboot are restarted according to policy, receive a bounded copy of their prior terminal context, and get a durable recovery message instructing them to continue without requiring the user to restate the project.
 - Browser event clients replay from a durable global sequence before receiving live events.
@@ -171,7 +190,7 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - Roots pin their initial filesystem identity. Strict mode blocks all symlinks; contained mode verifies the opened target remains under the pinned root. Special files are never previewed or downloaded.
 - Raw terminal bytes render through `textContent`; the optional readable representation strips terminal control sequences and passes only escaped Markdown, safe links, and generated MathML through the renderer. Terminal input remains size- and control-character-bounded.
 - Audit records preserve the actual actor separately from the role delivered to an agent.
-- Main-terminal control tokens are short-lived, revocable, and allowlisted to portfolio inspection, explicitly visible note reads, project/system policy edits, account-usage observations, agent discovery, and provenance-preserving messages to another registered agent. Worker tokens are restricted to updating their own status. Neither can authorize general project, note writes, file, task, artifact, terminal, administrative, billing, reset, credit, authentication, or funding APIs.
+- Main-terminal control tokens are short-lived, revocable, and allowlisted to portfolio inspection, explicitly visible note reads, project/system policy edits, account-usage observations, agent discovery, provenance-preserving messages and document handoffs, detached command tasks on registered agent roots, and self-owned reminder hooks. Worker tokens are confined to self status, detached tasks in their own root, self-owned hooks delivered only to themselves or the Master, and document handoff only to the Master. Neither can authorize general project, note writes, general file writes, artifact, terminal, administrative, billing, reset, credit, authentication, or funding APIs.
 
 See [Security model](docs/SECURITY.md) for details and limitations.
 

@@ -7,7 +7,8 @@ import { RootedFileService } from './root-fs.js';
 import { ProcessSupervisor } from './process-supervisor.js';
 import { makeId, nowISO } from '../lib/ids.js';
 import { signNodeHello } from '../lib/security.js';
-import { WebSpiderError } from '../lib/errors.js';
+import { hubClockOffset } from '../lib/hub-clock.js';
+import { WebSpiderError, invariant } from '../lib/errors.js';
 
 function executableAvailable(name) {
   for (const directory of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
@@ -103,6 +104,7 @@ export class NodeDaemon extends EventEmitter {
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
     this.backoffMs = 500;
+    this.hubClockOffsetMs = 0;
     this.connectionStatusPath = path.join(stateDir, 'connection-status.json');
     this.lastConnectionError = null;
 
@@ -136,12 +138,20 @@ export class NodeDaemon extends EventEmitter {
     this.database.close();
   }
 
-  #connect() {
+  async #connect() {
+    if (this.stopped) return;
+    try {
+      this.hubClockOffsetMs = await hubClockOffset(this.hubURL, (url) => fetch(url, {
+        signal: AbortSignal.timeout(5_000),
+      }));
+    } catch {
+      this.hubClockOffsetMs = 0;
+    }
     if (this.stopped) return;
     const socket = new WebSocket(websocketURL(this.hubURL));
     this.socket = socket;
     socket.addEventListener('open', () => {
-      const timestamp = Date.now();
+      const timestamp = Date.now() + this.hubClockOffsetMs;
       const nonce = randomBytes(18).toString('base64url');
       socket.send(JSON.stringify({
         type: 'hello',
@@ -345,9 +355,21 @@ export class NodeDaemon extends EventEmitter {
         return this.supervisor.stopProcess(runtime.id, 'SIGTERM');
       }
       case 'message.deliver': {
+        const documentParts = (payload.message?.content_parts || []).filter((part) => part.type === 'document');
+        const documents = documentParts.map((part) => {
+          invariant(payload.document_root_id, 'WS_ROOT_NOT_FOUND', 'Document delivery requires a target workspace root.', 404);
+          const result = this.rootService.writeInbox(payload.document_root_id, {
+            documentId: part.document_id,
+            filename: part.filename,
+            bytes: Buffer.from(part.data_base64 || '', 'base64'),
+            sha256: part.sha256,
+          });
+          invariant(result.relative_path === part.relative_path, 'WS_VALIDATION', 'Document inbox path does not match its envelope.');
+          return result;
+        });
         const text = formatInboundMessage(payload.message, payload.delivery_context);
         const receipt = this.supervisor.message(payload.agent_instance_id, text);
-        return { ...receipt, message_id: payload.message?.id, adapter: 'pty', certainty: 'best_effort' };
+        return { ...receipt, message_id: payload.message?.id, documents, adapter: 'pty', certainty: 'best_effort' };
       }
       case 'terminal.input':
         return this.supervisor.input(payload.terminal_id, Buffer.from(payload.data || '', 'base64'));

@@ -15,6 +15,11 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'usage:write',
   'agents:read',
   'messages:write',
+  'documents:write',
+  'tasks:read',
+  'tasks:write',
+  'reminders:read:self',
+  'reminders:write:self',
   'portfolio:read',
   'notes:read:visible',
   'status:write:self',
@@ -70,6 +75,7 @@ function projectRow(row, systemPolicy = { revision: 1, overrides: {} }) {
     policy_overrides: policyOverrides,
     policy_revision: Number(row.policy_revision || 1),
     system_policy_revision: Number(systemPolicy.revision || 1),
+    archived_at: row.archived_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -113,6 +119,7 @@ function agentRow(row) {
     profile_name: row.profile_name,
     project_id: row.project_id,
     project_name: row.project_name,
+    project_archived_at: row.project_archived_at || null,
     node_id: row.node_id,
     node_name: row.node_name,
     title: row.title || row.profile_name,
@@ -129,6 +136,8 @@ function agentRow(row) {
     work_status: row.work_status || 'idle',
     status_summary: row.status_summary || '',
     status_updated_at: row.status_updated_at,
+    custom_instructions: row.custom_instructions || '',
+    instruction_revision: Number(row.instruction_revision || 1),
   };
 }
 
@@ -260,6 +269,7 @@ export class HubDatabase extends EventEmitter {
         policy_json TEXT NOT NULL DEFAULT '{}',
         policy_overrides_json TEXT NOT NULL DEFAULT '{}',
         policy_revision INTEGER NOT NULL DEFAULT 1,
+        archived_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -272,6 +282,8 @@ export class HubDatabase extends EventEmitter {
         system_policy_revision INTEGER NOT NULL DEFAULT 1,
         policy_revision INTEGER NOT NULL,
         policy_json TEXT NOT NULL,
+        agent_instructions TEXT NOT NULL DEFAULT '',
+        agent_instruction_revision INTEGER NOT NULL DEFAULT 1,
         rendered_instructions TEXT NOT NULL,
         content_hash TEXT NOT NULL,
         created_at TEXT NOT NULL
@@ -329,7 +341,9 @@ export class HubDatabase extends EventEmitter {
         stopped_at TEXT,
         work_status TEXT NOT NULL DEFAULT 'idle',
         status_summary TEXT NOT NULL DEFAULT '',
-        status_updated_at TEXT
+        status_updated_at TEXT,
+        custom_instructions TEXT NOT NULL DEFAULT '',
+        instruction_revision INTEGER NOT NULL DEFAULT 1
       );
 
       CREATE TABLE IF NOT EXISTS agent_control_tokens (
@@ -595,6 +609,7 @@ export class HubDatabase extends EventEmitter {
     const projectColumns = new Set(this.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
     if (!projectColumns.has('policy_json')) this.db.exec("ALTER TABLE projects ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'");
     if (!projectColumns.has('policy_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN policy_revision INTEGER NOT NULL DEFAULT 1');
+    if (!projectColumns.has('archived_at')) this.db.exec('ALTER TABLE projects ADD COLUMN archived_at TEXT');
     if (!projectColumns.has('policy_overrides_json')) {
       this.db.exec("ALTER TABLE projects ADD COLUMN policy_overrides_json TEXT NOT NULL DEFAULT '{}'");
       const select = this.db.prepare('SELECT id, labels_json, policy_json FROM projects');
@@ -616,6 +631,8 @@ export class HubDatabase extends EventEmitter {
     if (!agentColumns.has('work_status')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN work_status TEXT NOT NULL DEFAULT 'idle'");
     if (!agentColumns.has('status_summary')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN status_summary TEXT NOT NULL DEFAULT ''");
     if (!agentColumns.has('status_updated_at')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN status_updated_at TEXT');
+    if (!agentColumns.has('custom_instructions')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN custom_instructions TEXT NOT NULL DEFAULT ''");
+    if (!agentColumns.has('instruction_revision')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN instruction_revision INTEGER NOT NULL DEFAULT 1');
     const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
     if (!joinColumns.has('metadata_json')) this.db.exec("ALTER TABLE join_tokens ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
     const rootColumns = new Set(this.db.prepare('PRAGMA table_info(workspace_roots)').all().map((column) => column.name));
@@ -627,6 +644,8 @@ export class HubDatabase extends EventEmitter {
     const snapshotColumns = new Set(this.db.prepare('PRAGMA table_info(policy_snapshots)').all().map((column) => column.name));
     if (!snapshotColumns.has('agent_role')) this.db.exec("ALTER TABLE policy_snapshots ADD COLUMN agent_role TEXT NOT NULL DEFAULT 'worker'");
     if (!snapshotColumns.has('system_policy_revision')) this.db.exec('ALTER TABLE policy_snapshots ADD COLUMN system_policy_revision INTEGER NOT NULL DEFAULT 1');
+    if (!snapshotColumns.has('agent_instructions')) this.db.exec("ALTER TABLE policy_snapshots ADD COLUMN agent_instructions TEXT NOT NULL DEFAULT ''");
+    if (!snapshotColumns.has('agent_instruction_revision')) this.db.exec('ALTER TABLE policy_snapshots ADD COLUMN agent_instruction_revision INTEGER NOT NULL DEFAULT 1');
     this.db.prepare(`INSERT OR IGNORE INTO system_policies (id, policy_json, revision, updated_at)
       VALUES ('default', '{}', 1, ?)`).run(nowISO());
   }
@@ -680,12 +699,21 @@ export class HubDatabase extends EventEmitter {
   issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = 43_200_000) {
     const agent = this.getAgent(agentInstanceId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
     invariant(Array.isArray(scopes) && scopes.length > 0, 'WS_VALIDATION', 'At least one control scope is required.');
     invariant(scopes.every((scope) => AGENT_CONTROL_ALLOWED_SCOPES.has(scope)), 'WS_FORBIDDEN',
       'Agent control scopes are limited to the orchestration allowlist.', 403);
     if (agent.orchestration_role !== 'main') {
-      invariant(scopes.every((scope) => scope === 'status:write:self'), 'WS_FORBIDDEN',
-        'A worker agent can only report its own durable status.', 403);
+      const workerScopes = new Set([
+        'status:write:self',
+        'tasks:read',
+        'tasks:write',
+        'reminders:read:self',
+        'reminders:write:self',
+        'documents:write',
+      ]);
+      invariant(scopes.every((scope) => workerScopes.has(scope)), 'WS_FORBIDDEN',
+        'A worker agent can only report status, manage its own detached tasks, and schedule its own hooks.', 403);
     }
     const now = nowISO();
     const record = {
@@ -713,6 +741,7 @@ export class HubDatabase extends EventEmitter {
     if (!token) return null;
     const row = this.db.prepare(`SELECT t.*, a.orchestration_role FROM agent_control_tokens t
       JOIN agent_instances a ON a.id = t.agent_instance_id
+      JOIN projects p ON p.id = t.project_id AND p.archived_at IS NULL
       WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > ?`).get(sha256(token), nowISO());
     if (!row) return null;
     return {
@@ -966,9 +995,105 @@ export class HubDatabase extends EventEmitter {
     return projectRow(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id), this.getSystemPolicy());
   }
 
-  listProjects() {
+  listProjects({ archived = 'active' } = {}) {
+    invariant(['active', 'archived', 'all'].includes(archived), 'WS_VALIDATION', 'Invalid project archive filter.');
     const systemPolicy = this.getSystemPolicy();
-    return this.db.prepare('SELECT * FROM projects ORDER BY name').all().map((row) => projectRow(row, systemPolicy));
+    const where = archived === 'active' ? 'WHERE archived_at IS NULL'
+      : archived === 'archived' ? 'WHERE archived_at IS NOT NULL' : '';
+    return this.db.prepare(`SELECT * FROM projects ${where} ORDER BY name`).all().map((row) => projectRow(row, systemPolicy));
+  }
+
+  archiveProject(id, actor = 'owner:local') {
+    const project = this.getProject(id);
+    invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+    invariant(!project.archived_at, 'WS_PROJECT_ARCHIVED', 'Project is already archived.', 409);
+    invariant(!this.listAgents(id).some((agent) => agent.orchestration_role === 'main'),
+      'WS_PROJECT_PROTECTED', 'The Master Spider project cannot be archived.', 409);
+    invariant(!this.listAgents(id).some((agent) => ['ready', 'busy', 'starting', 'stopping'].includes(agent.state)),
+      'WS_PROJECT_ACTIVE', 'Stop every running project agent before archiving.', 409);
+    invariant(!this.listTasks(id).some((task) => ['pending', 'runnable', 'running', 'cancel_requested'].includes(task.state)),
+      'WS_PROJECT_ACTIVE', 'Cancel or finish every active project task before archiving.', 409);
+    invariant(!this.db.prepare(`SELECT 1 FROM terminal_sessions t
+      JOIN agent_instances a ON a.id = t.agent_instance_id
+      WHERE a.project_id = ? AND t.kind = 'shell_tab' AND t.state = 'attached' LIMIT 1`).get(id),
+    'WS_PROJECT_ACTIVE', 'Stop every running project shell before archiving.', 409);
+    const archivedAt = nowISO();
+    this.transaction(() => {
+      this.db.prepare('UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?').run(archivedAt, archivedAt, id);
+      this.db.prepare(`UPDATE agent_control_tokens SET revoked_at = ?
+        WHERE project_id = ? AND revoked_at IS NULL`).run(archivedAt, id);
+    });
+    this.appendEvent('project', id, 'project.archived.v1', actor, id, { archived_at: archivedAt });
+    return this.getProject(id);
+  }
+
+  restoreProject(id, actor = 'owner:local') {
+    const project = this.getProject(id);
+    invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+    invariant(project.archived_at, 'WS_PROJECT_NOT_ARCHIVED', 'Project is not archived.', 409);
+    this.db.prepare('UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ?').run(nowISO(), id);
+    this.appendEvent('project', id, 'project.restored.v1', actor, id, {});
+    return this.getProject(id);
+  }
+
+  deleteArchivedProject(id) {
+    const project = this.getProject(id);
+    invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+    invariant(project.archived_at, 'WS_PROJECT_NOT_ARCHIVED', 'Archive the project before deleting it.', 409);
+    invariant(!this.listAgents(id).some((agent) => agent.orchestration_role === 'main'),
+      'WS_PROJECT_PROTECTED', 'The Master Spider project cannot be deleted.', 409);
+    invariant(!this.listAgents(id).some((agent) => ['ready', 'busy', 'starting', 'stopping'].includes(agent.state)),
+      'WS_PROJECT_ACTIVE', 'Stop every running project agent before deleting.', 409);
+    invariant(!this.listTasks(id).some((task) => ['pending', 'runnable', 'running', 'cancel_requested'].includes(task.state)),
+      'WS_PROJECT_ACTIVE', 'Cancel or finish every active project task before deleting.', 409);
+    const agents = this.listAgents(id);
+    const profileIds = [...new Set(agents.map((agent) => agent.profile_id))];
+    const agentIds = agents.map((agent) => agent.id);
+    const threadIds = this.db.prepare('SELECT id FROM threads WHERE project_id = ?').all(id).map((row) => row.id);
+    const taskIds = this.db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(id).map((row) => row.id);
+    const terminalIds = this.db.prepare(`SELECT t.id FROM terminal_sessions t
+      JOIN agent_instances a ON a.id = t.agent_instance_id WHERE a.project_id = ?`).all(id).map((row) => row.id);
+    const messageIds = this.db.prepare(`SELECT m.id FROM messages m
+      JOIN threads t ON t.id = m.thread_id WHERE t.project_id = ?`).all(id).map((row) => row.id);
+    const associatedIds = [...new Set([id, ...agentIds, ...threadIds, ...taskIds, ...terminalIds, ...messageIds])];
+    this.transaction(() => {
+      this.db.prepare(`DELETE FROM terminal_leases WHERE terminal_id IN (
+        SELECT t.id FROM terminal_sessions t JOIN agent_instances a ON a.id = t.agent_instance_id WHERE a.project_id = ?
+      )`).run(id);
+      this.db.prepare(`DELETE FROM message_deliveries WHERE recipient_agent_instance_id IN (
+        SELECT id FROM agent_instances WHERE project_id = ?
+      ) OR message_id IN (
+        SELECT m.id FROM messages m JOIN threads t ON t.id = m.thread_id WHERE t.project_id = ?
+      )`).run(id, id);
+      this.db.prepare('DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE project_id = ?)').run(id);
+      this.db.prepare('DELETE FROM task_attempts WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id);
+      this.db.prepare('DELETE FROM artifacts WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM attention_items WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM agent_control_tokens WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM account_usage_snapshots WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM policy_snapshots WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM workspace_roots WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM terminal_sessions WHERE agent_instance_id IN (SELECT id FROM agent_instances WHERE project_id = ?)').run(id);
+      this.db.prepare('DELETE FROM threads WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id);
+      const deleteEvent = this.db.prepare('DELETE FROM events WHERE scope_id = ? OR subject_id = ?');
+      const deleteAudit = this.db.prepare('DELETE FROM audit_log WHERE target_id = ?');
+      for (const associatedId of associatedIds) {
+        deleteEvent.run(associatedId, associatedId);
+        deleteAudit.run(associatedId);
+      }
+      this.db.prepare('DELETE FROM audit_log WHERE project_id = ?').run(id);
+      for (const token of this.db.prepare('SELECT id, metadata_json FROM join_tokens').all()) {
+        if (decode(token.metadata_json, {}).project_id === id) this.db.prepare('DELETE FROM join_tokens WHERE id = ?').run(token.id);
+      }
+      this.db.prepare('DELETE FROM agent_instances WHERE project_id = ?').run(id);
+      this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+      for (const profileId of profileIds) {
+        this.db.prepare('DELETE FROM agent_profiles WHERE id = ? AND NOT EXISTS (SELECT 1 FROM agent_instances WHERE profile_id = ?)')
+          .run(profileId, profileId);
+      }
+    });
+    return { id: project.id, name: project.name, deleted: true };
   }
 
   createNote({ id = makeId('nte'), title, filename, visibility = 'private' }) {
@@ -1040,7 +1165,7 @@ export class HubDatabase extends EventEmitter {
 
   createPolicySnapshot({
     projectId, agentInstanceId = null, agentRole = 'worker', systemPolicyRevision = 1,
-    policyRevision, policy, renderedInstructions,
+    policyRevision, policy, agentInstructions = '', agentInstructionRevision = 1, renderedInstructions,
   }, actor = 'hub:policy') {
     invariant(this.getProject(projectId), 'WS_NOT_FOUND', 'Project not found.', 404);
     const snapshot = {
@@ -1051,17 +1176,20 @@ export class HubDatabase extends EventEmitter {
       system_policy_revision: systemPolicyRevision,
       policy_revision: policyRevision,
       policy,
+      agent_instructions: agentInstructions,
+      agent_instruction_revision: agentInstructionRevision,
       rendered_instructions: renderedInstructions,
       content_hash: sha256(renderedInstructions),
       created_at: nowISO(),
     };
     this.db.prepare(`INSERT INTO policy_snapshots
       (id, project_id, agent_instance_id, agent_role, system_policy_revision, policy_revision,
-       policy_json, rendered_instructions, content_hash, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       policy_json, agent_instructions, agent_instruction_revision, rendered_instructions, content_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       snapshot.id, snapshot.project_id, snapshot.agent_instance_id, snapshot.agent_role,
       snapshot.system_policy_revision, snapshot.policy_revision,
-      encode(snapshot.policy), snapshot.rendered_instructions, snapshot.content_hash, snapshot.created_at,
+      encode(snapshot.policy), snapshot.agent_instructions, snapshot.agent_instruction_revision,
+      snapshot.rendered_instructions, snapshot.content_hash, snapshot.created_at,
     );
     this.appendEvent('project', projectId, 'project.policy.snapshot.created.v1', actor, snapshot.id, {
       agent_instance_id: agentInstanceId,
@@ -1084,6 +1212,8 @@ export class HubDatabase extends EventEmitter {
       system_policy_revision: Number(row.system_policy_revision || 1),
       policy_revision: row.policy_revision,
       policy: decode(row.policy_json, {}),
+      agent_instructions: row.agent_instructions || '',
+      agent_instruction_revision: Number(row.agent_instruction_revision || 1),
       rendered_instructions: row.rendered_instructions,
       content_hash: row.content_hash,
       created_at: row.created_at,
@@ -1118,6 +1248,7 @@ export class HubDatabase extends EventEmitter {
     const project = this.getProject(projectId);
     const node = this.getNode(nodeId);
     invariant(profile && project && node, 'WS_VALIDATION', 'Profile, project, and node must exist.');
+    invariant(!project.archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before adding an agent.', 409);
     invariant(['main', 'worker'].includes(orchestrationRole), 'WS_VALIDATION', 'Agent role must be main or worker.');
     const created = nowISO();
     const threadId = makeId('thr');
@@ -1164,7 +1295,7 @@ export class HubDatabase extends EventEmitter {
   }
 
   getAgent(id) {
-    const row = this.db.prepare(`SELECT a.*, p.name AS profile_name, pr.name AS project_name,
+    const row = this.db.prepare(`SELECT a.*, p.name AS profile_name, pr.name AS project_name, pr.archived_at AS project_archived_at,
       n.display_name AS node_name, t.title AS title FROM agent_instances a
       JOIN agent_profiles p ON p.id = a.profile_id
       JOIN projects pr ON pr.id = a.project_id
@@ -1192,6 +1323,28 @@ export class HubDatabase extends EventEmitter {
     invariant(this.getAgent(id), 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     this.db.prepare('UPDATE agent_instances SET orchestration_role = ? WHERE id = ?').run(role, id);
     if (role !== 'main') this.revokeAgentControlTokens(id);
+    return this.getAgent(id);
+  }
+
+  updateAgentInstructions(id, instructions, actor = 'owner:local', { expectedRevision = null } = {}) {
+    const previous = this.getAgent(id);
+    invariant(previous, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(typeof instructions === 'string', 'WS_VALIDATION', 'Custom instructions must be text.');
+    const normalized = instructions.replace(/\r\n?/g, '\n').trim();
+    invariant(!normalized.includes('\0'), 'WS_VALIDATION', 'Custom instructions contain forbidden content.');
+    invariant(Buffer.byteLength(normalized, 'utf8') <= 4_000, 'WS_VALIDATION', 'Custom instructions must be 4 KB or less.');
+    if (expectedRevision != null) {
+      invariant(Number(expectedRevision) === previous.instruction_revision, 'WS_INSTRUCTION_REVISION_CONFLICT',
+        'Agent instructions changed since they were opened.', 409,
+        { expected_revision: Number(expectedRevision), current_revision: previous.instruction_revision });
+    }
+    const revision = previous.instruction_revision + 1;
+    this.db.prepare('UPDATE agent_instances SET custom_instructions = ?, instruction_revision = ? WHERE id = ?')
+      .run(normalized, revision, id);
+    this.appendEvent('agent', id, 'agent.instructions.updated.v1', actor, id, {
+      previous_revision: previous.instruction_revision,
+      instruction_revision: revision,
+    });
     return this.getAgent(id);
   }
 
@@ -1277,6 +1430,8 @@ export class HubDatabase extends EventEmitter {
     if (prior) return { message: this.getMessage(prior.id), duplicate: true };
     const thread = this.getThread(threadId);
     invariant(thread, 'WS_NOT_FOUND', 'Thread not found.', 404);
+    const recipient = this.getAgent(thread.primary_agent_instance_id);
+    invariant(recipient && !recipient.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Archived projects cannot receive messages.', 409);
     invariant(Array.isArray(contentParts) && contentParts.length > 0, 'WS_VALIDATION', 'Message content is required.');
     invariant(hopCount <= 16, 'WS_TRIGGER_LOOP_LIMIT', 'Message hop limit exceeded.', 429);
     const messageId = makeId('msg');
@@ -1319,7 +1474,9 @@ export class HubDatabase extends EventEmitter {
     specification = {}, desiredAgentProfileId = null, assignedAgentInstanceId = null,
     nodeId = null, priority = 0, retryPolicy = {}, createdBy = 'owner:local',
   }) {
-    invariant(this.getProject(projectId), 'WS_VALIDATION', 'Project does not exist.');
+    const project = this.getProject(projectId);
+    invariant(project, 'WS_VALIDATION', 'Project does not exist.');
+    invariant(!project.archived_at, 'WS_PROJECT_ARCHIVED', 'Archived projects cannot accept new tasks.', 409);
     if (parentTaskId) {
       invariant(parentTaskId !== id, 'WS_TASK_CONFLICT', 'A task cannot depend on itself.', 409);
       invariant(this.getTask(parentTaskId), 'WS_VALIDATION', 'Parent task does not exist.');
@@ -1356,6 +1513,21 @@ export class HubDatabase extends EventEmitter {
       .run(state, result == null ? null : encode(result), nowISO(), id);
     const updated = this.getTask(id);
     this.appendEvent('task', id, `task.${state}.v1`, actor, id, { result: updated.result, previous_state: task.state });
+    return updated;
+  }
+
+  updateTaskSpecification(id, specification, actor = 'hub:scheduler') {
+    const task = this.getTask(id);
+    invariant(task, 'WS_NOT_FOUND', 'Task not found.', 404);
+    invariant(specification && typeof specification === 'object' && !Array.isArray(specification),
+      'WS_VALIDATION', 'Task specification must be an object.');
+    this.db.prepare('UPDATE tasks SET specification_json = ?, updated_at = ? WHERE id = ?')
+      .run(encode(specification), nowISO(), id);
+    const updated = this.getTask(id);
+    this.appendEvent('task', id, 'task.updated.v1', actor, id, {
+      previous_specification: task.specification,
+      specification: updated.specification,
+    });
     return updated;
   }
 
@@ -1546,12 +1718,21 @@ export class HubDatabase extends EventEmitter {
       ORDER BY global_sequence LIMIT ?`).all(...args).map(eventRow);
   }
 
-  createOutbox(nodeId, commandType, payload) {
-    const item = { id: makeId('cmd'), node_id: nodeId, command_type: commandType, payload, state: 'pending', created_at: nowISO() };
-    this.db.prepare(`INSERT INTO outbox
-      (id, node_id, command_type, payload_json, state, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(item.id, nodeId, commandType, encode(payload), item.state, item.created_at);
-    return item;
+  getOutbox(id) {
+    const row = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(id);
+    return row ? {
+      ...row,
+      payload: decode(row.payload_json, {}),
+      result: decode(row.result_json),
+    } : null;
+  }
+
+  createOutbox(nodeId, commandType, payload, id = makeId('cmd')) {
+    const createdAt = nowISO();
+    this.db.prepare(`INSERT OR IGNORE INTO outbox
+      (id, node_id, command_type, payload_json, state, created_at) VALUES (?, ?, ?, ?, 'pending', ?)`)
+      .run(id, nodeId, commandType, encode(payload), createdAt);
+    return this.getOutbox(id);
   }
 
   markOutboxSent(id, epoch) {
@@ -1566,7 +1747,7 @@ export class HubDatabase extends EventEmitter {
 
   pendingOutbox(nodeId) {
     return this.db.prepare(`SELECT * FROM outbox WHERE node_id = ? AND state IN ('pending','sent') ORDER BY created_at`)
-      .all(nodeId).map((row) => ({ ...row, payload: decode(row.payload_json, {}) }));
+      .all(nodeId).map((row) => ({ ...row, payload: decode(row.payload_json, {}), result: decode(row.result_json) }));
   }
 
   audit({ actorId, action, targetType, targetId, projectId = null, decision = 'allowed', previousState = null, newState = null, traceId = makeId('trc') }) {
@@ -1646,11 +1827,12 @@ export class HubDatabase extends EventEmitter {
   countSummary() {
     const value = (sql, ...args) => Number(this.db.prepare(sql).get(...args).n || 0);
     return {
-      projects_active: value('SELECT COUNT(*) AS n FROM projects'),
-      tasks_running: value("SELECT COUNT(*) AS n FROM tasks WHERE state = 'running'"),
+      projects_active: value('SELECT COUNT(*) AS n FROM projects WHERE archived_at IS NULL'),
+      projects_archived: value('SELECT COUNT(*) AS n FROM projects WHERE archived_at IS NOT NULL'),
+      tasks_running: value("SELECT COUNT(*) AS n FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.state = 'running' AND p.archived_at IS NULL"),
       awaiting_approval: value('SELECT COUNT(*) AS n FROM attention_items WHERE resolved_at IS NULL'),
       nodes_offline: value("SELECT COUNT(*) AS n FROM nodes WHERE status = 'offline'"),
-      agents_active: value("SELECT COUNT(*) AS n FROM agent_instances WHERE state IN ('ready','busy','starting')"),
+      agents_active: value("SELECT COUNT(*) AS n FROM agent_instances a JOIN projects p ON p.id = a.project_id WHERE a.state IN ('ready','busy','starting','stopping') AND p.archived_at IS NULL"),
     };
   }
 }

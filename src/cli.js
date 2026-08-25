@@ -7,6 +7,8 @@ import { Hub } from './hub/hub.js';
 import { NodeDaemon } from './node/node-daemon.js';
 import { ensurePrivateFile, generateNodeIdentity, signNodeHello } from './lib/security.js';
 import { makeId } from './lib/ids.js';
+import { hubSynchronizedTimestamp } from './lib/hub-clock.js';
+import { agentLaunchArguments } from './lib/agent-profile.js';
 import { inferProjectContext } from './lib/project-policy.js';
 import {
   installNodeUserService,
@@ -72,18 +74,22 @@ function loadNodeConfig(nodeStateDir) {
   return JSON.parse(fs.readFileSync(path.join(nodeStateDir, 'config.json'), 'utf8'));
 }
 
+export function existingNodeRoots(roots = []) {
+  if (!Array.isArray(roots)) return [];
+  return roots.filter((root) => {
+    try {
+      return fs.statSync(root?.path)?.isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
 function logJSON(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-export async function hubSynchronizedTimestamp(hubURL, fetchImpl = fetch) {
-  const response = await fetchImpl(new URL('/healthz', hubURL));
-  if (!response.ok) throw new Error(`Could not synchronize with the hub clock: HTTP ${response.status}`);
-  const health = await response.json();
-  const timestamp = Date.parse(health.time);
-  if (!Number.isFinite(timestamp)) throw new Error('Could not synchronize with the hub clock: invalid health timestamp');
-  return timestamp;
-}
+export { hubSynchronizedTimestamp } from './lib/hub-clock.js';
 
 function quickAccessURL(url, ownerToken) {
   const value = new URL(url);
@@ -123,7 +129,7 @@ export function resolveAgentProfile(options = {}) {
     name: path.basename(explicit).toLowerCase().includes('codex') ? 'Codex' : 'Primary terminal',
     adapterKind: 'pty',
     executable: explicit,
-    arguments: parseAgentArguments(options['agent-args']),
+    arguments: agentLaunchArguments(explicit, parseAgentArguments(options['agent-args'])),
   };
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/bash';
   return {
@@ -304,12 +310,22 @@ async function attachNodeRoot(options) {
   });
   if (!response.ok) throw new Error(`Project attachment failed: ${await response.text()}`);
   const result = await response.json();
+  const retainedRoots = existingNodeRoots(config.roots || []);
   writeNodeConfig(nodeStateDir, {
     ...config,
     hubURL: hub,
-    roots: [...(config.roots || []).filter((candidate) => candidate.id !== root.id), root],
+    roots: [...retainedRoots.filter((candidate) => candidate.id !== root.id), root],
   });
-  logJSON({ attached: true, node_id: identity.nodeId, root, agent_id: result.agent_id, state_dir: nodeStateDir });
+  logJSON({
+    attached: true,
+    node_id: identity.nodeId,
+    root,
+    removed_stale_root_ids: (config.roots || [])
+      .filter((candidate) => !retainedRoots.some((retained) => retained.id === candidate.id))
+      .map((candidate) => candidate.id),
+    agent_id: result.agent_id,
+    state_dir: nodeStateDir,
+  });
 }
 
 async function runNode(options) {
@@ -375,6 +391,22 @@ function showOwnerToken(options) {
   process.stdout.write(`${fs.readFileSync(tokenPath, 'utf8').trim()}\n`);
 }
 
+function showMetaSpiderPrompt(options) {
+  const repository = options.repository || 'https://github.com/MurrellGroup/WebSpider';
+  const workspace = path.resolve(options.workspace || process.cwd());
+  process.stdout.write(`You are the Meta-Spider for WebSpider: a user-invoked, break-glass maintainer outside the WebSpider agent hierarchy.
+
+Repository: ${repository}
+Maintenance workspace: ${workspace}
+
+Work only inside that maintenance workspace, except for per-user installation and package-manager side effects needed to build or test WebSpider. Read every applicable AGENTS.md before acting. Keep the WebSpider source clone separate from any directory used as a live test project.
+
+Your job is to install, upgrade, diagnose, recover, test, or repair WebSpider itself when I ask. You are not the Master Spider and do not perform ordinary portfolio/project work. Do not routinely prod, supervise, schedule work for, or converse with the Master. Reach into a Master or worker session only when I explicitly request diagnosis/repair or when a bounded interaction is necessary to validate that repair. Preserve durable identities and user work, make the narrowest relevant changes, verify the result, and then hand normal operation back to me and the Master. Ask me before using sudo or expanding beyond the selected WebSpider directory.
+
+Start by cloning or inspecting the repository, reading docs/META_SPIDER.md and the repository instructions, and reporting the current installation/service state before making changes.
+`);
+}
+
 function serviceCommand(action, options) {
   const executable = path.resolve(options.executable || process.env.WEBSPIDER_EXECUTABLE || process.argv[1]);
   const stateDir = path.resolve(options['state-dir'] || defaultStateDir());
@@ -421,6 +453,7 @@ function help() {
   process.stdout.write(`  webspider node [--state-dir PATH]\n`);
   process.stdout.write(`  webspider token create --hub URL --owner-token TOKEN [--name NAME]\n`);
   process.stdout.write(`  webspider auth token [--state-dir PATH]\n`);
+  process.stdout.write(`  webspider meta-spider prompt [--workspace PATH] [--repository URL]\n`);
   process.stdout.write(`  webspider service install --user [--listen HOST:PORT] [--public-base-url URL] [--workspace PATH] [--state-dir PATH]\n`);
   process.stdout.write(`  webspider service install-node --user [--state-dir PATH]\n`);
   process.stdout.write(`  webspider service status\n`);
@@ -440,6 +473,7 @@ export async function main(argv) {
   if (command === 'node') return runNode(options);
   if (command === 'token' && positional[1] === 'create') return createJoinToken(options);
   if (command === 'auth' && positional[1] === 'token') return showOwnerToken(options);
+  if (command === 'meta-spider' && positional[1] === 'prompt') return showMetaSpiderPrompt(options);
   if (command === 'service') return serviceCommand(positional[1], options);
   if (command === 'doctor') return doctor(options);
   if (['help', '--help', '-h'].includes(command)) return help();

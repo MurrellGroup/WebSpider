@@ -285,6 +285,21 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .policy-details { border-top: 1px solid var(--line-soft); padding-top: 11px; }
 .policy-details > summary { color: var(--mint); cursor: pointer; font-size: 10px; }
 .policy-details > .markdown-body { margin-top: 14px; padding: 14px; max-height: 430px; overflow: auto; background: #0b0e14; border-radius: 8px; font-size: 11px; }
+.instruction-card { max-width: 860px; margin: 0 auto; }
+.instruction-editor { display: grid; gap: 9px; padding: 16px; }
+.instruction-editor > label { font-size: 11px; font-weight: 650; }
+.instruction-editor textarea { width: 100%; min-height: 150px; resize: vertical; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.instruction-actions { display: flex; align-items: center; gap: 14px; }
+.instruction-actions > span { color: var(--muted); font-size: 10px; }
+.instruction-actions > div { display: flex; gap: 8px; margin-left: auto; }
+.instruction-card > .policy-details { margin: 0 16px 14px; }
+.archived-list { display: grid; }
+.archived-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 16px; min-height: 68px; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }
+.archived-row:last-child { border-bottom: 0; }
+.archived-row > div:first-child { min-width: 0; display: grid; gap: 5px; }
+.archived-row strong, .archived-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archived-row small, .archived-row > span { color: var(--muted); font-size: 10px; }
+.archived-row > div:last-child { display: flex; gap: 8px; }
 .empty.compact { min-height: 130px; }
 
 .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -376,9 +391,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .tabs { padding: 0 9px; }
   .file-layout { grid-template-columns: 1fr; }
   .notes-page { grid-template-columns: 1fr; }
+  .archived-row { grid-template-columns: 1fr; align-items: stretch; }
+  .archived-row > div:last-child { justify-content: flex-end; }
   .notes-list { max-height: 190px; }
   .note-editor { min-height: 560px; }
   .note-editor-head { align-items: stretch; flex-direction: column; }
+  .instruction-actions { align-items: stretch; flex-direction: column; }
+  .instruction-actions > div { justify-content: flex-end; margin-left: 0; flex-wrap: wrap; }
   .preview-pane { min-height: 380px; }
   .metadata-grid { grid-template-columns: 120px 1fr; }
   .terminal-shell { min-height: calc(100vh - 180px); }

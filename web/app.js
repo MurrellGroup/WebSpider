@@ -11,7 +11,9 @@ const state = {
   session: null,
   summary: {},
   projects: [],
+  archivedProjects: [],
   agents: [],
+  archivedAgents: [],
   nodes: [],
   tasks: [],
   attention: [],
@@ -25,6 +27,7 @@ const state = {
   eventSocket: null,
   terminalSocket: null,
   terminalLease: null,
+  terminalLeaseRequested: false,
   terminalSequence: 0,
   terminalHeartbeat: null,
   terminalEmulator: null,
@@ -38,6 +41,7 @@ const state = {
   terminalPendingInput: [],
   terminalInputBuffer: '',
   terminalInputTimer: null,
+  terminalCompositionTimer: null,
   terminalText: '',
   terminalView: 'terminal',
   terminalInputMode: 'direct',
@@ -122,6 +126,12 @@ function friendlyError(error) {
     WS_ROOT_REVOKED: 'The workspace moved or changed identity. Reconnect the project root before continuing.',
     WS_PREVIEW_UNSAFE: 'This file is download-only because rendering it here could execute active content.',
     WS_VERSION_MISMATCH: 'The portal and running hub are different versions. Restart the WebSpider hub service.',
+    WS_INSTRUCTION_REVISION_CONFLICT: 'These instructions changed in another session. Reload and review before saving.',
+    WS_POLICY_REVISION_CONFLICT: 'Global instructions changed in another session. Reload and review before saving.',
+    WS_PROJECT_ACTIVE: 'Stop project agents and finish or cancel active tasks first.',
+    WS_PROJECT_PROTECTED: 'The Master Spider project is protected.',
+    WS_PROJECT_ARCHIVED: 'Restore this project before using it.',
+    WS_CONFIRMATION_REQUIRED: 'The project name did not match.',
   };
   return messages[error?.code] || error?.message || 'WebSpider could not complete that action.';
 }
@@ -202,9 +212,12 @@ function closeTerminal() {
   if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
   state.terminalHeartbeat = null;
   state.terminalLease = null;
+  state.terminalLeaseRequested = false;
   state.terminalPendingInput = [];
   clearTimeout(state.terminalInputTimer);
   state.terminalInputTimer = null;
+  clearTimeout(state.terminalCompositionTimer);
+  state.terminalCompositionTimer = null;
   state.terminalInputBuffer = '';
   state.terminalInputSubscription?.dispose();
   state.terminalInputSubscription = null;
@@ -234,10 +247,12 @@ async function loadData() {
     showVersionMismatch(health.version);
     throw Object.assign(new Error(`Portal ${PORTAL_VERSION} requires hub ${PORTAL_VERSION}; running hub is ${health.version || 'unknown'}.`), { code: 'WS_VERSION_MISMATCH' });
   }
-  const [summary, projects, agents, nodes, tasks, attention, notes] = await Promise.all([
+  const [summary, projects, archivedProjects, agents, archivedAgents, nodes, tasks, attention, notes] = await Promise.all([
     api('/api/v1/summary'),
     api('/api/v1/projects'),
+    api('/api/v1/projects?archived=only'),
     api('/api/v1/agent-instances'),
+    api('/api/v1/agent-instances?archived=only'),
     api('/api/v1/nodes'),
     api('/api/v1/tasks'),
     api('/api/v1/attention'),
@@ -246,7 +261,9 @@ async function loadData() {
   Object.assign(state, {
     summary,
     projects: projects.projects,
+    archivedProjects: archivedProjects.projects,
     agents: agents.agents,
+    archivedAgents: archivedAgents.agents,
     nodes: nodes.nodes,
     tasks: tasks.tasks,
     attention: attention.items,
@@ -359,6 +376,7 @@ async function renderProject(projectId) {
     .filter((agent) => agent.project_id === project.id)
     .sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at));
   const primaryAgent = agents.find((agent) => agent.orchestration_role === 'main') || agents[0] || null;
+  const canArchive = !agents.some((agent) => agent.orchestration_role === 'main');
   const tasks = state.tasks.filter((task) => task.project_id === project.id);
   const [policy, artifacts, accountUsage] = await Promise.all([
     api(`/api/v1/projects/${encodeURIComponent(project.id)}/policy`),
@@ -368,7 +386,7 @@ async function renderProject(projectId) {
   const running = tasks.filter((task) => ['running', 'runnable'].includes(task.state));
   const completed = tasks.filter((task) => task.state === 'succeeded');
   $('#main-view').innerHTML = `<div class="page">
-    ${pageHeader(project.name, project.description || 'Persistent project workspace and worker state', `${primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open agent</button>` : `<button class="primary" data-action="connect-project" data-project-id="${h(project.id)}">Connect worker</button>`}`)}
+    ${pageHeader(project.name, project.description || 'Persistent project workspace and worker state', `${primaryAgent ? `<button class="primary" data-agent-id="${h(primaryAgent.id)}">Open agent</button>` : `<button class="primary" data-action="connect-project" data-project-id="${h(project.id)}">Connect worker</button>`}${canArchive ? `<button data-action="archive-project" data-project-id="${h(project.id)}">Archive</button>` : ''}`)}
     <div class="page-content project-workspace">
       <section class="steer-card">
         <div><p class="eyebrow">STEER THE OUTCOME</p><h2>What should move forward?</h2><p>Give the goal at the level you care about. The agent inherits the project agreement, inspects existing work, and resolves routine implementation choices.</p></div>
@@ -386,6 +404,50 @@ async function renderProject(projectId) {
   history.replaceState(null, '', `#/projects/${encodeURIComponent(project.id)}`);
 }
 
+function renderArchivedProjects() {
+  state.selectedProject = null;
+  state.selectedAgent = null;
+  closeTerminal();
+  renderSidebar();
+  const rows = state.archivedProjects.map((project) => {
+    const agents = state.archivedAgents.filter((agent) => agent.project_id === project.id);
+    const latest = agents.slice().sort((left, right) => new Date(right.last_activity_at) - new Date(left.last_activity_at))[0];
+    return `<article class="archived-row">
+      <div><strong>${h(project.name)}</strong><small>Archived ${h(formatTime(project.archived_at, true))}${latest ? ` · ${h(latest.node_name)} · ${h(latest.state)}` : ''}</small></div>
+      <span>${agents.length} agent${agents.length === 1 ? '' : 's'}</span>
+      <div><button data-action="restore-project" data-project-id="${h(project.id)}">Restore</button><button class="danger" data-action="delete-project" data-project-id="${h(project.id)}">Delete permanently</button></div>
+    </article>`;
+  }).join('');
+  $('#main-view').innerHTML = `<div class="page">
+    ${pageHeader('Archived projects', 'Hidden from the active portfolio; workspace files remain untouched')}
+    <div class="page-content"><section class="panel"><div class="panel-header"><h2>Archive</h2><span>${state.archivedProjects.length} projects</span></div><div class="archived-list">${rows || '<div class="empty"><div><strong>No archived projects</strong><p>Archived projects will appear here and can be restored.</p></div></div>'}</div></section></div>
+  </div>`;
+  history.replaceState(null, '', '#/archived');
+}
+
+async function renderWorkerInstructions() {
+  state.selectedProject = null;
+  state.selectedAgent = null;
+  closeTerminal();
+  renderSidebar();
+  const system = await api('/api/v1/system/policy');
+  const instructions = system.policy.requested_instructions?.workers || [];
+  const runningWorkers = state.agents.filter((agent) => agent.orchestration_role !== 'main'
+    && ['ready', 'busy'].includes(agent.state));
+  $('#main-view').innerHTML = `<div class="page">
+    ${pageHeader('All sub-spiders', 'Worker-only instructions; the Master Spider does not inherit this text')}
+    <div class="page-content"><section class="panel instruction-card">
+      <div class="panel-header"><h2>Shared worker instructions</h2><span>system r${h(system.revision)}</span></div>
+      <form id="worker-instructions-form" class="instruction-editor" data-revision="${h(system.revision)}">
+        <label for="worker-global-instructions">One compact instruction per line</label>
+        <textarea id="worker-global-instructions" name="instructions" maxlength="4000" placeholder="For example: return benchmark results as CSV.">${h(instructions.join('\n'))}</textarea>
+        <div class="instruction-actions"><span>Inherited by every registered worker on its next launch. ${runningWorkers.length} worker${runningWorkers.length === 1 ? '' : 's'} currently running.</span><div><button type="submit" name="apply" value="save">Save</button><button type="submit" class="primary" name="apply" value="restart">Save & restart workers</button></div></div>
+      </form>
+    </section></div>
+  </div>`;
+  history.replaceState(null, '', '#/sub-spider-instructions');
+}
+
 function renderEventRows(events) {
   if (!events.length) return '<div class="empty"><div><strong>No events yet</strong><p>Agent, task, message, and node transitions will appear here.</p></div></div>';
   return events.map((event) => `<div class="event-row">
@@ -395,7 +457,7 @@ function renderEventRows(events) {
 }
 
 function agentTabs() {
-  const primary = ['terminal', 'files', 'conversation', 'artifacts'];
+  const primary = ['terminal', 'instructions', 'files', 'conversation', 'artifacts'];
   const secondary = ['activity', 'tasks', 'metadata'];
   const button = (tab) => `<button class="${state.tab === tab ? 'selected' : ''}" data-tab="${tab}">${tab[0].toUpperCase()}${tab.slice(1)}</button>`;
   return `${primary.map(button).join('')}<details class="tab-more" ${secondary.includes(state.tab) ? 'open' : ''}><summary>More</summary><div>${secondary.map(button).join('')}</div></details>`;
@@ -427,6 +489,7 @@ async function renderAgentTab() {
   if (state.tab === 'conversation') return renderConversation(agent);
   if (state.tab === 'activity') return renderActivity(agent);
   if (state.tab === 'terminal') return renderTerminal(agent);
+  if (state.tab === 'instructions') return renderInstructions(agent);
   if (state.tab === 'files') return renderFiles(agent);
   if (state.tab === 'artifacts') return renderArtifacts(agent);
   if (state.tab === 'tasks') return renderAgentTasks(agent);
@@ -497,10 +560,30 @@ function applyTerminalInputMode() {
 
 function submitTerminalComposition(text) {
   const normalized = String(text || '').replace(/\r\n?/g, '\n');
-  if (!normalized) return;
-  const enter = state.terminalKeyboardProtocol ? kittySequence(13) : '\r';
+  if (!normalized || state.terminalCompositionTimer) return false;
   const payload = state.terminalBracketedPaste ? `\u001b[200~${normalized}\u001b[201~` : normalized;
-  transmitTerminalInput(`${payload}${enter}`);
+  const payloadBytes = new TextEncoder().encode(payload).length;
+  const settleMilliseconds = Math.min(1_000, 150 + (Math.ceil(payloadBytes / 4_096) * 25));
+  transmitTerminalInput(payload);
+  state.terminalCompositionTimer = setTimeout(() => {
+    state.terminalEmulator?.focus();
+    queueTerminalInput('\r');
+    state.terminalCompositionTimer = setTimeout(() => {
+      state.terminalCompositionTimer = null;
+      const form = $('#terminal-compose-form');
+      const textarea = $('#terminal-compose');
+      const button = form?.querySelector('button[type="submit"]');
+      if (textarea) textarea.readOnly = false;
+      if (button) button.disabled = false;
+      textarea?.focus();
+    }, 75);
+  }, settleMilliseconds);
+  const form = $('#terminal-compose-form');
+  const textarea = $('#terminal-compose');
+  const button = form?.querySelector('button[type="submit"]');
+  if (textarea) textarea.readOnly = true;
+  if (button) button.disabled = true;
+  return true;
 }
 
 function updateTerminalReading(immediate = false) {
@@ -522,6 +605,7 @@ function transmitTerminalInput(data) {
   if (!data) return;
   if (!state.terminalLease || state.terminalSocket?.readyState !== WebSocket.OPEN) {
     state.terminalPendingInput.push(data);
+    requestTerminalLease();
     return;
   }
   state.terminalSocket.send(JSON.stringify({
@@ -530,6 +614,14 @@ function transmitTerminalInput(data) {
     lease_epoch: state.terminalLease.lease_epoch,
     data: bytesToBase64(new TextEncoder().encode(data)),
   }));
+}
+
+function requestTerminalLease() {
+  if (state.terminalLease || state.terminalLeaseRequested || state.terminalSocket?.readyState !== WebSocket.OPEN) return;
+  state.terminalLeaseRequested = true;
+  const button = $('#terminal-control');
+  if (button) button.textContent = 'Requesting control';
+  state.terminalSocket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
 }
 
 function queueTerminalInput(data) {
@@ -644,7 +736,7 @@ async function renderTerminal(agent) {
   if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
     <div class="terminal-session-tabs">${state.terminals.map((item) => `<button class="${item.id === terminal.id ? 'selected' : ''}" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i>${h(item.kind === 'primary_agent' ? agent.title || 'Agent' : item.label)}</button>`).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal">+</button>${terminal.kind === 'shell_tab' ? '<button class="terminal-close" data-action="close-terminal" title="Close terminal">×</button>' : ''}</div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Connecting' : 'Not running'}</button>`}</div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="Write before sending to the terminal"></textarea><button class="primary" type="submit">Send</button></form>' : ''}
   </section>`;
@@ -686,7 +778,6 @@ async function renderTerminal(agent) {
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
-    if (frame.type === 'ATTACHED' && interactive) socket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
     if (frame.type === 'SNAPSHOT') {
       observeTerminalProtocol(frame.text || '');
       if (Number(frame.sequence || 0) >= state.terminalSequence) {
@@ -713,6 +804,7 @@ async function renderTerminal(agent) {
     }
     if (frame.type === 'LEASE_GRANTED') {
       state.terminalLease = frame.lease;
+      state.terminalLeaseRequested = false;
       $('#terminal-control').textContent = 'In Control';
       flushTerminalInput();
       transmitTerminalResize();
@@ -726,11 +818,22 @@ async function renderTerminal(agent) {
         }));
       }, 5_000);
     }
-    if (frame.type === 'ERROR') toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
+    if (frame.type === 'ERROR') {
+      if (['WS_TERMINAL_LEASE_REQUIRED', 'WS_TERMINAL_LEASE_STALE'].includes(frame.code)) {
+        state.terminalLease = null;
+        state.terminalLeaseRequested = false;
+        state.terminalPendingInput = [];
+        const button = $('#terminal-control');
+        if (button) button.textContent = 'Take control';
+      }
+      toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
+    }
   });
   socket.addEventListener('close', () => {
     if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
     state.terminalHeartbeat = null;
+    state.terminalLease = null;
+    state.terminalLeaseRequested = false;
     const button = $('#terminal-control');
     if (button) button.textContent = 'Reconnect';
   });
@@ -819,6 +922,21 @@ function renderTaskRows(tasks) {
 async function renderAgentTasks(agent) {
   const tasks = state.tasks.filter((task) => task.assigned_agent_instance_id === agent.id);
   $('#agent-content').innerHTML = `<section class="panel"><div class="panel-header"><h2>Agent tasks</h2><span>${tasks.length} total</span></div><div class="panel-body task-list">${renderTaskRows(tasks)}</div></section>`;
+}
+
+async function renderInstructions(agent) {
+  const policy = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/policy`);
+  const activeRevision = policy.effective?.agent_instruction_revision || 0;
+  $('#agent-content').innerHTML = `<section class="panel instruction-card">
+    <div class="panel-header"><h2>${agent.orchestration_role === 'main' ? 'Master' : 'Worker'} instructions</h2><span>saved r${h(policy.instruction_revision)} · active r${h(activeRevision)}</span></div>
+    <form id="agent-instructions-form" class="instruction-editor" data-revision="${h(policy.instruction_revision)}">
+      <label for="agent-custom-instructions">Custom instructions</label>
+      <textarea id="agent-custom-instructions" name="instructions" maxlength="4000" placeholder="A few durable preferences for this agent…">${h(policy.custom_instructions || '')}</textarea>
+      <div class="instruction-actions"><span>${policy.stale ? 'Saved changes need a restart.' : 'Active now.'} Keep this short; trust the agent’s judgment.</span><div><button type="submit" name="apply" value="save">Save</button><button type="submit" class="primary" name="apply" value="restart">Save & restart</button></div></div>
+    </form>
+    <details class="policy-details"><summary>Full instruction preview</summary><div class="markdown-body">${renderMarkdown(policy.preview)}</div></details>
+    ${policy.stale && policy.effective ? `<details class="policy-details"><summary>Currently active snapshot</summary><div class="markdown-body">${renderMarkdown(policy.effective.rendered_instructions)}</div></details>` : ''}
+  </section>`;
 }
 
 async function renderMetadata(agent) {
@@ -928,6 +1046,8 @@ async function routeFromHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (parts[0] === 'overview') return renderHome();
   if (parts[0] === 'home') return openMasterTerminal();
+  if (parts[0] === 'sub-spider-instructions') return renderWorkerInstructions();
+  if (parts[0] === 'archived') return renderArchivedProjects();
   if (parts[0] === 'notes') return renderNotes(parts[1] ? decodeURIComponent(parts[1]) : null);
   const agentIndex = parts.indexOf('agents');
   if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
@@ -971,6 +1091,8 @@ document.addEventListener('click', async (event) => {
   const terminalInputMode = event.target.closest('[data-terminal-input-mode]');
   if (terminalInputMode) {
     state.terminalInputMode = terminalInputMode.dataset.terminalInputMode;
+    const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+    if (state.terminalInputMode === 'direct' || terminal?.kind !== 'primary_agent') requestTerminalLease();
     applyTerminalInputMode();
     return;
   }
@@ -993,7 +1115,8 @@ document.addEventListener('click', async (event) => {
     if (file.dataset.fileKind === 'directory') { state.filePath = state.filePath ? `${state.filePath}/${file.dataset.fileName}` : file.dataset.fileName; return loadDirectory(); }
     return previewFile(file.dataset.fileName);
   }
-  const action = event.target.closest('[data-action]')?.dataset.action;
+  const actionTarget = event.target.closest('[data-action]');
+  const action = actionTarget?.dataset.action;
   if (!action) return;
   try {
     if (action === 'master') return openMasterTerminal();
@@ -1013,12 +1136,42 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
     if (action === 'show-nodes') return renderNodes();
+    if (action === 'show-worker-instructions') return renderWorkerInstructions();
+    if (action === 'show-archived') return renderArchivedProjects();
     if (action === 'show-notes') return renderNotes();
     if (action === 'show-audit') return renderAudit();
     if (action === 'show-tasks') return renderAllTasks();
     if (action === 'mobile-agents') return $('.sidebar').classList.toggle('mobile-open');
     if (action === 'show-attention') return $('#attention-panel').classList.toggle('mobile-open');
     if (action === 'show-more') return renderNodes();
+    if (action === 'archive-project') {
+      const project = state.projects.find((item) => item.id === actionTarget.dataset.projectId);
+      if (!project || !confirm(`Archive ${project.name}? It will be hidden but all WebSpider history will be kept.`)) return;
+      await api(`/api/v1/projects/${encodeURIComponent(project.id)}:archive`, { method: 'POST' });
+      await loadData();
+      toast(`${project.name} archived.`);
+      return renderArchivedProjects();
+    }
+    if (action === 'restore-project') {
+      const project = state.archivedProjects.find((item) => item.id === actionTarget.dataset.projectId);
+      if (!project) return;
+      await api(`/api/v1/projects/${encodeURIComponent(project.id)}:restore`, { method: 'POST' });
+      await loadData();
+      toast(`${project.name} restored.`);
+      return renderProject(project.id);
+    }
+    if (action === 'delete-project') {
+      const project = state.archivedProjects.find((item) => item.id === actionTarget.dataset.projectId);
+      if (!project) return;
+      const confirmation = prompt(`Permanently delete WebSpider's records for ${project.name}? Workspace files will not be touched.\n\nType the project name to confirm:`);
+      if (confirmation == null) return;
+      await api(`/api/v1/projects/${encodeURIComponent(project.id)}`, {
+        method: 'DELETE', body: { confirmation },
+      });
+      await loadData();
+      toast(`${project.name} deleted; workspace files were not touched.`);
+      return renderArchivedProjects();
+    }
     if (action === 'new-note') {
       const note = await api('/api/v1/notes', { method: 'POST', body: { title: 'Untitled note', content: '', visibility: 'private' } });
       await refreshNotes();
@@ -1037,7 +1190,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'stop-agent') { await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}:stop`, { method: 'POST' }); toast('Stop requested'); await loadData(); return renderAgent(state.selectedAgent.id, state.tab); }
     if (action === 'take-control') {
       if (!state.terminalSocket || state.terminalSocket.readyState !== WebSocket.OPEN) return renderTerminal(state.selectedAgent);
-      state.terminalSocket.send(JSON.stringify({ type: 'LEASE_REQUEST' }));
+      requestTerminalLease();
     }
     if (action === 'promote-artifact') {
       if (!state.previewPath) return;
@@ -1054,10 +1207,27 @@ document.addEventListener('submit', async (event) => {
   if (event.target.id === 'terminal-compose-form') {
     event.preventDefault();
     const textarea = $('#terminal-compose');
-    submitTerminalComposition(textarea?.value || '');
-    if (textarea) {
+    const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+    if (terminal?.kind === 'primary_agent') {
+      const message = textarea?.value || '';
+      if (!message) return;
+      const button = event.target.querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        await api(`/api/v1/threads/${encodeURIComponent(state.selectedAgent.active_thread_id)}/messages`, {
+          method: 'POST',
+          headers: { 'idempotency-key': randomIdentifier() },
+          body: { parts: [{ type: 'text', text: message }], delivery_role: 'user', wake_policy: 'ensure_running' },
+        });
+        textarea.value = '';
+        textarea.focus();
+      } catch (error) { toast(friendlyError(error), true); }
+      finally { button.disabled = false; }
+      return;
+    }
+    const submitted = submitTerminalComposition(textarea?.value || '');
+    if (textarea && submitted) {
       textarea.value = '';
-      textarea.focus();
     }
     return;
   }
@@ -1116,6 +1286,62 @@ document.addEventListener('submit', async (event) => {
       state.selectedTerminalId = terminal.id;
       return renderTerminal(state.selectedAgent);
     } catch (error) { toast(friendlyError(error), true); }
+    return;
+  }
+  if (event.target.id === 'agent-instructions-form') {
+    event.preventDefault();
+    const agentId = state.selectedAgent.id;
+    const form = new FormData(event.target);
+    const restart = event.submitter?.value === 'restart';
+    const buttons = [...event.target.querySelectorAll('button[type="submit"]')];
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      await api(`/api/v1/agent-instances/${encodeURIComponent(agentId)}/instructions`, {
+        method: 'PATCH',
+        body: {
+          instructions: form.get('instructions'),
+          expected_revision: Number(event.target.dataset.revision),
+        },
+      });
+      if (restart) await api(`/api/v1/agent-instances/${encodeURIComponent(agentId)}:restart`, { method: 'POST' });
+      await loadData();
+      toast(restart ? 'Instructions saved; agent restarted.' : 'Instructions saved; restart when ready.');
+      return renderAgent(agentId, 'instructions');
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { buttons.forEach((button) => { button.disabled = false; }); }
+    return;
+  }
+  if (event.target.id === 'worker-instructions-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const restart = event.submitter?.value === 'restart';
+    const instructions = String(form.get('instructions') || '').split(/\r?\n/)
+      .map((line) => line.trim()).filter(Boolean);
+    const buttons = [...event.target.querySelectorAll('button[type="submit"]')];
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      await api('/api/v1/system/policy', {
+        method: 'PATCH',
+        body: {
+          expected_revision: Number(event.target.dataset.revision),
+          reason: 'Owner updated shared sub-spider instructions in the portal.',
+          patch: { requested_instructions: { workers: instructions } },
+        },
+      });
+      let restarted = 0;
+      if (restart) {
+        const workers = state.agents.filter((agent) => agent.orchestration_role !== 'main'
+          && ['ready', 'busy'].includes(agent.state));
+        for (const worker of workers) {
+          await api(`/api/v1/agent-instances/${encodeURIComponent(worker.id)}:restart`, { method: 'POST' });
+          restarted += 1;
+        }
+        await loadData();
+      }
+      toast(restart ? `Instructions saved; ${restarted} worker${restarted === 1 ? '' : 's'} restarted.` : 'Sub-spider instructions saved for future launches.');
+      return renderWorkerInstructions();
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { buttons.forEach((button) => { button.disabled = false; }); }
     return;
   }
   if (event.target.id === 'login-form') {

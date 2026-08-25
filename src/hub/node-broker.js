@@ -1,7 +1,22 @@
 import { EventEmitter } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 import { verifyNodeHello } from '../lib/security.js';
+
+const TRANSIENT_COMMANDS = new Set([
+  'terminal.input',
+  'terminal.resize',
+  'terminal.snapshot',
+]);
+
+function replayableCommand(commandType) {
+  return !TRANSIENT_COMMANDS.has(commandType) && !commandType.startsWith('files.');
+}
+
+function durableCommandId(commandType, idempotencyKey) {
+  const digest = createHash('sha256').update(commandType).update('\0').update(String(idempotencyKey)).digest('base64url');
+  return `cmd_${digest.slice(0, 40)}`;
+}
 
 export class NodeBroker extends EventEmitter {
   constructor(database) {
@@ -46,6 +61,7 @@ export class NodeBroker extends EventEmitter {
       if (!authenticated) return;
       const current = this.connections.get(authenticated.nodeId);
       if (current?.connection === connection && current.epoch === authenticated.epoch) {
+        this.#rejectPending(authenticated.nodeId, authenticated.epoch);
         this.connections.delete(authenticated.nodeId);
         this.database.disconnectNode(authenticated.nodeId, authenticated.epoch);
         this.database.appendEvent('node', authenticated.nodeId, 'node.offline.v1', 'hub:connection', authenticated.nodeId, {
@@ -152,15 +168,52 @@ export class NodeBroker extends EventEmitter {
     return this.connections.get(nodeId)?.epoch || null;
   }
 
-  async request(nodeId, commandType, payload, { timeoutMs = 30_000 } = {}) {
-    const item = this.database.createOutbox(nodeId, commandType, payload);
+  async request(nodeId, commandType, payload, { timeoutMs = 30_000, idempotencyKey = null } = {}) {
+    const commandId = idempotencyKey == null ? undefined : durableCommandId(commandType, idempotencyKey);
+    const item = this.database.createOutbox(nodeId, commandType, payload, commandId);
+    if (item.state === 'acknowledged') return item.result;
+    if (item.state === 'failed') {
+      throw new WebSpiderError('WS_NODE_ERROR', item.failure_reason || 'Node command previously failed.', 500, { command_id: item.id });
+    }
     return this.#dispatch(item, timeoutMs);
   }
 
   async #dispatch(item, timeoutMs) {
+    const active = this.pending.get(item.id);
+    if (active) return active.promise;
     const state = this.connections.get(item.node_id);
-    if (!state) throw new WebSpiderError('WS_NODE_OFFLINE', 'Owning node is offline; command remains queued.', 503, { command_id: item.id });
+    if (!state) {
+      if (!replayableCommand(item.command_type)) {
+        this.database.markOutboxResult(item.id, null, 'Transient command was not queued while the node was offline.');
+      }
+      throw new WebSpiderError('WS_NODE_OFFLINE', replayableCommand(item.command_type)
+        ? 'Owning node is offline; command remains queued.'
+        : 'Owning node is offline; transient command was not queued.', 503, { command_id: item.id });
+    }
     this.database.markOutboxSent(item.id, state.epoch);
+    let resolvePending;
+    let rejectPending;
+    const promise = new Promise((resolve, reject) => {
+      resolvePending = resolve;
+      rejectPending = reject;
+    });
+    const timer = setTimeout(() => {
+      this.pending.delete(item.id);
+      if (!replayableCommand(item.command_type)) {
+        this.database.markOutboxResult(item.id, null, 'Timed out waiting for transient node command acknowledgement.');
+      }
+      rejectPending(new WebSpiderError('WS_NODE_OFFLINE', 'Timed out waiting for node command acknowledgement.', 504, { command_id: item.id }));
+    }, timeoutMs);
+    timer.unref?.();
+    this.pending.set(item.id, {
+      promise,
+      resolve: resolvePending,
+      reject: rejectPending,
+      timer,
+      nodeId: item.node_id,
+      epoch: state.epoch,
+      replayable: replayableCommand(item.command_type),
+    });
     state.connection.sendJSON({
       type: 'command',
       protocol_version: 1,
@@ -169,26 +222,27 @@ export class NodeBroker extends EventEmitter {
       command_type: item.command_type,
       payload: item.payload,
     });
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(item.id);
-        reject(new WebSpiderError('WS_NODE_OFFLINE', 'Timed out waiting for node command acknowledgement.', 504, { command_id: item.id }));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(item.id, { resolve, reject, timer });
-    });
+    return promise;
+  }
+
+  #rejectPending(nodeId, epoch) {
+    for (const [id, pending] of this.pending) {
+      if (pending.nodeId !== nodeId || pending.epoch !== epoch) continue;
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      if (!pending.replayable) this.database.markOutboxResult(id, null, 'Node disconnected before acknowledging transient command.');
+      pending.reject(new WebSpiderError('WS_NODE_OFFLINE', 'Node disconnected before acknowledging command.', 503, { command_id: id }));
+    }
   }
 
   async #replay(nodeId) {
     for (const row of this.database.pendingOutbox(nodeId)) {
-      if (this.pending.has(row.id)) continue;
+      if (!replayableCommand(row.command_type)) {
+        this.database.markOutboxResult(row.id, null, 'Transient command expired before the node reconnected.');
+        continue;
+      }
       try {
-        await this.#dispatch({
-          id: row.id,
-          node_id: row.node_id,
-          command_type: row.command_type,
-          payload: row.payload,
-        }, 30_000);
+        await this.#dispatch(row, 30_000);
       } catch (error) {
         if (error.code !== 'WS_NODE_OFFLINE') this.emit('error', error);
         break;

@@ -22,6 +22,14 @@ function defaultRun(command, args) {
   return spawnSync(command, args, { encoding: 'utf8' });
 }
 
+function serviceEnvironmentPath(executable, home, environmentPath) {
+  return [...new Set([
+    path.dirname(path.resolve(executable)),
+    path.join(path.resolve(home), '.local', 'bin'),
+    ...String(environmentPath || '/usr/local/bin:/usr/bin:/bin').split(path.delimiter),
+  ].filter(Boolean))].join(path.delimiter);
+}
+
 function requireSuccess(result, action) {
   if (result?.status === 0) return;
   const detail = String(result?.stderr || result?.stdout || result?.error?.message || '').trim();
@@ -158,6 +166,7 @@ export function installUserService({
   const resolvedExecutable = path.resolve(executable);
   const resolvedWorkspace = path.resolve(workspace);
   const resolvedState = path.resolve(stateDir);
+  const resolvedEnvironmentPath = serviceEnvironmentPath(resolvedExecutable, home, environmentPath);
   fs.mkdirSync(resolvedState, { recursive: true, mode: 0o700 });
 
   if (platform === 'linux') {
@@ -170,7 +179,7 @@ export function installUserService({
       stateDir: resolvedState,
       listen,
       publicBaseURL,
-      environmentPath,
+      environmentPath: resolvedEnvironmentPath,
     }), { mode: 0o600 });
     requireSuccess(run('loginctl', ['enable-linger', username]), 'Enabling boot-time user services');
     requireSuccess(run('systemctl', ['--user', 'daemon-reload']), 'Reloading the user service manager');
@@ -196,7 +205,7 @@ export function installUserService({
       stateDir: resolvedState,
       listen,
       publicBaseURL,
-      environmentPath,
+      environmentPath: resolvedEnvironmentPath,
     }), { mode: 0o600 });
     const domain = `gui/${uid}`;
     run('launchctl', ['bootout', domain, serviceFile]);
@@ -227,6 +236,7 @@ export function installNodeUserService({
 } = {}) {
   const resolvedExecutable = path.resolve(executable);
   const resolvedState = path.resolve(stateDir);
+  const resolvedEnvironmentPath = serviceEnvironmentPath(resolvedExecutable, home, environmentPath);
   fs.mkdirSync(resolvedState, { recursive: true, mode: 0o700 });
 
   if (platform === 'linux') {
@@ -236,7 +246,7 @@ export function installNodeUserService({
     fs.writeFileSync(serviceFile, renderSystemdNodeUnit({
       executable: resolvedExecutable,
       stateDir: resolvedState,
-      environmentPath,
+      environmentPath: resolvedEnvironmentPath,
     }), { mode: 0o600 });
     requireSuccess(run('loginctl', ['enable-linger', username]), 'Enabling boot-time user services');
     requireSuccess(run('systemctl', ['--user', 'daemon-reload']), 'Reloading the user service manager');
@@ -260,7 +270,7 @@ export function installNodeUserService({
     fs.writeFileSync(serviceFile, renderNodeLaunchAgent({
       executable: resolvedExecutable,
       stateDir: resolvedState,
-      environmentPath,
+      environmentPath: resolvedEnvironmentPath,
     }), { mode: 0o600 });
     const domain = `gui/${uid}`;
     run('launchctl', ['bootout', domain, serviceFile]);

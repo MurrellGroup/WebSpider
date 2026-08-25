@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hubSynchronizedTimestamp, resolveAgentProfile, writeNodeConfig } from '../src/cli.js';
+import {
+  existingNodeRoots,
+  resolveAgentProfile,
+  writeNodeConfig,
+} from '../src/cli.js';
 
 test('the default profile is a persistent login shell', () => {
   const profile = resolveAgentProfile();
@@ -20,6 +24,16 @@ test('one explicit agent command resolves without a full profile specification',
   assert.equal(profile.name, 'Codex');
   assert.equal(profile.executable, '/opt/tools/codex');
   assert.deepEqual(profile.arguments, ['--example']);
+});
+
+test('Codex agents default to unattended full access when no arguments are supplied', () => {
+  const profile = resolveAgentProfile({ 'agent-command': '/opt/tools/codex' });
+  assert.deepEqual(profile.arguments, [
+    '--ask-for-approval',
+    'never',
+    '--sandbox',
+    'danger-full-access',
+  ]);
 });
 
 test('agent arguments reject ambiguous shell text', () => {
@@ -42,25 +56,17 @@ test('node configuration updates preserve newly attached project roots', (t) => 
   assert.equal(fs.statSync(path.join(directory, 'config.json')).mode & 0o777, 0o600);
 });
 
-test('project attachment signatures use hub time instead of the worker clock', async () => {
-  let requestedURL;
-  const timestamp = await hubSynchronizedTimestamp('http://100.64.0.1:7340', async (url) => {
-    requestedURL = url.href;
-    return {
-      ok: true,
-      async json() { return { status: 'ok', time: '2026-08-25T08:09:10.123Z' }; },
-    };
-  });
-  assert.equal(requestedURL, 'http://100.64.0.1:7340/healthz');
-  assert.equal(timestamp, Date.parse('2026-08-25T08:09:10.123Z'));
-});
+test('node attachment retains existing directories and drops missing stale roots', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-node-roots-'));
+  const existing = path.join(directory, 'existing');
+  fs.mkdirSync(existing);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
-test('project attachment refuses an invalid hub clock response', async () => {
-  await assert.rejects(
-    () => hubSynchronizedTimestamp('http://100.64.0.1:7340', async () => ({
-      ok: true,
-      async json() { return { status: 'ok', time: 'not-a-time' }; },
-    })),
-    /invalid health timestamp/,
-  );
+  const roots = existingNodeRoots([
+    { id: 'awr_existing', path: existing },
+    { id: 'awr_stale', path: path.join(directory, 'missing') },
+    { id: 'awr_invalid' },
+  ]);
+
+  assert.deepEqual(roots.map((root) => root.id), ['awr_existing']);
 });

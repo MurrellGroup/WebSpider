@@ -40,6 +40,7 @@ test('Linux service installation enables a boot-persistent user service', (t) =>
   assert.match(unit, /KillMode=process/);
   assert.match(unit, /Research Project/);
   assert.match(unit, /--listen.*0\.0\.0\.0:7340/);
+  assert.match(unit, new RegExp(`${home.replaceAll('\\', '\\\\')}/\\.local/bin`));
   assert(calls.some((call) => call.join(' ') === 'loginctl enable-linger researcher'));
   assert(calls.some((call) => call.join(' ') === 'systemctl --user enable --now webspider.service'));
   assert(calls.some((call) => call.join(' ') === 'systemctl --user restart webspider.service'));
@@ -100,7 +101,9 @@ test('Linux worker service installation is boot-persistent and separately remova
     platform: 'linux', home, username: 'researcher', run,
   });
   assert.equal(result.boot_persistent, true);
-  assert.match(fs.readFileSync(result.service_file, 'utf8'), /webspider-node\.service|persistent worker node/);
+  const unit = fs.readFileSync(result.service_file, 'utf8');
+  assert.match(unit, /webspider-node\.service|persistent worker node/);
+  assert.match(unit, new RegExp(`${home.replaceAll('\\', '\\\\')}/\\.local/bin`));
   assert(calls.some((call) => call.join(' ') === 'systemctl --user enable --now webspider-node.service'));
   const removed = uninstallNodeUserService({ platform: 'linux', home, run });
   assert.equal(removed.removed, true);

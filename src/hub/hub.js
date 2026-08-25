@@ -12,6 +12,7 @@ import { contentDisposition, parsePositiveInt, readJSON, sendError, sendJSON } f
 import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecret, sha256, verifyNodeHello } from '../lib/security.js';
 import { makeId, nowISO, randomToken } from '../lib/ids.js';
 import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/project-policy.js';
+import { agentLaunchArguments } from '../lib/agent-profile.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIR = path.resolve(MODULE_DIR, '../../web');
@@ -23,10 +24,23 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'usage:write',
   'agents:read',
   'messages:write',
+  'documents:write',
+  'tasks:read',
+  'tasks:write',
+  'reminders:read:self',
+  'reminders:write:self',
   'portfolio:read',
   'notes:read:visible',
 ];
-const WORKER_AGENT_CONTROL_SCOPES = ['status:write:self'];
+const WORKER_AGENT_CONTROL_SCOPES = [
+  'status:write:self',
+  'tasks:read',
+  'tasks:write',
+  'reminders:read:self',
+  'reminders:write:self',
+  'documents:write',
+];
+const MAX_TIMER_DELAY_MS = 2_147_000_000;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -97,7 +111,10 @@ export class Hub {
     this.ownerToken = fs.readFileSync(this.ownerTokenPath, 'utf8').trim();
     this.database = new HubDatabase(path.join(stateDir, 'webspider.db'));
     this.broker = new NodeBroker(this.database);
+    this.agentRuntimes = new Map();
+    this.reminderTimers = new Map();
     this.router = new Router();
+    this.portalConnections = new Set();
     this.server = http.createServer((request, response) => this.#handleRequest(request, response));
     this.server.on('upgrade', (request, socket, head) => this.#handleUpgrade(request, socket, head));
     this.#registerRoutes();
@@ -106,7 +123,10 @@ export class Hub {
     this.database.on('event', (event) => {
       if (event.type === 'node.online.v1') {
         this.#reconcileNode(event.scope_id, event.payload?.runtime_inventory || [], event.payload?.connection_epoch)
-          .then(() => this.#drainDeliveries(event.scope_id))
+          .then(async () => {
+            await this.#drainDeliveries(event.scope_id);
+            await this.#drainTasks(event.scope_id);
+          })
           .catch((error) => this.#logError(error));
       }
     });
@@ -123,12 +143,18 @@ export class Hub {
     const address = this.server.address();
     const host = this.listenHost.includes(':') ? `[${this.listenHost}]` : this.listenHost;
     this.url = this.publicBaseURL || `http://${host}:${address.port}`;
+    this.#restoreReminders();
     return { url: this.url, ownerToken: this.ownerToken, address };
   }
 
   async close() {
+    for (const timer of this.reminderTimers.values()) clearTimeout(timer);
+    this.reminderTimers.clear();
+    const closed = new Promise((resolve) => this.server.close(() => resolve()));
+    for (const connection of this.portalConnections) connection.close(1001, 'Hub stopping');
     for (const state of this.broker.connections.values()) state.connection.close(1001, 'Hub stopping');
-    await new Promise((resolve) => this.server.close(() => resolve()));
+    this.server.closeAllConnections?.();
+    await closed;
     this.database.close();
   }
 
@@ -243,7 +269,11 @@ export class Hub {
       });
       return policy;
     });
-    route('GET', '/api/v1/projects', async () => ({ projects: this.database.listProjects() }));
+    route('GET', '/api/v1/projects', async (ctx) => {
+      const requested = ctx.url.searchParams.get('archived');
+      const archived = requested === 'only' ? 'archived' : requested === 'include' ? 'all' : 'active';
+      return { projects: this.database.listProjects({ archived }) };
+    });
     route('GET', '/api/v1/notes', async () => ({ notes: this.database.listNotes() }));
     route('POST', '/api/v1/notes', async (ctx) => {
       const body = await readJSON(ctx.request, 1_100_000);
@@ -314,6 +344,56 @@ export class Hub {
       const project = this.database.getProject(ctx.params.id);
       invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
       return project;
+    });
+    route('POST', '/api/v1/projects/:id:archive', async (ctx) => {
+      const previous = this.database.getProject(ctx.params.id);
+      const project = this.database.archiveProject(ctx.params.id, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'project.archive',
+        targetType: 'project',
+        targetId: project.id,
+        projectId: project.id,
+        previousState: { archived_at: previous.archived_at },
+        newState: { archived_at: project.archived_at },
+      });
+      return project;
+    });
+    route('POST', '/api/v1/projects/:id:restore', async (ctx) => {
+      const previous = this.database.getProject(ctx.params.id);
+      const project = this.database.restoreProject(ctx.params.id, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'project.restore',
+        targetType: 'project',
+        targetId: project.id,
+        projectId: project.id,
+        previousState: { archived_at: previous.archived_at },
+        newState: { archived_at: null },
+      });
+      return project;
+    });
+    route('DELETE', '/api/v1/projects/:id', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const project = this.database.getProject(ctx.params.id);
+      invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+      invariant(body.confirmation === project.name, 'WS_CONFIRMATION_REQUIRED', 'Type the exact project name to delete it.', 409);
+      for (const task of this.database.listTasks(project.id)) {
+        const timer = this.reminderTimers.get(task.id);
+        if (timer) clearTimeout(timer);
+        this.reminderTimers.delete(task.id);
+      }
+      const result = this.database.deleteArchivedProject(project.id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'project.delete',
+        targetType: 'project',
+        targetId: project.id,
+        decision: 'allowed_archived_metadata_delete',
+        previousState: { name: project.name, archived_at: project.archived_at },
+        newState: { deleted: true, workspace_files_deleted: false },
+      });
+      return result;
     });
     route('GET', '/api/v1/projects/:id/policy', async (ctx) => {
       const project = this.database.getProject(ctx.params.id);
@@ -460,7 +540,7 @@ export class Hub {
     }, { agentOnly: true, agentScopes: ['usage:write'] });
 
     route('GET', '/api/v1/agent-control/agents', async (ctx) => ({
-      agents: this.database.listAgents().map((agent) => ({
+      agents: this.database.listAgents().filter((agent) => !agent.project_archived_at).map((agent) => ({
         id: agent.id,
         title: agent.title,
         profile_name: agent.profile_name,
@@ -495,6 +575,168 @@ export class Hub {
         })),
       })),
     }), { agentOnly: true, agentScopes: ['portfolio:read'] });
+
+    route('GET', '/api/v1/agent-control/tasks', async (ctx) => {
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const tasks = this.database.listTasks().filter((task) => task.type === 'command');
+      return {
+        tasks: source.orchestration_role === 'main'
+          ? tasks
+          : tasks.filter((task) => task.assigned_agent_instance_id === source.id),
+      };
+    }, { agentOnly: true, agentScopes: ['tasks:read'] });
+
+    route('POST', '/api/v1/agent-control/tasks', async (ctx) => {
+      const body = await readJSON(ctx.request, 262_144);
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const target = this.database.getAgent(body.agent_id || source.id);
+      invariant(target, 'WS_NOT_FOUND', 'Target agent not found.', 404);
+      if (source.orchestration_role !== 'main') {
+        invariant(target.id === source.id, 'WS_FORBIDDEN', 'A worker can run detached tasks only on itself.', 403);
+      }
+      invariant(Array.isArray(body.argv) && body.argv.length > 0 && body.argv.length <= 256
+        && body.argv.every((argument) => typeof argument === 'string' && argument.length <= 65_536),
+      'WS_VALIDATION', 'argv must contain between 1 and 256 string arguments.');
+      const delaySeconds = Number(body.delay_seconds || 0);
+      invariant(Number.isInteger(delaySeconds) && delaySeconds >= 0 && delaySeconds <= 86_400,
+        'WS_VALIDATION', 'delay_seconds must be an integer between 0 and 86400.');
+      const title = body.title == null ? `Command on ${target.title || target.id}` : body.title;
+      invariant(typeof title === 'string' && title.trim().length > 0 && title.length <= 200,
+        'WS_VALIDATION', 'title must be a non-empty string of at most 200 characters.');
+      const notifyTarget = body.notify_target
+        || (body.notify_master === false ? 'none' : 'master');
+      invariant(['none', 'self', 'master'].includes(notifyTarget), 'WS_VALIDATION',
+        'notify_target must be none, self, or master.');
+      const completionMessage = body.completion_message == null ? '' : body.completion_message;
+      invariant(typeof completionMessage === 'string' && completionMessage.length <= 16_384,
+        'WS_VALIDATION', 'completion_message must be at most 16384 characters.');
+      if (body.root_id) {
+        const root = this.database.getRoot(body.root_id);
+        invariant(root?.agent_instance_id === target.id, 'WS_ROOT_NOT_FOUND', 'Task root is not assigned to the target agent.', 404);
+      }
+      const argv = delaySeconds > 0
+        ? ['/bin/sh', '-c', 'delay=$1; shift; sleep "$delay"; exec "$@"', 'webspider-delay', String(delaySeconds), ...body.argv]
+        : body.argv;
+      const task = this.database.createTask({
+        projectId: target.project_id,
+        type: 'command',
+        title: title.trim(),
+        specification: {
+          argv,
+          requested_argv: body.argv,
+          delay_seconds: delaySeconds,
+          root_id: body.root_id || undefined,
+          environment: {},
+          notify_target: notifyTarget,
+          completion_message: completionMessage.trim(),
+        },
+        assignedAgentInstanceId: target.id,
+        nodeId: target.node_id,
+        createdBy: ctx.principal.principal_id,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.task.create',
+        targetType: 'task',
+        targetId: task.id,
+        projectId: target.project_id,
+        decision: 'allowed_scoped_orchestration',
+        newState: {
+          agent_id: target.id,
+          delay_seconds: delaySeconds,
+          requested_argv: body.argv,
+          notify_target: notifyTarget,
+        },
+      });
+      queueMicrotask(() => this.#scheduleTask(task.id).catch((error) => this.#logError(error)));
+      return task;
+    }, { agentOnly: true, agentScopes: ['tasks:write'] });
+
+    route('GET', '/api/v1/agent-control/reminders', async (ctx) => ({
+      reminders: this.database.listTasks()
+        .filter((task) => task.type === 'reminder'
+          && task.assigned_agent_instance_id === ctx.principal.agent_instance_id),
+    }), { agentOnly: true, agentScopes: ['reminders:read:self'] });
+
+    route('POST', '/api/v1/agent-control/reminders', async (ctx) => {
+      const body = await readJSON(ctx.request, 65_536);
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const message = body.message;
+      invariant(typeof message === 'string' && message.trim().length > 0 && message.length <= 16_384,
+        'WS_VALIDATION', 'message must be a non-empty string of at most 16384 characters.');
+      const everySeconds = body.every_seconds == null ? null : Number(body.every_seconds);
+      invariant(everySeconds == null || (Number.isInteger(everySeconds) && everySeconds >= 1 && everySeconds <= 2_592_000),
+        'WS_VALIDATION', 'every_seconds must be an integer between 1 and 2592000.');
+      const delaySeconds = body.delay_seconds == null ? everySeconds : Number(body.delay_seconds);
+      invariant(Number.isInteger(delaySeconds) && delaySeconds >= 1 && delaySeconds <= 2_592_000,
+        'WS_VALIDATION', 'delay_seconds must be an integer between 1 and 2592000.');
+      const maxRuns = body.max_runs == null ? null : Number(body.max_runs);
+      invariant(maxRuns == null || (Number.isInteger(maxRuns) && maxRuns >= 1 && maxRuns <= 10_000),
+        'WS_VALIDATION', 'max_runs must be an integer between 1 and 10000.');
+      invariant(everySeconds != null || maxRuns == null || maxRuns === 1, 'WS_VALIDATION',
+        'max_runs greater than one requires every_seconds.');
+      const deliveryTarget = body.delivery_target || 'self';
+      invariant(['self', 'master'].includes(deliveryTarget), 'WS_VALIDATION',
+        'delivery_target must be self or master.');
+      const title = body.title == null ? `Reminder for ${source.title || source.id}` : body.title;
+      invariant(typeof title === 'string' && title.trim().length > 0 && title.length <= 200,
+        'WS_VALIDATION', 'title must be a non-empty string of at most 200 characters.');
+      const task = this.database.createTask({
+        projectId: source.project_id,
+        type: 'reminder',
+        title: title.trim(),
+        specification: {
+          message: message.trim(),
+          delivery_target: deliveryTarget,
+          next_run_at: new Date(Date.now() + delaySeconds * 1000).toISOString(),
+          repeat_every_seconds: everySeconds,
+          max_runs: maxRuns,
+          run_count: 0,
+        },
+        assignedAgentInstanceId: source.id,
+        nodeId: source.node_id,
+        createdBy: ctx.principal.principal_id,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.reminder.create',
+        targetType: 'task',
+        targetId: task.id,
+        projectId: source.project_id,
+        decision: 'allowed_self_hook',
+        newState: {
+          delivery_target: deliveryTarget,
+          next_run_at: task.specification.next_run_at,
+          repeat_every_seconds: everySeconds,
+          max_runs: maxRuns,
+        },
+      });
+      this.#armReminder(task);
+      return task;
+    }, { agentOnly: true, agentScopes: ['reminders:write:self'] });
+
+    route('POST', '/api/v1/agent-control/reminders/:id:cancel', async (ctx) => {
+      const task = this.database.getTask(ctx.params.id);
+      invariant(task?.type === 'reminder'
+        && task.assigned_agent_instance_id === ctx.principal.agent_instance_id,
+      'WS_NOT_FOUND', 'Self reminder not found.', 404);
+      invariant(['pending', 'runnable'].includes(task.state), 'WS_TASK_CONFLICT',
+        'Only an active reminder can be cancelled.', 409);
+      const timer = this.reminderTimers.get(task.id);
+      if (timer) clearTimeout(timer);
+      this.reminderTimers.delete(task.id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.reminder.cancel',
+        targetType: 'task',
+        targetId: task.id,
+        projectId: task.project_id,
+        decision: 'allowed_self_hook',
+      });
+      return this.database.setTaskState(task.id, 'cancelled', {
+        status: 'cancelled', summary: 'Reminder cancelled before its next delivery.',
+      }, ctx.principal.principal_id);
+    }, { agentOnly: true, agentScopes: ['reminders:write:self'] });
 
     route('GET', '/api/v1/agent-control/notes', async () => ({
       notes: this.database.listNotes({ visibility: 'master' }).map((note) => ({
@@ -539,7 +781,7 @@ export class Hub {
 
     route('POST', '/api/v1/agent-control/agents/:id/messages', async (ctx) => {
       const body = await readJSON(ctx.request, 262_144);
-      const target = this.database.getAgent(ctx.params.id);
+      const target = ctx.params.id === 'master' ? this.#masterAgent() : this.database.getAgent(ctx.params.id);
       invariant(target, 'WS_NOT_FOUND', 'Target agent not found.', 404);
       invariant(target.id !== ctx.principal.agent_instance_id, 'WS_FORBIDDEN', 'Use the current terminal to talk to this agent.', 403);
       invariant(typeof body.message === 'string' && body.message.trim().length > 0 && body.message.length <= 200_000,
@@ -571,11 +813,88 @@ export class Hub {
       return result;
     }, { agentOnly: true, agentScopes: ['messages:write'] });
 
+    route('POST', '/api/v1/agent-control/agents/:id/documents', async (ctx) => {
+      const body = await readJSON(ctx.request, 800_000);
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const target = ctx.params.id === 'master' ? this.#masterAgent() : this.database.getAgent(ctx.params.id);
+      invariant(target, 'WS_NOT_FOUND', 'Target agent not found.', 404);
+      if (source.orchestration_role !== 'main') {
+        invariant(target.orchestration_role === 'main', 'WS_FORBIDDEN',
+          'A worker can hand a document only to the Master.', 403);
+      }
+      const filename = body.filename;
+      invariant(typeof filename === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(filename)
+        && ['.txt', '.md', '.markdown'].includes(path.extname(filename).toLowerCase()),
+      'WS_VALIDATION', 'filename must be a safe .txt, .md, or .markdown basename.');
+      invariant(typeof body.data_base64 === 'string' && body.data_base64.length > 0
+        && body.data_base64.length <= 700_000 && /^[A-Za-z0-9+/]*={0,2}$/.test(body.data_base64),
+      'WS_VALIDATION', 'data_base64 must contain a text document of at most 512 KiB.');
+      const bytes = Buffer.from(body.data_base64, 'base64');
+      invariant(bytes.toString('base64') === body.data_base64, 'WS_VALIDATION', 'data_base64 is not canonical base64.');
+      invariant(bytes.length > 0 && bytes.length <= 512 * 1024,
+        'WS_REQUEST_TOO_LARGE', 'Document must contain between 1 byte and 512 KiB.', 413);
+      let decoded;
+      try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch {
+        throw new WebSpiderError('WS_VALIDATION', 'Document must be valid UTF-8 text.', 400);
+      }
+      invariant(!decoded.includes('\0'), 'WS_VALIDATION', 'Document must be UTF-8 text without NUL bytes.');
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      if (body.sha256 != null) invariant(body.sha256 === digest, 'WS_VALIDATION', 'Document checksum does not match.');
+      const instruction = body.instruction == null ? 'Read this document and carry out its authorized instructions.' : body.instruction;
+      invariant(typeof instruction === 'string' && instruction.trim().length > 0 && instruction.length <= 16_384,
+        'WS_VALIDATION', 'instruction must be a non-empty string of at most 16384 characters.');
+      const wakePolicy = body.wake_policy || 'ensure_running';
+      invariant(['ensure_running', 'queue_only', 'interrupt'].includes(wakePolicy), 'WS_VALIDATION', 'Invalid wake policy.');
+      const documentId = makeId('doc');
+      const relativePath = `.webspider/inbox/${documentId}-${filename}`;
+      const text = [
+        '[WebSpider document handoff]',
+        `Document ID: ${documentId}`,
+        `Filename: ${filename}`,
+        `SHA-256: ${digest}`,
+        `Local path: ${relativePath}`,
+        `Instruction: ${instruction.trim()}`,
+        'Read the immutable local inbox copy; do not reconstruct the document from this message.',
+      ].join('\n');
+      const result = this.database.createMessage({
+        threadId: target.active_thread_id,
+        actorId: ctx.principal.principal_id,
+        deliveryRole: 'user',
+        displaySender: `${source.title || source.profile_name || source.id} document via WebSpider`,
+        contentParts: [
+          { type: 'text', text },
+          {
+            type: 'document', document_id: documentId, filename, relative_path: relativePath,
+            sha256: digest, size_bytes: bytes.length, data_base64: bytes.toString('base64'),
+          },
+        ],
+        wakePolicy,
+        idempotencyKey: body.idempotency_key || makeId('idem'),
+        traceId: body.trace_id || makeId('trc'),
+        hopCount: 1,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.document.send',
+        targetType: 'agent_instance',
+        targetId: target.id,
+        projectId: target.project_id,
+        decision: source.orchestration_role === 'main' ? 'allowed_scoped_orchestration' : 'allowed_worker_to_master',
+        newState: { document_id: documentId, filename, relative_path: relativePath, sha256: digest, size_bytes: bytes.length },
+      });
+      if (!result.duplicate) queueMicrotask(() => this.#dispatchMessage(result.message.id).catch((error) => this.#logError(error)));
+      return { ...result, document: { id: documentId, filename, relative_path: relativePath, sha256: digest, size_bytes: bytes.length } };
+    }, { agentOnly: true, agentScopes: ['documents:write'] });
+
     route('GET', '/api/v1/nodes', async () => ({ nodes: this.database.listNodes() }));
     route('POST', '/api/v1/nodes/join-tokens', async (ctx) => {
       const body = await readJSON(ctx.request);
       const token = randomToken('wsj');
-      if (body.project_id) invariant(this.database.getProject(body.project_id), 'WS_NOT_FOUND', 'Project not found.', 404);
+      if (body.project_id) {
+        const project = this.database.getProject(body.project_id);
+        invariant(project, 'WS_NOT_FOUND', 'Project not found.', 404);
+        invariant(!project.archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before connecting a worker.', 409);
+      }
       const record = this.database.createJoinToken(
         body.name || 'New node', token, Math.min(body.ttl_ms || 600_000, 3_600_000),
         body.project_id ? { project_id: body.project_id } : {},
@@ -650,7 +969,13 @@ export class Hub {
       return profile;
     });
 
-    route('GET', '/api/v1/agent-instances', async (ctx) => ({ agents: this.database.listAgents(ctx.url.searchParams.get('project')) }));
+    route('GET', '/api/v1/agent-instances', async (ctx) => {
+      const requested = ctx.url.searchParams.get('archived');
+      const agents = this.database.listAgents(ctx.url.searchParams.get('project'));
+      return {
+        agents: agents.filter((agent) => requested === 'only' ? agent.project_archived_at : !agent.project_archived_at),
+      };
+    });
     route('POST', '/api/v1/agent-instances', async (ctx) => {
       const body = await readJSON(ctx.request);
       invariant(!body.root?.path && !body.root?.absolute_path, 'WS_PATH_INVALID', 'Agent root requests identify a pre-registered root ID, never a host path.');
@@ -677,15 +1002,49 @@ export class Hub {
       invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
       const project = this.database.getProject(agent.project_id);
       const effective = this.database.latestPolicySnapshot(agent.id);
+      const preview = renderProjectInstructions(project, {
+        role: agent.orchestration_role,
+        customInstructions: agent.custom_instructions,
+      });
       return {
         effective,
         role: agent.orchestration_role,
+        custom_instructions: agent.custom_instructions,
+        instruction_revision: agent.instruction_revision,
         current_project_revision: project.policy_revision,
         current_system_revision: project.system_policy_revision,
         stale: !effective
           || effective.policy_revision < project.policy_revision
-          || effective.system_policy_revision < project.system_policy_revision,
-        preview: renderProjectInstructions(project, { role: agent.orchestration_role }),
+          || effective.system_policy_revision < project.system_policy_revision
+          || effective.agent_instruction_revision < agent.instruction_revision
+          || effective.content_hash !== sha256(preview),
+        preview,
+      };
+    });
+    route('PATCH', '/api/v1/agent-instances/:id/instructions', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const previous = this.database.getAgent(ctx.params.id);
+      invariant(previous, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+      const agent = this.database.updateAgentInstructions(
+        ctx.params.id,
+        body.instructions ?? '',
+        ctx.principal.principal_id,
+        { expectedRevision: body.expected_revision },
+      );
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.instructions.update',
+        targetType: 'agent_instance',
+        targetId: agent.id,
+        projectId: agent.project_id,
+        previousState: { instruction_revision: previous.instruction_revision },
+        newState: { instruction_revision: agent.instruction_revision },
+      });
+      return {
+        agent_id: agent.id,
+        custom_instructions: agent.custom_instructions,
+        instruction_revision: agent.instruction_revision,
+        restart_required: ['ready', 'busy'].includes(agent.state),
       };
     });
     route('POST', '/api/v1/agent-instances/:id:wake', async (ctx) => this.#wakeAgent(ctx.params.id, ctx.principal.principal_id));
@@ -743,7 +1102,13 @@ export class Hub {
       return result;
     });
 
-    route('GET', '/api/v1/tasks', async (ctx) => ({ tasks: this.database.listTasks(ctx.url.searchParams.get('project'), ctx.url.searchParams.get('state')) }));
+    route('GET', '/api/v1/tasks', async (ctx) => {
+      const activeProjects = new Set(this.database.listProjects().map((project) => project.id));
+      return {
+        tasks: this.database.listTasks(ctx.url.searchParams.get('project'), ctx.url.searchParams.get('state'))
+          .filter((task) => activeProjects.has(task.project_id)),
+      };
+    });
     route('POST', '/api/v1/tasks', async (ctx) => {
       const body = await readJSON(ctx.request);
       invariant(!body.specification?.cwd && !body.specification?.absolute_path, 'WS_PATH_INVALID', 'Task working directories are selected by root ID, not host paths.');
@@ -960,7 +1325,7 @@ export class Hub {
     response.writeHead(200, {
       'content-type': fileMime(filePath),
       'content-length': bytes.length,
-      'cache-control': relative === 'index.html' ? 'no-store' : 'public, max-age=3600',
+      'cache-control': relative.startsWith('vendor/') ? 'public, max-age=3600' : 'no-cache',
     });
     response.end(bytes);
   }
@@ -995,11 +1360,15 @@ export class Hub {
   #attachEventSocket(request, socket, head, url, principal) {
     const connection = acceptWebSocket(request, socket, head);
     if (!connection) return;
+    this.portalConnections.add(connection);
     const after = parsePositiveInt(url.searchParams.get('after'), 0);
     for (const event of this.database.listEvents(after, {}, 1_000)) connection.sendJSON({ type: 'EVENT', event });
     const listener = (event) => connection.sendJSON({ type: 'EVENT', event });
     this.database.on('event', listener);
-    connection.on('close', () => this.database.off('event', listener));
+    connection.on('close', () => {
+      this.portalConnections.delete(connection);
+      this.database.off('event', listener);
+    });
     connection.sendJSON({ type: 'READY', principal_id: principal.principal_id });
   }
 
@@ -1011,6 +1380,8 @@ export class Hub {
     }
     const connection = acceptWebSocket(request, socket, head);
     if (!connection) return;
+    this.portalConnections.add(connection);
+    connection.once('close', () => this.portalConnections.delete(connection));
     const attachmentId = url.searchParams.get('attachment') || makeId('att');
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(attachmentId)) {
       connection.close(1008, 'Invalid attachment ID');
@@ -1027,7 +1398,11 @@ export class Hub {
       });
     };
     this.broker.on('terminal.output', outputListener);
-    connection.on('close', () => this.broker.off('terminal.output', outputListener));
+    let activeLease = null;
+    connection.on('close', () => {
+      this.broker.off('terminal.output', outputListener);
+      if (activeLease) this.database.releaseTerminalLease(terminalId, activeLease.id, leasePrincipal);
+    });
     let terminalQueue = Promise.resolve();
     connection.on('text', (text) => {
       let frame;
@@ -1035,6 +1410,7 @@ export class Hub {
       terminalQueue = terminalQueue.then(async () => {
         if (frame.type === 'LEASE_REQUEST') {
           const lease = this.database.acquireTerminalLease(terminalId, leasePrincipal);
+          activeLease = lease;
           connection.sendJSON({ type: 'LEASE_GRANTED', lease });
           return;
         }
@@ -1082,7 +1458,7 @@ export class Hub {
       name: `Codex ${node.display_name} ${profileId.slice(-6)}`,
       adapterKind: 'pty',
       executable: 'codex',
-      arguments: [],
+      arguments: agentLaunchArguments('codex'),
       restartPolicy: { mode: 'on_failure', max_attempts: 3 },
     }, actor);
     const agent = this.database.createAgent({
@@ -1114,6 +1490,7 @@ export class Hub {
   async #startShellTab(agentId, label, actor) {
     const agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting a shell.', 409);
     const node = this.database.getNode(agent.node_id);
     invariant(node?.status === 'online' && this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'Agent node is offline.', 503);
     const root = this.database.listAgentRoots(agent.id)[0];
@@ -1142,6 +1519,7 @@ export class Hub {
   async #wakeAgent(agentId, actor) {
     let agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
     if (['ready', 'busy'].includes(agent.state)) return agent;
     const node = this.database.getNode(agent.node_id);
     invariant(node?.status === 'online' && this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'Agent node is offline.', 503);
@@ -1153,7 +1531,10 @@ export class Hub {
     this.database.setAgentState(agentId, 'starting', actor);
     let controlToken = null;
     try {
-      const renderedInstructions = renderProjectInstructions(project, { role: agent.orchestration_role });
+      const renderedInstructions = renderProjectInstructions(project, {
+        role: agent.orchestration_role,
+        customInstructions: agent.custom_instructions,
+      });
       const policySnapshot = this.database.createPolicySnapshot({
         projectId: project.id,
         agentInstanceId: agent.id,
@@ -1161,6 +1542,8 @@ export class Hub {
         systemPolicyRevision: project.system_policy_revision,
         policyRevision: project.policy_revision,
         policy: project.policy,
+        agentInstructions: agent.custom_instructions,
+        agentInstructionRevision: agent.instruction_revision,
         renderedInstructions,
       });
       let agentControl = null;
@@ -1184,15 +1567,16 @@ export class Hub {
           expires_at: record.expires_at,
         };
       }
-      await this.broker.request(agent.node_id, 'process.start-agent', {
+      const started = await this.broker.request(agent.node_id, 'process.start-agent', {
         agent_instance_id: agent.id,
         terminal_id: agent.terminal_id,
         root_id: root.node_root_id,
-        argv: [profile.executable, ...profile.arguments],
+        argv: [profile.executable, ...agentLaunchArguments(profile.executable, profile.arguments)],
         environment: profile.environment,
         policy_snapshot: policySnapshot,
         agent_control: agentControl,
       }, { timeoutMs: 30_000 });
+      if (started?.runtime?.id) this.agentRuntimes.set(agent.id, started.runtime.id);
       this.database.setTerminalState(agent.terminal_id, 'attached');
       agent = this.database.setAgentState(agentId, 'ready', `node:${agent.node_id}`, { adapter_kind: profile.adapter_kind });
       this.database.audit({ actorId: actor, action: 'agent.wake', targetType: 'agent_instance', targetId: agentId, projectId: agent.project_id, newState: { state: agent.state } });
@@ -1221,12 +1605,27 @@ export class Hub {
   }
 
   async #reconcileNode(nodeId, runtimeInventory, connectionEpoch) {
-    const runningAgents = new Set(runtimeInventory
-      .filter((runtime) => runtime.kind === 'agent' && runtime.state === 'running' && runtime.agent_instance_id)
-      .map((runtime) => runtime.agent_instance_id));
     const agents = this.database.listAgents().filter((agent) => agent.node_id === nodeId);
+    for (const agent of agents) this.agentRuntimes.delete(agent.id);
+    const runningAgentRuntimes = runtimeInventory
+      .filter((runtime) => runtime.kind === 'agent' && runtime.state === 'running' && runtime.agent_instance_id);
+    const runningAgents = new Set(runningAgentRuntimes.map((runtime) => runtime.agent_instance_id));
+    for (const runtime of runningAgentRuntimes) this.agentRuntimes.set(runtime.agent_instance_id, runtime.id);
     for (let agent of agents) {
+      if (agent.project_archived_at) {
+        if (runningAgents.has(agent.id)) {
+          try {
+            await this.broker.request(agent.node_id, 'process.stop-agent', { agent_instance_id: agent.id });
+          } catch (error) {
+            this.#logError(error);
+          }
+        }
+        this.database.setTerminalState(agent.terminal_id, 'exited');
+        if (agent.state !== 'stopped') this.database.setAgentState(agent.id, 'stopped', 'hub:archive-reconciler');
+        continue;
+      }
       if (runningAgents.has(agent.id)) {
+        this.database.setTerminalState(agent.terminal_id, 'attached');
         if (!['ready', 'busy'].includes(agent.state)) {
           agent = this.database.setAgentState(agent.id, 'ready', `node:${nodeId}`, {
             recovered: true,
@@ -1306,6 +1705,9 @@ export class Hub {
       const receipt = await this.broker.request(agent.node_id, 'message.deliver', {
         agent_instance_id: agent.id,
         message,
+        document_root_id: message.content_parts.some((part) => part.type === 'document')
+          ? this.database.listAgentRoots(agent.id)[0]?.node_root_id
+          : undefined,
         delivery_context: {
           message_timestamp_utc: message.created_at,
           delivered_at_utc: nowISO(),
@@ -1314,7 +1716,7 @@ export class Hub {
           source: message.display_sender,
           account_quota: quota,
         },
-      });
+      }, { idempotencyKey: message.id });
       this.database.updateMessageDelivery(messageId, 'adapter_accepted', receipt);
       this.database.appendEvent('thread', message.thread_id, 'message.delivered.v1', `node:${agent.node_id}`, messageId, {
         message_id: messageId,
@@ -1331,6 +1733,15 @@ export class Hub {
   async #drainDeliveries(nodeId) {
     for (const delivery of this.database.pendingDeliveries(nodeId)) {
       try { await this.#dispatchMessage(delivery.message_id); } catch (error) { this.#logError(error); }
+    }
+  }
+
+  async #drainTasks(nodeId) {
+    for (const task of this.database.listTasks().filter((candidate) => candidate.type === 'command'
+      && ['pending', 'runnable'].includes(candidate.state))) {
+      const agent = task.assigned_agent_instance_id ? this.database.getAgent(task.assigned_agent_instance_id) : null;
+      if ((task.node_id || agent?.node_id) !== nodeId) continue;
+      try { await this.#scheduleTask(task.id); } catch (error) { this.#logError(error); }
     }
   }
 
@@ -1369,16 +1780,26 @@ export class Hub {
     const runtime = data.runtime || {};
     if (event.type === 'process.started') {
       if (runtime.terminalId) this.database.setTerminalState(runtime.terminalId, 'attached');
-      if (runtime.agentInstanceId && runtime.kind === 'agent') this.database.setAgentState(runtime.agentInstanceId, 'ready', `node:${nodeId}`);
+      if (runtime.agentInstanceId && runtime.kind === 'agent') {
+        this.agentRuntimes.set(runtime.agentInstanceId, runtime.id);
+        this.database.setAgentState(runtime.agentInstanceId, 'ready', `node:${nodeId}`);
+      }
       this.database.appendEvent(runtime.kind === 'task' ? 'task' : 'agent', runtime.taskId || runtime.agentInstanceId,
         'runtime.started.v1', `node:${nodeId}`, runtime.id, { ...runtime, node_id: nodeId, connection_epoch: epoch });
       return;
     }
     if (['process.completed', 'process.lost'].includes(event.type)) {
-      if (runtime.terminalId) this.database.setTerminalState(runtime.terminalId, 'exited');
+      const currentAgentRuntime = runtime.kind === 'agent' && runtime.agentInstanceId
+        ? this.agentRuntimes.get(runtime.agentInstanceId)
+        : null;
+      const staleAgentRuntime = Boolean(currentAgentRuntime && currentAgentRuntime !== runtime.id);
+      if (runtime.terminalId && !staleAgentRuntime) this.database.setTerminalState(runtime.terminalId, 'exited');
       if (runtime.kind === 'agent' && runtime.agentInstanceId) {
-        this.database.revokeAgentControlTokens(runtime.agentInstanceId);
-        this.database.setAgentState(runtime.agentInstanceId, data.exit_status === 0 ? 'stopped' : 'failed', `node:${nodeId}`, { exit_status: data.exit_status });
+        if (!staleAgentRuntime) {
+          this.agentRuntimes.delete(runtime.agentInstanceId);
+          this.database.revokeAgentControlTokens(runtime.agentInstanceId);
+          this.database.setAgentState(runtime.agentInstanceId, data.exit_status === 0 ? 'stopped' : 'failed', `node:${nodeId}`, { exit_status: data.exit_status });
+        }
       }
       if (runtime.taskId) {
         const success = event.type === 'process.completed' && Number(data.exit_status) === 0;
@@ -1390,33 +1811,142 @@ export class Hub {
           artifacts: [],
         };
         const task = this.database.setTaskState(runtime.taskId, success ? 'succeeded' : 'failed', result, `node:${nodeId}`);
-        if (task.specification.notify_master) await this.#notifyMaster(task, result);
+        if ((task.specification.notify_target || (task.specification.notify_master ? 'master' : 'none')) !== 'none') {
+          await this.#notifyTaskCompletion(task, result);
+        }
       }
       this.database.appendEvent(runtime.kind === 'task' ? 'task' : 'agent', runtime.taskId || runtime.agentInstanceId,
         event.type === 'process.completed' ? 'runtime.completed.v1' : 'runtime.lost.v1', `node:${nodeId}`, runtime.id, {
           node_id: nodeId,
           connection_epoch: epoch,
           exit_status: data.exit_status,
+          stale_runtime: staleAgentRuntime,
+          current_runtime_id: staleAgentRuntime ? currentAgentRuntime : undefined,
         });
     }
   }
 
-  async #notifyMaster(task, result) {
-    const agents = this.database.listAgents(task.project_id);
-    const master = agents.find((agent) => agent.orchestration_role === 'main') || agents[0];
-    if (!master) return;
+  #masterAgent() {
+    return this.database.getAgent('agt_master')
+      || this.database.listAgents().find((agent) => agent.orchestration_role === 'main');
+  }
+
+  #hookTarget(sourceAgent, target) {
+    return target === 'master' ? this.#masterAgent() : sourceAgent;
+  }
+
+  async #notifyTaskCompletion(task, result) {
+    const source = this.database.getAgent(task.assigned_agent_instance_id);
+    const notifyTarget = task.specification.notify_target
+      || (task.specification.notify_master ? 'master' : 'none');
+    const target = this.#hookTarget(source, notifyTarget);
+    if (!source || !target || notifyTarget === 'none') return;
+    const custom = task.specification.completion_message;
+    const text = [
+      '[WebSpider task completion]',
+      `Task ID: ${task.id}`,
+      `Title: ${task.title}`,
+      `Status: ${result.status}`,
+      `Ran on: ${source.title || source.id} (${source.id})`,
+      custom ? `Hook message: ${custom}` : '',
+      `Result: ${result.summary}`,
+    ].filter(Boolean).join('\n');
     const created = this.database.createMessage({
-      threadId: master.active_thread_id,
+      threadId: target.active_thread_id,
       actorId: `trigger:task-completion:${task.id}`,
       deliveryRole: 'user',
-      displaySender: `Task ${task.id}`,
-      contentParts: [{ type: 'text', text: `Task ${task.title} completed.\n\n${result.summary}` }],
+      displaySender: `WebSpider task hook ${task.id}`,
+      contentParts: [{ type: 'text', text }],
       wakePolicy: 'ensure_running',
-      idempotencyKey: `task:${task.id}:completed:master`,
+      idempotencyKey: `task:${task.id}:completed:${target.id}`,
       traceId: makeId('trc'),
       hopCount: 1,
     });
     if (!created.duplicate) await this.#dispatchMessage(created.message.id);
+  }
+
+  #restoreReminders() {
+    for (const task of this.database.listTasks().filter((candidate) => candidate.type === 'reminder'
+      && ['pending', 'runnable'].includes(candidate.state))) this.#armReminder(task);
+  }
+
+  #armReminder(task) {
+    const prior = this.reminderTimers.get(task.id);
+    if (prior) clearTimeout(prior);
+    this.reminderTimers.delete(task.id);
+    if (task.type !== 'reminder' || !['pending', 'runnable'].includes(task.state)) return;
+    const nextRun = Date.parse(task.specification.next_run_at);
+    if (!Number.isFinite(nextRun)) {
+      this.database.setTaskState(task.id, 'failed', {
+        status: 'failed', summary: 'Reminder has an invalid next_run_at timestamp.',
+      }, 'hub:reminders');
+      return;
+    }
+    const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, nextRun - Date.now()));
+    const timer = setTimeout(() => {
+      this.reminderTimers.delete(task.id);
+      const current = this.database.getTask(task.id);
+      if (current && Date.parse(current.specification.next_run_at) > Date.now()) {
+        this.#armReminder(current);
+        return;
+      }
+      this.#fireReminder(task.id).catch((error) => this.#logError(error));
+    }, delay);
+    timer.unref?.();
+    this.reminderTimers.set(task.id, timer);
+  }
+
+  async #fireReminder(taskId) {
+    let task = this.database.getTask(taskId);
+    if (!task || task.type !== 'reminder' || !['pending', 'runnable'].includes(task.state)) return;
+    const source = this.database.getAgent(task.assigned_agent_instance_id);
+    const target = this.#hookTarget(source, task.specification.delivery_target || 'self');
+    if (!source || !target) {
+      this.database.setTaskState(task.id, 'failed', {
+        status: 'failed', summary: 'Reminder source or destination agent no longer exists.',
+      }, 'hub:reminders');
+      return;
+    }
+    const runCount = Number(task.specification.run_count || 0) + 1;
+    const created = this.database.createMessage({
+      threadId: target.active_thread_id,
+      actorId: `trigger:reminder:${task.id}`,
+      deliveryRole: 'user',
+      displaySender: `WebSpider reminder ${task.id}`,
+      contentParts: [{ type: 'text', text: [
+        '[WebSpider scheduled reminder]',
+        `Reminder ID: ${task.id}`,
+        `Title: ${task.title}`,
+        `Run: ${runCount}`,
+        `Scheduled by: ${source.title || source.id} (${source.id})`,
+        `Message: ${task.specification.message}`,
+      ].join('\n') }],
+      wakePolicy: 'ensure_running',
+      idempotencyKey: `reminder:${task.id}:run:${runCount}:${target.id}`,
+      traceId: makeId('trc'),
+      hopCount: 1,
+    });
+    const everySeconds = task.specification.repeat_every_seconds;
+    const maxRuns = task.specification.max_runs;
+    if (everySeconds && (maxRuns == null || runCount < maxRuns)) {
+      task = this.database.updateTaskSpecification(task.id, {
+        ...task.specification,
+        run_count: runCount,
+        last_run_at: nowISO(),
+        next_run_at: new Date(Date.now() + Number(everySeconds) * 1000).toISOString(),
+      }, 'hub:reminders');
+      this.#armReminder(task);
+    } else {
+      this.database.updateTaskSpecification(task.id, {
+        ...task.specification,
+        run_count: runCount,
+        last_run_at: nowISO(),
+      }, 'hub:reminders');
+      this.database.setTaskState(task.id, 'succeeded', {
+        status: 'succeeded', summary: `Delivered ${runCount} reminder message${runCount === 1 ? '' : 's'}.`,
+      }, 'hub:reminders');
+    }
+    if (created.message.delivery?.state !== 'adapter_accepted') await this.#dispatchMessage(created.message.id);
   }
 
   async #fileRequest(ctx, command, payload, auditAction) {

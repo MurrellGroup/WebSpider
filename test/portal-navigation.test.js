@@ -27,10 +27,41 @@ test('Master Spider navigation opens its terminal and portfolio is separate', ()
   assert.match(app, /history\.replaceState\(null, '', '#\/overview'\)/);
 });
 
+test('agent pages expose compact editable custom instructions', () => {
+  assert.match(app, /const primary = \['terminal', 'instructions'/);
+  assert.match(app, /id="agent-instructions-form"/);
+  assert.match(app, /Custom instructions/);
+  assert.match(app, /Keep this short; trust the agent’s judgment/);
+  assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(agentId\)\}\/instructions/);
+  assert.match(app, /Save & restart/);
+  assert.match(app, /Full instruction preview/);
+});
+
+test('one browser editor manages worker-only instructions without changing the Master', () => {
+  assert.match(page, /data-action="show-worker-instructions"/);
+  assert.match(app, /id="worker-instructions-form"/);
+  assert.match(app, /Worker-only instructions; the Master Spider does not inherit this text/);
+  assert.match(app, /requested_instructions: \{ workers: instructions \}/);
+  assert.match(app, /orchestration_role !== 'main'/);
+  assert.match(app, /Save & restart workers/);
+  assert.match(app, /if \(parts\[0\] === 'sub-spider-instructions'\) return renderWorkerInstructions\(\)/);
+});
+
 test('project onboarding uses the current hub route', () => {
   assert.match(page, /data-action="onboard-project" title="Add project"/);
   assert.match(app, /if \(action === 'onboard-project'\) return showProjectOnboarding\(\)/);
   assert.match(app, /api\('\/api\/v1\/projects\/onboard'/);
+});
+
+test('archived projects have a dedicated restore and guarded-delete view', () => {
+  assert.match(page, /data-action="show-archived"/);
+  assert.match(app, /api\('\/api\/v1\/projects\?archived=only'/);
+  assert.match(app, /if \(parts\[0\] === 'archived'\) return renderArchivedProjects\(\)/);
+  assert.match(app, /data-action="archive-project"/);
+  assert.match(app, /data-action="restore-project"/);
+  assert.match(app, /data-action="delete-project"/);
+  assert.match(app, /Type the project name to confirm/);
+  assert.match(app, /Workspace files will not be touched/);
 });
 
 test('worker command copy supports plain HTTP without the Clipboard API', () => {
@@ -38,4 +69,13 @@ test('worker command copy supports plain HTTP without the Clipboard API', () => 
   assert.match(app, /control\.select\(\)/);
   assert.match(app, /document\.execCommand\('copy'\)/);
   assert.match(app, /Command selected; press Ctrl\/Cmd\+C to copy it\./);
+});
+
+test('terminal pages begin in watch mode and acquire control only on interaction', () => {
+  const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
+  assert.match(app, /interactive \? 'Take control' : 'Not running'/);
+  assert.doesNotMatch(app, /frame\.type === 'ATTACHED'.*LEASE_REQUEST/);
+  assert.match(app, /function requestTerminalLease\(\)/);
+  assert.match(app, /if \(terminalInputMode\).*requestTerminalLease\(\)/s);
+  assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);
 });

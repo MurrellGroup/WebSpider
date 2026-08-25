@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { RootedFileService, validateRelativePath } from '../src/node/root-fs.js';
 
 function fixture() {
@@ -97,4 +98,43 @@ test('a deleted or replaced root path is revoked rather than silently retargeted
     fs.rmSync(value.base, { recursive: true, force: true });
   });
   await assert.rejects(() => value.service.readFile('awr_test', 'secret.txt'), (error) => error.code === 'WS_ROOT_REVOKED');
+});
+
+test('document handoffs write checksum-verified immutable inbox files', (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const bytes = Buffer.from('# Worker plan\nRun the bounded validation.\n');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const written = value.service.writeInbox('awr_test', {
+    documentId: 'doc_abcdefgh1234', filename: 'worker-plan.md', bytes, sha256,
+  });
+  assert.equal(written.relative_path, '.webspider/inbox/doc_abcdefgh1234-worker-plan.md');
+  assert.equal(written.duplicate, false);
+  assert.equal(fs.readFileSync(path.join(value.root, written.relative_path), 'utf8'), bytes.toString('utf8'));
+  assert.equal(fs.statSync(path.join(value.root, written.relative_path)).mode & 0o777, 0o600);
+  assert.equal(value.service.writeInbox('awr_test', {
+    documentId: 'doc_abcdefgh1234', filename: 'worker-plan.md', bytes, sha256,
+  }).duplicate, true);
+  assert.throws(() => value.service.writeInbox('awr_test', {
+    documentId: 'doc_abcdefgh1234', filename: 'worker-plan.md',
+    bytes: Buffer.from('different'), sha256: createHash('sha256').update('different').digest('hex'),
+  }), (error) => error.code === 'WS_CONFLICT');
+});
+
+test('document handoffs reject a symlinked reserved inbox', (t) => {
+  const value = fixture();
+  fs.symlinkSync(value.outside, path.join(value.root, '.webspider'));
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const bytes = Buffer.from('do not escape');
+  assert.throws(() => value.service.writeInbox('awr_test', {
+    documentId: 'doc_abcdefgh5678', filename: 'instructions.txt', bytes,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  }), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
+  assert.equal(fs.existsSync(path.join(value.outside, 'inbox')), false);
 });

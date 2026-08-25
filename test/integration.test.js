@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
@@ -112,6 +113,120 @@ test('hub notes are disk-backed and only explicitly visible notes reach the main
   assert.equal(fs.existsSync(notePath), false);
 });
 
+test('owner project lifecycle endpoints archive, restore, and guard permanent metadata deletion', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-project-lifecycle-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const sentinel = path.join(workspace, 'user-work.txt');
+  fs.writeFileSync(sentinel, 'must survive project-record deletion\n');
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_lifecycle', publicKey: identity.publicKey, workspace });
+  const listening = await hub.listen();
+  t.after(async () => {
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const protectedProject = await jsonFetch(
+    `${listening.url}/api/v1/projects/${bootstrap.project.id}:archive`, listening.ownerToken, { method: 'POST' },
+  );
+  assert.equal(protectedProject.response.status, 409);
+  assert.equal(protectedProject.body.error.code, 'WS_PROJECT_PROTECTED');
+
+  const created = await jsonFetch(`${listening.url}/api/v1/projects`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Disposable project record' }),
+  });
+  assert.equal(created.response.status, 200);
+
+  const deleteWhileActive = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}`, listening.ownerToken, {
+    method: 'DELETE', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirmation: created.body.name }),
+  });
+  assert.equal(deleteWhileActive.response.status, 409);
+  assert.equal(deleteWhileActive.body.error.code, 'WS_PROJECT_NOT_ARCHIVED');
+
+  const archived = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}:archive`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(archived.response.status, 200);
+  assert(archived.body.archived_at);
+  const activeList = await jsonFetch(`${listening.url}/api/v1/projects`, listening.ownerToken);
+  const archivedList = await jsonFetch(`${listening.url}/api/v1/projects?archived=only`, listening.ownerToken);
+  assert.equal(activeList.body.projects.some((project) => project.id === created.body.id), false);
+  assert(archivedList.body.projects.some((project) => project.id === created.body.id));
+
+  const taskWhileArchived = await jsonFetch(`${listening.url}/api/v1/tasks`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ project_id: created.body.id, title: 'Must not start', specification: {} }),
+  });
+  assert.equal(taskWhileArchived.response.status, 409);
+  assert.equal(taskWhileArchived.body.error.code, 'WS_PROJECT_ARCHIVED');
+
+  const wrongConfirmation = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}`, listening.ownerToken, {
+    method: 'DELETE', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirmation: 'Disposable project' }),
+  });
+  assert.equal(wrongConfirmation.response.status, 409);
+  assert.equal(wrongConfirmation.body.error.code, 'WS_CONFIRMATION_REQUIRED');
+
+  const restored = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}:restore`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.archived_at, null);
+  await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}:archive`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  const deleted = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}`, listening.ownerToken, {
+    method: 'DELETE', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirmation: created.body.name }),
+  });
+  assert.equal(deleted.response.status, 200);
+  assert.equal(deleted.body.deleted, true);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'must survive project-record deletion\n');
+  const missing = await jsonFetch(`${listening.url}/api/v1/projects/${created.body.id}`, listening.ownerToken);
+  assert.equal(missing.response.status, 404);
+});
+
+test('hub shutdown closes active browser WebSockets without waiting for the service timeout', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-shutdown-'));
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const listening = await hub.listen();
+  let hubClosed = false;
+  t.after(async () => {
+    if (!hubClosed) await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const socket = net.createConnection(listening.address.port, '127.0.0.1');
+  const upgraded = new Promise((resolve, reject) => {
+    socket.once('error', reject);
+    socket.once('data', (bytes) => resolve(bytes.toString('utf8')));
+  });
+  socket.write([
+    'GET /api/v1/ws/events HTTP/1.1',
+    `Host: 127.0.0.1:${listening.address.port}`,
+    `Origin: http://127.0.0.1:${listening.address.port}`,
+    `Authorization: Bearer ${listening.ownerToken}`,
+    'Connection: Upgrade',
+    'Upgrade: websocket',
+    'Sec-WebSocket-Version: 13',
+    'Sec-WebSocket-Key: d2Vic3BpZGVyLXRlc3Q=',
+    '',
+    '',
+  ].join('\r\n'));
+  assert.match(await upgraded, /101 Switching Protocols/);
+
+  await Promise.race([
+    hub.close(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Hub shutdown timed out with an active browser socket')), 1_000)),
+  ]);
+  hubClosed = true;
+  assert.equal(socket.destroyed, true);
+});
+
 test('a missing previously-running agent is restarted and receives a durable recovery message', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-reboot-recovery-'));
   const workspace = path.join(directory, 'workspace');
@@ -161,6 +276,169 @@ test('a missing previously-running agent is restarted and receives a durable rec
   assert(hub.database.listEvents(0).some((event) => event.payload?.reason === 'runtime_missing_after_node_reconnect'));
 });
 
+test('a main agent can queue delayed command work while its target node is offline', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-offline-task-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_offline_task', publicKey: identity.publicKey,
+    workspace, rootId: 'awr_offline_task',
+  });
+  const listening = await hub.listen();
+  let node;
+  t.after(async () => {
+    if (node) await node.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_offline_task', ['tasks:read', 'tasks:write']);
+  const marker = path.join(workspace, 'delayed-command.txt');
+  const queued = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, 'wsa_offline_task', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: bootstrap.agent.id,
+      title: 'Offline delayed command proof',
+      delay_seconds: 1,
+      notify_master: false,
+      argv: [process.execPath, '-e', "require('node:fs').writeFileSync('delayed-command.txt', 'offline task completed\\n')"],
+    }),
+  });
+  assert.equal(queued.response.status, 200);
+  await waitUntil(() => hub.database.getTask(queued.body.id).state === 'runnable');
+  assert.equal(fs.existsSync(marker), false);
+
+  const listed = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, 'wsa_offline_task');
+  assert.equal(listed.response.status, 200);
+  assert(listed.body.tasks.some((task) => task.id === queued.body.id));
+
+  node = new NodeDaemon({
+    stateDir: path.join(directory, 'node'), hubURL: listening.url,
+    nodeId: 'nod_offline_task', displayName: 'Offline task node',
+    publicKey: identity.publicKey, privateKey: identity.privateKey,
+    roots: [{ id: 'awr_offline_task', path: workspace, symlink_policy: 'no_symlinks' }],
+    reconnect: false,
+  });
+  node.on('error', () => {});
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+
+  await waitUntil(() => hub.database.getTask(queued.body.id).state === 'succeeded', 10_000);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'offline task completed\n');
+  assert.equal(hub.database.getTask(queued.body.id).specification.delay_seconds, 1);
+});
+
+test('worker hooks are self-confined, restart-durable, and can notify self or master', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-worker-hooks-'));
+  const workspace = path.join(directory, 'workspace');
+  const hubState = path.join(directory, 'hub');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  let hub = new Hub({ stateDir: hubState, listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_worker_hooks', publicKey: identity.publicKey,
+    workspace, rootId: 'awr_master_hooks',
+  });
+  const worker = hub.database.createAgent({
+    id: 'agt_worker_hooks',
+    profileId: bootstrap.agent.profile_id,
+    projectId: bootstrap.project.id,
+    nodeId: bootstrap.agent.node_id,
+    title: 'Hook worker',
+    orchestrationRole: 'worker',
+    root: {
+      id: 'awr_worker_hooks',
+      node_root_id: 'awr_worker_hooks',
+      logical_name: 'workspace',
+      access_mode: 'read_write',
+    },
+  });
+  const token = 'wsa_worker_hooks';
+  hub.database.issueAgentControlToken(worker.id, token, [
+    'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self',
+  ]);
+  let listening = await hub.listen();
+  t.after(async () => {
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const forbiddenTask = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: bootstrap.agent.id,
+      argv: [process.execPath, '-e', 'process.exit(0)'],
+    }),
+  });
+  assert.equal(forbiddenTask.response.status, 403);
+  const selfTask = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      argv: [process.execPath, '-e', 'process.exit(0)'],
+      notify_target: 'self',
+      completion_message: 'Worker-local completion hook',
+    }),
+  });
+  assert.equal(selfTask.response.status, 200);
+  await waitUntil(() => hub.database.getTask(selfTask.body.id).state === 'runnable');
+  const workerTaskList = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, token);
+  assert.deepEqual(workerTaskList.body.tasks.map((task) => task.id), [selfTask.body.id]);
+
+  const toMaster = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Restart durable master hook',
+      message: 'Worker reminder reached the Master.',
+      delay_seconds: 1,
+      delivery_target: 'master',
+    }),
+  });
+  assert.equal(toMaster.response.status, 200);
+  await hub.close();
+  hub = new Hub({ stateDir: hubState, listenPort: 0 });
+  listening = await hub.listen();
+  await waitUntil(() => hub.database.getTask(toMaster.body.id).state === 'succeeded', 5_000);
+  const masterMessage = hub.database.listMessages(bootstrap.agent.active_thread_id)
+    .find((message) => message.content_parts[0].text.includes('Worker reminder reached the Master.'));
+  assert(masterMessage);
+  assert.equal(masterMessage.delivery_role, 'user');
+  assert.match(masterMessage.content_parts[0].text, new RegExp(`Reminder ID: ${toMaster.body.id}`));
+
+  const recurringSelf = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Two worker self hooks',
+      message: 'Worker future-self check.',
+      every_seconds: 1,
+      max_runs: 2,
+      delivery_target: 'self',
+    }),
+  });
+  assert.equal(recurringSelf.response.status, 200);
+  await waitUntil(() => hub.database.getTask(recurringSelf.body.id).state === 'succeeded', 5_000);
+  const workerMessages = hub.database.listMessages(worker.active_thread_id)
+    .filter((message) => message.content_parts[0].text.includes('Worker future-self check.'));
+  assert.equal(workerMessages.length, 2);
+  assert(workerMessages.every((message) => message.delivery_role === 'user'));
+  assert.equal(hub.database.getTask(recurringSelf.body.id).specification.run_count, 2);
+
+  const cancellable = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'Do not deliver.', delay_seconds: 30 }),
+  });
+  const listed = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders`, token);
+  assert(listed.body.reminders.some((reminder) => reminder.id === cancellable.body.id));
+  const cancelled = await jsonFetch(`${listening.url}/api/v1/agent-control/reminders/${cancellable.body.id}:cancel`, token, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(cancelled.response.status, 200);
+  assert.equal(cancelled.body.state, 'cancelled');
+});
+
 test('hub and outbound node provide a root-confined end-to-end API', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-e2e-'));
   const workspace = path.join(directory, 'workspace');
@@ -185,6 +463,11 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   node.start();
   await online;
   t.after(async () => {
+    const documentWorkerRuntime = node.database.getProcessByAgent('agt_e2e_worker');
+    if (documentWorkerRuntime?.state === 'running') {
+      node.supervisor.stopProcess(documentWorkerRuntime.id, 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     await node.stop();
     await hub.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -201,7 +484,7 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const policy = await jsonFetch(`${listening.url}/api/v1/projects/${bootstrap.project.id}/policy`, listening.ownerToken);
   assert.equal(policy.response.status, 200);
   assert.equal(policy.body.policy.principle, 'minimize_user_burden');
-  assert.match(policy.body.rendered_instructions, /Reduce user burden/);
+  assert.match(policy.body.rendered_instructions, /persistent multi-project manager/);
   const policyUpdate = await jsonFetch(`${listening.url}/api/v1/projects/${bootstrap.project.id}/policy`, listening.ownerToken, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -211,8 +494,21 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(policyUpdate.body.revision, 2);
   assert.equal(policyUpdate.body.policy.execution.validate_before_claiming_completion, true);
 
+  const instructionsUpdate = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}/instructions`, listening.ownerToken, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ instructions: 'Keep portfolio summaries compact.', expected_revision: 1 }),
+  });
+  assert.equal(instructionsUpdate.response.status, 200);
+  assert.equal(instructionsUpdate.body.instruction_revision, 2);
+  const instructionPolicy = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}/policy`, listening.ownerToken);
+  assert.equal(instructionPolicy.body.custom_instructions, 'Keep portfolio summaries compact.');
+  assert.equal(instructionPolicy.body.instruction_revision, 2);
+  assert.match(instructionPolicy.body.preview, /## Custom instructions[\s\S]*Keep portfolio summaries compact\./);
+  assert.equal(instructionPolicy.body.stale, true);
+
   hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_e2e_control', [
-    'policy:read', 'policy:write:project', 'policy:write:system', 'usage:read', 'usage:write', 'agents:read', 'messages:write',
+    'policy:read', 'policy:write:project', 'policy:write:system', 'usage:read', 'usage:write', 'agents:read', 'messages:write', 'documents:write',
   ]);
   const worker = hub.database.createAgent({
     id: 'agt_e2e_worker',
@@ -221,6 +517,9 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
     nodeId: bootstrap.agent.node_id,
     title: 'Remote worker',
     orchestrationRole: 'worker',
+    root: {
+      id: 'awr_e2e_worker', node_root_id: 'awr_e2e', logical_name: 'workspace', access_mode: 'read_write',
+    },
   });
   const agentList = await jsonFetch(`${listening.url}/api/v1/agent-control/agents`, 'wsa_e2e_control');
   assert.equal(agentList.response.status, 200);
@@ -235,6 +534,29 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(agentMessage.body.message.authenticated_actor_id, `agent:${bootstrap.agent.id}`);
   assert.equal(agentMessage.body.message.delivery_role, 'user');
   assert.match(agentMessage.body.message.display_sender, /via WebSpider/);
+  const documentBytes = Buffer.from('# Remote runbook\nValidate the durable document handoff.\n');
+  const document = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${worker.id}/documents`, 'wsa_e2e_control', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      filename: 'remote-runbook.md',
+      data_base64: documentBytes.toString('base64'),
+      instruction: 'Read the inbox copy and validate it.',
+    }),
+  });
+  assert.equal(document.response.status, 200);
+  assert.equal(document.body.message.delivery_role, 'user');
+  assert.equal(document.body.message.content_parts[1].type, 'document');
+  await waitUntil(() => fs.existsSync(path.join(workspace, document.body.document.relative_path)));
+  await waitUntil(() => hub.database.getMessage(document.body.message.id).delivery.state === 'adapter_accepted');
+  assert.equal(fs.readFileSync(path.join(workspace, document.body.document.relative_path), 'utf8'), documentBytes.toString('utf8'));
+  assert.match(document.body.message.content_parts[0].text, new RegExp(`Document ID: ${document.body.document.id}`));
+  hub.database.issueAgentControlToken(worker.id, 'wsa_e2e_worker_documents', ['documents:write']);
+  const forbiddenPeerDocument = await jsonFetch(`${listening.url}/api/v1/agent-control/agents/${worker.id}/documents`, 'wsa_e2e_worker_documents', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ filename: 'peer.txt', data_base64: Buffer.from('peer').toString('base64') }),
+  });
+  assert.equal(forbiddenPeerDocument.response.status, 403);
   const agentPolicy = await jsonFetch(`${listening.url}/api/v1/agent-control/policy`, 'wsa_e2e_control');
   assert.equal(agentPolicy.response.status, 200);
   assert.equal(agentPolicy.body.project.revision, 2);
@@ -295,6 +617,7 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const markdownModule = await fetch(`${listening.url}/markdown.js`);
   assert.equal(markdownModule.status, 200);
   assert.match(markdownModule.headers.get('content-type'), /javascript/);
+  assert.equal(markdownModule.headers.get('cache-control'), 'no-cache');
   assert.match(await markdownModule.text(), /renderMarkdown/);
   const randomModule = await fetch(`${listening.url}/random.js`);
   assert.equal(randomModule.status, 200);
@@ -303,6 +626,7 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const terminalModule = await fetch(`${listening.url}/vendor/xterm.mjs`);
   assert.equal(terminalModule.status, 200);
   assert.match(terminalModule.headers.get('content-type'), /javascript/);
+  assert.equal(terminalModule.headers.get('cache-control'), 'public, max-age=3600');
   assert.match(await terminalModule.text(), /export\{.*Terminal/);
   const fitModule = await fetch(`${listening.url}/vendor/addon-fit.mjs`);
   assert.equal(fitModule.status, 200);
@@ -484,6 +808,9 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   assert.equal(restarted.body.state, 'ready');
   assert.equal(node.database.getProcessByAgent(worker.id).state, 'running');
   assert.notEqual(node.database.getProcessByAgent(worker.id).id, exitedRuntime.id);
+  await waitUntil(() => !['running', 'stopping'].includes(node.database.getProcess(exitedRuntime.id).state), 5_000);
+  assert.equal(hub.database.getAgent(worker.id).state, 'ready');
+  assert.equal(hub.database.getAgent(worker.id).terminal_state, 'attached');
 
   const secondProject = await jsonFetch(`${listening.url}/api/v1/projects/onboard`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' },

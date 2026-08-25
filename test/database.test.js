@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { HubDatabase } from '../src/db/hub-database.js';
+import { NodeBroker } from '../src/hub/node-broker.js';
 import { generateNodeIdentity } from '../src/lib/security.js';
 import { createDefaultProjectPolicy } from '../src/lib/project-policy.js';
 
@@ -44,6 +45,116 @@ test('message acceptance is durable and idempotent', (t) => {
   assert.equal(duplicate.message.id, first.message.id);
   assert.equal(database.listMessages(agent.active_thread_id).length, 1);
   assert(database.listEvents(0).some((event) => event.type === 'message.accepted.v1'));
+});
+
+test('projects can be safely archived, restored, and permanently removed without touching a workspace', (t) => {
+  const { database } = databaseFixture(t);
+  database.setAgentRole('agt_test', 'main');
+  assert.throws(
+    () => database.archiveProject('prj_test'),
+    (error) => error.code === 'WS_PROJECT_PROTECTED' && error.status === 409,
+  );
+
+  database.createProject({ id: 'prj_archive', name: 'Archive candidate' });
+  const agent = database.createAgent({
+    id: 'agt_archive', profileId: 'apf_test', projectId: 'prj_archive', nodeId: 'nod_test',
+    root: { id: 'awr_archive', logical_name: 'workspace' },
+  });
+  const shell = database.createInteractiveTerminal(agent.id, 'Archive guard');
+  database.setTerminalState(shell.id, 'attached');
+  assert.throws(
+    () => database.archiveProject('prj_archive'),
+    (error) => error.code === 'WS_PROJECT_ACTIVE' && /shell/.test(error.message),
+  );
+  database.setTerminalState(shell.id, 'exited');
+
+  database.setAgentState(agent.id, 'stopping');
+  assert.throws(
+    () => database.archiveProject('prj_archive'),
+    (error) => error.code === 'WS_PROJECT_ACTIVE',
+  );
+  database.setAgentState(agent.id, 'stopped');
+
+  const task = database.createTask({ projectId: 'prj_archive', title: 'Finished work' });
+  assert.throws(
+    () => database.archiveProject('prj_archive'),
+    (error) => error.code === 'WS_PROJECT_ACTIVE',
+  );
+  database.setTaskState(task.id, 'succeeded', { ok: true });
+  const message = database.createMessage({
+    threadId: agent.active_thread_id,
+    actorId: 'owner:test',
+    displaySender: 'Tester',
+    contentParts: [{ type: 'text', text: 'kept until permanent deletion' }],
+    idempotencyKey: 'archive-message',
+  }).message;
+  database.issueAgentControlToken(agent.id, 'wsa_archive_test', ['status:write:self']);
+
+  const archived = database.archiveProject('prj_archive', 'owner:test');
+  assert(archived.archived_at);
+  assert.equal(database.getAgentControlToken('wsa_archive_test'), null);
+  assert.equal(database.listProjects().some((project) => project.id === archived.id), false);
+  assert.equal(database.listProjects({ archived: 'archived' })[0].id, archived.id);
+  assert.throws(
+    () => database.createTask({ projectId: archived.id, title: 'Blocked task' }),
+    (error) => error.code === 'WS_PROJECT_ARCHIVED',
+  );
+  assert.throws(
+    () => database.createMessage({
+      threadId: agent.active_thread_id,
+      actorId: 'owner:test',
+      contentParts: [{ type: 'text', text: 'blocked message' }],
+      idempotencyKey: 'blocked-after-archive',
+    }),
+    (error) => error.code === 'WS_PROJECT_ARCHIVED',
+  );
+  assert.throws(
+    () => database.createAgent({
+      id: 'agt_archive_blocked', profileId: 'apf_test', projectId: archived.id, nodeId: 'nod_test',
+    }),
+    (error) => error.code === 'WS_PROJECT_ARCHIVED',
+  );
+
+  const restored = database.restoreProject(archived.id, 'owner:test');
+  assert.equal(restored.archived_at, null);
+  assert(database.listProjects().some((project) => project.id === restored.id));
+  database.archiveProject(restored.id, 'owner:test');
+  assert.deepEqual(database.deleteArchivedProject(restored.id), {
+    id: restored.id, name: restored.name, deleted: true,
+  });
+  assert.equal(database.getProject(restored.id), null);
+  assert.equal(database.getAgent(agent.id), null);
+  assert.equal(database.getTask(task.id), null);
+  assert.equal(database.getMessage(message.id), null);
+  assert.equal(database.listProjects({ archived: 'all' }).some((project) => project.id === restored.id), false);
+});
+
+test('offline transient commands expire while durable messages reuse one outbox command', async (t) => {
+  const { database } = databaseFixture(t);
+  const broker = new NodeBroker(database);
+
+  let transientError;
+  try {
+    await broker.request('nod_test', 'terminal.input', { terminal_id: 'trm_test', data: 'ZA==' });
+  } catch (error) {
+    transientError = error;
+  }
+  assert.equal(transientError?.code, 'WS_NODE_OFFLINE');
+  assert.equal(database.getOutbox(transientError.details.command_id).state, 'failed');
+  assert.equal(database.pendingOutbox('nod_test').length, 0);
+
+  const messagePayload = { message: { id: 'msg_durable' } };
+  const durableErrors = [];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await broker.request('nod_test', 'message.deliver', messagePayload, { idempotencyKey: 'msg_durable' });
+    } catch (error) {
+      durableErrors.push(error);
+    }
+  }
+  assert.deepEqual(durableErrors.map((error) => error.code), ['WS_NODE_OFFLINE', 'WS_NODE_OFFLINE']);
+  assert.equal(durableErrors[0].details.command_id, durableErrors[1].details.command_id);
+  assert.equal(database.pendingOutbox('nod_test').length, 1);
 });
 
 test('terminal leases fence stale controllers', (t) => {
@@ -112,14 +223,25 @@ test('project policy is defaulted, versioned, and snapshotted for agent launches
   const updated = database.updateProjectPolicy('prj_test', { scholarly_work_product: { citations: 'verified references only' } });
   assert.equal(updated.policy_revision, 2);
   assert.equal(updated.policy.execution.validate_before_claiming_completion, true);
+  const instructed = database.updateAgentInstructions(agent.id, 'Keep reports compact.', 'owner:test', { expectedRevision: 1 });
+  assert.equal(instructed.custom_instructions, 'Keep reports compact.');
+  assert.equal(instructed.instruction_revision, 2);
+  assert.throws(
+    () => database.updateAgentInstructions(agent.id, 'stale edit', 'owner:test', { expectedRevision: 1 }),
+    (error) => error.code === 'WS_INSTRUCTION_REVISION_CONFLICT' && error.status === 409,
+  );
   const snapshot = database.createPolicySnapshot({
     projectId: updated.id,
     agentInstanceId: agent.id,
     policyRevision: updated.policy_revision,
     policy: updated.policy,
+    agentInstructions: instructed.custom_instructions,
+    agentInstructionRevision: instructed.instruction_revision,
     renderedInstructions: '# Project agreement\nProceed with safe defaults.',
   });
   assert.equal(database.latestPolicySnapshot(agent.id).id, snapshot.id);
+  assert.equal(database.latestPolicySnapshot(agent.id).agent_instructions, 'Keep reports compact.');
+  assert.equal(database.latestPolicySnapshot(agent.id).agent_instruction_revision, 2);
   assert.equal(snapshot.content_hash.length, 64);
 });
 
@@ -147,7 +269,7 @@ test('system defaults remain layered beneath project overrides with optimistic r
   );
 });
 
-test('worker tokens are self-report-only while main control tokens remain revocable', (t) => {
+test('worker tokens are confined to self status, self tasks, and self-owned hooks', (t) => {
   const { database, agent } = databaseFixture(t);
   assert.equal(agent.orchestration_role, 'worker');
   database.issueAgentControlToken(agent.id, 'wsa_worker_status', ['status:write:self']);
@@ -156,12 +278,18 @@ test('worker tokens are self-report-only while main control tokens remain revoca
     () => database.issueAgentControlToken(agent.id, 'wsa_worker', ['policy:read']),
     (error) => error.code === 'WS_FORBIDDEN',
   );
+  database.issueAgentControlToken(agent.id, 'wsa_worker_hooks', [
+    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self',
+  ]);
+  assert.deepEqual(database.getAgentControlToken('wsa_worker_hooks').scopes, [
+    'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self',
+  ]);
   const main = database.setAgentRole(agent.id, 'main');
   assert.equal(main.can_edit_behavior, true);
-  database.issueAgentControlToken(main.id, 'wsa_main', ['policy:read', 'policy:write:project']);
+  database.issueAgentControlToken(main.id, 'wsa_main', ['policy:read', 'policy:write:project', 'tasks:read', 'tasks:write']);
   const principal = database.getAgentControlToken('wsa_main');
   assert.equal(principal.agent_instance_id, main.id);
-  assert.deepEqual(principal.scopes, ['policy:read', 'policy:write:project']);
+  assert.deepEqual(principal.scopes, ['policy:read', 'policy:write:project', 'tasks:read', 'tasks:write']);
   assert.equal(database.revokeAgentControlTokens(main.id), true);
   assert.equal(database.getAgentControlToken('wsa_main'), null);
   assert.throws(
