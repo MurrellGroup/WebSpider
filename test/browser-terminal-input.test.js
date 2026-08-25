@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { directKeyInput, enqueueTerminalData, kittySequence } from '../web/terminal-input.js';
+import { clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence } from '../web/terminal-input.js';
 
 test('rapid printable keydowns bypass the hidden terminal textarea without losing characters', () => {
   const expected = Array.from({ length: 2_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join('');
@@ -17,6 +17,20 @@ test('modified Kitty keys remain encoded while ordinary shortcuts stay xterm-own
   assert.equal(directKeyInput({ type: 'keydown', key: 'c', ctrlKey: true }, true), kittySequence(99, 5));
   assert.equal(directKeyInput({ type: 'keydown', key: 'c', ctrlKey: true }, false), null);
   assert.equal(directKeyInput({ type: 'keydown', key: 'x', altKey: true, shiftKey: true }, true), kittySequence(120, 4));
+});
+
+test('clipboard paste shortcuts stay browser-owned when Kitty keyboard mode is active', () => {
+  for (const event of [
+    { type: 'keydown', key: 'v', metaKey: true },
+    { type: 'keydown', key: 'V', metaKey: true, shiftKey: true },
+    { type: 'keydown', key: 'v', ctrlKey: true },
+    { type: 'keydown', key: 'V', ctrlKey: true, shiftKey: true },
+  ]) {
+    assert.equal(clipboardPasteShortcut(event), true);
+    assert.equal(directKeyInput(event, true), null);
+  }
+  assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'v', ctrlKey: true, altKey: true }), false);
+  assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'c', metaKey: true }), false);
 });
 
 test('terminal data always queues and requests control when no precursor event did so', () => {

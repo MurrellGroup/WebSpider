@@ -1,12 +1,12 @@
 import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
-import { directKeyInput, enqueueTerminalData, kittySequence } from './terminal-input.js';
+import { clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.7';
+const PORTAL_VERSION = '0.6.8';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -61,6 +61,7 @@ const state = {
   terminalRenderTimer: null,
   terminalMathsGeneration: 0,
   terminalImageUploading: false,
+  terminalPendingImages: [],
   filePath: '',
   fileShowHidden: false,
   activeRoot: null,
@@ -665,39 +666,101 @@ function updateTerminalMaths(immediate = false) {
   else state.terminalRenderTimer = setTimeout(render, 180);
 }
 
-async function uploadPastedTerminalImages(files) {
-  if (state.terminalImageUploading) {
-    toast('An image upload is already in progress.', true);
-    return;
-  }
+function currentTerminalImages() {
   const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
-  if (!state.selectedAgent || !terminal) return;
-  state.terminalImageUploading = true;
+  if (!state.selectedAgent || !terminal) return [];
+  return state.terminalPendingImages.filter((entry) => entry.agentId === state.selectedAgent.id
+    && entry.terminalId === terminal.id);
+}
+
+function renderTerminalImageDraft() {
+  const draft = $('#terminal-image-draft');
+  if (!draft) return;
+  const images = currentTerminalImages();
+  draft.classList.toggle('hidden', images.length === 0);
+  draft.classList.toggle('uploading', state.terminalImageUploading);
+  const names = $('.terminal-image-names', draft);
+  const status = $('.terminal-image-status', draft);
+  const previews = $('.terminal-image-previews', draft);
+  if (names) names.textContent = images.map((entry) => entry.file.name || 'clipboard image').join(', ');
+  if (previews) {
+    previews.replaceChildren(...images.map((entry) => {
+      const image = document.createElement('img');
+      image.src = entry.previewUrl;
+      image.alt = entry.file.name || 'Staged clipboard image';
+      image.title = image.alt;
+      return image;
+    }));
+  }
+  if (status) status.textContent = state.terminalImageUploading
+    ? `Uploading ${images.length} image${images.length === 1 ? '' : 's'}…`
+    : `Ready · press Enter to upload and send ${images.length === 1 ? 'it' : 'them'}`;
+}
+
+function stagePastedTerminalImages(files) {
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+  if (!state.selectedAgent || !terminal || state.terminalImageUploading) return false;
+  const existing = currentTerminalImages();
+  const images = files.filter(Boolean);
   try {
-    for (const file of files.slice(0, 4)) {
+    if (existing.length + images.length > 4) throw new Error('Send at most 4 images at a time.');
+    for (const file of images) {
       if (file.size > 8 * 1024 * 1024) throw new Error('Pasted images must be 8 MiB or smaller.');
       if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
         throw new Error('Paste a PNG, JPEG, GIF, or WebP image.');
       }
+    }
+  } catch (error) {
+    toast(friendlyError(error), true);
+    return false;
+  }
+  state.terminalPendingImages.push(...images.map((file) => ({
+    agentId: state.selectedAgent.id,
+    terminalId: terminal.id,
+    uploadId: `upl_${randomIdentifier()}`,
+    previewUrl: URL.createObjectURL(file),
+    file,
+  })));
+  renderTerminalImageDraft();
+  toast(`${images.length} image${images.length === 1 ? '' : 's'} ready · press Enter to send`);
+  return images.length > 0;
+}
+
+async function sendStagedTerminalImages() {
+  if (state.terminalImageUploading) return false;
+  const images = currentTerminalImages();
+  if (!images.length || !state.selectedAgent) return false;
+  state.terminalImageUploading = true;
+  renderTerminalImageDraft();
+  let sent = 0;
+  try {
+    for (const entry of images) {
+      const { file } = entry;
       toast(`Uploading ${file.name || 'clipboard image'}…`);
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const result = await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/uploads`, {
+      const result = await api(`/api/v1/agent-instances/${encodeURIComponent(entry.agentId)}/uploads`, {
         method: 'POST',
         body: {
-          upload_id: `upl_${randomIdentifier()}`,
-          terminal_id: terminal.id,
+          upload_id: entry.uploadId,
+          terminal_id: entry.terminalId,
           filename: file.name || 'clipboard-image',
           mime_type: file.type,
           data_base64: bytesToBase64(bytes),
         },
       });
+      URL.revokeObjectURL(entry.previewUrl);
+      state.terminalPendingImages = state.terminalPendingImages.filter((candidate) => candidate.uploadId !== entry.uploadId);
+      sent += 1;
+      renderTerminalImageDraft();
       toast(`Image sent to the agent: ${result.upload.relative_path}`);
     }
   } catch (error) {
     toast(friendlyError(error), true);
   } finally {
     state.terminalImageUploading = false;
+    renderTerminalImageDraft();
   }
+  return sent === images.length;
 }
 
 document.addEventListener('paste', (event) => {
@@ -708,7 +771,7 @@ document.addEventListener('paste', (event) => {
     .filter(Boolean);
   if (!images.length) return;
   event.preventDefault();
-  void uploadPastedTerminalImages(images);
+  stagePastedTerminalImages(images);
 }, true);
 
 function transmitTerminalInput(data) {
@@ -788,6 +851,11 @@ function handleTerminalData(data) {
 }
 
 function handleTerminalKey(event) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && currentTerminalImages().length) {
+    event.preventDefault();
+    void sendStagedTerminalImages();
+    return false;
+  }
   const input = directKeyInput(event, state.terminalKeyboardProtocol);
   if (input == null) return true;
   event.preventDefault();
@@ -936,8 +1004,10 @@ async function renderTerminal(agent) {
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
     <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
+    ${interactive ? '<div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged image previews"></div><div class="terminal-image-summary"><strong>Image ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged images" title="Discard staged images">×</button></div>' : ''}
     ${interactive ? '<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="Write before sending to the terminal"></textarea><button class="primary" type="submit">Send</button></form>' : ''}
   </section>`;
+  renderTerminalImageDraft();
   applyTerminalView();
   applyTerminalInputMode();
   const emulator = new Terminal({
@@ -1371,6 +1441,15 @@ document.addEventListener('click', async (event) => {
       toast('Terminal tab closed.');
       return renderTerminal(state.selectedAgent);
     }
+    if (action === 'discard-terminal-images') {
+      const images = currentTerminalImages();
+      images.forEach((entry) => URL.revokeObjectURL(entry.previewUrl));
+      const discarded = new Set(images.map((entry) => entry.uploadId));
+      state.terminalPendingImages = state.terminalPendingImages.filter((entry) => !discarded.has(entry.uploadId));
+      renderTerminalImageDraft();
+      state.terminalEmulator?.focus();
+      return toast('Staged images discarded.');
+    }
     if (action === 'detach-codex-session') {
       await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/codex-session`, { method: 'DELETE' });
       closeModal();
@@ -1478,23 +1557,26 @@ document.addEventListener('submit', async (event) => {
     event.preventDefault();
     const textarea = $('#terminal-compose');
     const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+    const hasImages = currentTerminalImages().length > 0;
     if (terminal?.kind === 'primary_agent') {
       const message = textarea?.value || '';
-      if (!message) return;
+      if (!message && !hasImages) return;
       const button = event.target.querySelector('button[type="submit"]');
       button.disabled = true;
       try {
-        await api(`/api/v1/threads/${encodeURIComponent(state.selectedAgent.active_thread_id)}/messages`, {
-          method: 'POST',
-          headers: { 'idempotency-key': randomIdentifier() },
-          body: { parts: [{ type: 'text', text: message }], delivery_role: 'user', wake_policy: 'ensure_running' },
-        });
+        if (hasImages && !await sendStagedTerminalImages()) return;
+        if (message) await api(`/api/v1/threads/${encodeURIComponent(state.selectedAgent.active_thread_id)}/messages`, {
+            method: 'POST',
+            headers: { 'idempotency-key': randomIdentifier() },
+            body: { parts: [{ type: 'text', text: message }], delivery_role: 'user', wake_policy: 'ensure_running' },
+          });
         textarea.value = '';
         textarea.focus();
       } catch (error) { toast(friendlyError(error), true); }
       finally { button.disabled = false; }
       return;
     }
+    if (hasImages && !await sendStagedTerminalImages()) return;
     const submitted = submitTerminalComposition(textarea?.value || '');
     if (textarea && submitted) {
       textarea.value = '';
@@ -1686,6 +1768,16 @@ document.addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (event.target.id === 'terminal-compose' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    event.target.form?.requestSubmit();
+    return;
+  }
+  if (event.target.closest('#terminal-output') && clipboardPasteShortcut(event)) {
+    // xterm's custom key handler receives this first; leaving it browser-owned
+    // is what permits the subsequent ClipboardEvent to carry image files.
+    return;
+  }
   if (event.target.id === 'file-search' && event.key === 'Enter') {
     event.preventDefault();
     const query = event.target.value.trim();

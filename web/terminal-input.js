@@ -2,11 +2,20 @@ export function kittySequence(codePoint, modifiers = 1) {
   return `\u001b[${codePoint}${modifiers === 1 ? '' : `;${modifiers}`}u`;
 }
 
+export function clipboardPasteShortcut(event) {
+  if (event?.type !== 'keydown' || String(event.key || '').toLowerCase() !== 'v' || event.altKey) return false;
+  return Boolean(event.metaKey) !== Boolean(event.ctrlKey) && (event.metaKey || event.ctrlKey);
+}
+
 // Printable physical-key input does not need xterm's hidden textarea. Capturing it at
 // keydown avoids browser/IME focus transitions silently swallowing fast ordinary typing.
 // Composition, dead keys, navigation keys, and non-Kitty shortcuts remain xterm-owned.
 export function directKeyInput(event, keyboardProtocol = false) {
   if (event?.type !== 'keydown') return null;
+  // Preserve the browser paste gesture even when the child process enables the
+  // Kitty keyboard protocol. Encoding Cmd/Ctrl+V here prevents ClipboardEvent
+  // from firing, so clipboard images can only be pasted from the context menu.
+  if (clipboardPasteShortcut(event)) return null;
   const key = String(event.key || '');
   if (!event.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey && [...key].length === 1) return key;
   if (!keyboardProtocol || !(event.ctrlKey || event.altKey || event.metaKey) || [...key].length !== 1) return null;

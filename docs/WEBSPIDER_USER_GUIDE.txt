@@ -64,7 +64,7 @@ Text box mode
     Best for drafting or mouse-editing text before sending. On Sub-Spider and auxiliary terminals it sends to the PTY. On the primary Master terminal it creates a durable message.
 
 Paste an image
-    Paste a PNG, JPEG, GIF, or WebP into a terminal or its text box. WebSpider writes a private copy under `.webspider/uploads/` in that agent's workspace, then sends the agent a durable message containing the exact local path and checksum. Images may be up to 8 MiB. Uploads remain in the workspace until removed.
+    Paste a PNG, JPEG, GIF, or WebP into a terminal or its text box with the keyboard shortcut or context menu. WebSpider stages it visibly without uploading or sending anything. Press Enter to write a private copy under `.webspider/uploads/` in that agent's workspace and send the agent a durable message containing the exact local path and checksum. Use Shift+Enter for a newline in text-box mode. Images may be up to 8 MiB. Uploads remain in the workspace until removed.
 
 Maths mode
     The same xterm-parsed transcript, spacing, and line wrapping as Terminal mode, with recognized TeX equations typeset by the locally bundled MathJax. It does not reflow prose as Markdown. Standard \(...\), \[...\], $...$, and $$...$$ forms work; WebSpider also recognizes agent output that puts a TeX equation between standalone [ and ] lines.

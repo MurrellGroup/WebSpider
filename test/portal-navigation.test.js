@@ -155,11 +155,16 @@ test('Maths mode preserves the xterm transcript and typesets only equations', ()
   assert.doesNotMatch(styles, /data-view="reading"/);
 });
 
-test('pasting a clipboard image uploads it to the agent workspace and sends its path', () => {
+test('pasting a clipboard image stages it and Enter uploads it to the agent workspace', () => {
   assert.match(app, /addEventListener\('paste'/);
-  assert.match(app, /uploadPastedTerminalImages\(images\);\n\}, true\);/);
+  assert.match(app, /stagePastedTerminalImages\(images\);\n\}, true\);/);
   assert.match(app, /item\.type\.startsWith\('image\/'\)/);
-  assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(state\.selectedAgent\.id\)\}\/uploads/);
+  assert.match(app, /event\.key === 'Enter'.*currentTerminalImages\(\)\.length/s);
+  assert.match(app, /void sendStagedTerminalImages\(\)/);
+  assert.match(app, /Ready · press Enter to upload and send/);
+  assert.match(app, /URL\.createObjectURL\(file\)/);
+  assert.match(app, /class="terminal-image-previews"/);
+  assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(entry\.agentId\)\}\/uploads/);
   assert.match(app, /data_base64: bytesToBase64\(bytes\)/);
   assert.match(app, /Image sent to the agent/);
 });
