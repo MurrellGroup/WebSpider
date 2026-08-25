@@ -126,6 +126,25 @@ test('every non-primary terminal tab has an explicit close control', () => {
   assert.match(app, /async function renderTerminal\(agent\) \{\s*closeTerminal\(\)/);
 });
 
+test('Maths mode preserves the xterm transcript and typesets only equations', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /data-terminal-view="maths">Maths/);
+  assert.doesNotMatch(app, /data-terminal-view="reading">Readable/);
+  assert.match(app, /terminalBufferText\(buffer\)/);
+  assert.match(app, /prepareTerminalMaths\(transcript\)/);
+  assert.match(app, /MathJax\?\.typesetPromise/);
+  assert.match(styles, /terminal-maths-transcript.*white-space: pre-wrap/);
+  assert.doesNotMatch(styles, /data-view="reading"/);
+});
+
+test('pasting a clipboard image uploads it to the agent workspace and sends its path', () => {
+  assert.match(app, /addEventListener\('paste'/);
+  assert.match(app, /item\.type\.startsWith\('image\/'\)/);
+  assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(state\.selectedAgent\.id\)\}\/uploads/);
+  assert.match(app, /data_base64: bytesToBase64\(bytes\)/);
+  assert.match(app, /Image sent to the agent/);
+});
+
 test('file browser can reveal hidden workspace files explicitly', () => {
   assert.match(app, /fileShowHidden: false/);
   assert.match(app, /hidden=\$\{state\.fileShowHidden\}/);

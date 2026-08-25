@@ -14,6 +14,7 @@ import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecr
 import { makeId, nowISO, randomToken } from '../lib/ids.js';
 import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/project-policy.js';
 import { agentLaunchArguments } from '../lib/agent-profile.js';
+import { decodeImageBase64, validateImageUpload } from '../lib/image-upload.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIR = path.resolve(MODULE_DIR, '../../web');
@@ -59,6 +60,8 @@ const MIME = new Map([
   ['.md', 'text/markdown; charset=utf-8'],
   ['.txt', 'text/plain; charset=utf-8'],
   ['.csv', 'text/csv; charset=utf-8'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
 ]);
 
 function fileMime(filename) {
@@ -1075,6 +1078,60 @@ export class Hub {
       const body = await readJSON(ctx.request);
       return this.#startShellTab(ctx.params.id, body.label || 'Shell', ctx.principal.principal_id);
     });
+    route('POST', '/api/v1/agent-instances/:id/uploads', async (ctx) => {
+      const body = await readJSON(ctx.request, 12 * 1024 * 1024);
+      const agent = this.database.getAgent(ctx.params.id);
+      invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+      invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Archived projects cannot receive image uploads.', 409);
+      const terminal = this.database.getTerminal(body.terminal_id);
+      invariant(terminal?.agent_instance_id === agent.id, 'WS_FORBIDDEN', 'Terminal does not belong to this agent.', 403);
+      const root = this.database.listAgentRoots(agent.id)[0];
+      invariant(root, 'WS_ROOT_NOT_FOUND', 'Agent workspace root is unavailable.', 404);
+      invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation is offline; reconnect it before pasting an image.', 503);
+      const bytes = decodeImageBase64(body.data_base64);
+      const validated = validateImageUpload({
+        uploadId: body.upload_id,
+        mimeType: body.mime_type,
+        bytes,
+      });
+      const upload = await this.broker.request(root.node_id, 'files.upload-image', {
+        root_id: root.node_root_id,
+        upload_id: body.upload_id,
+        mime_type: validated.mime_type,
+        data_base64: body.data_base64,
+        sha256: validated.sha256,
+      }, { timeoutMs: 60_000 });
+      const originalName = String(body.filename || 'clipboard-image')
+        .replace(/[\r\n\0]/g, ' ').trim().slice(0, 120) || 'clipboard-image';
+      const messageText = [
+        '[WebSpider image upload]',
+        'The user pasted an image into this agent terminal.',
+        `Local path: ${upload.relative_path}`,
+        `Original name: ${originalName}`,
+        `MIME type: ${upload.mime_type}`,
+        `SHA-256: ${upload.sha256}`,
+        'Inspect the local image when answering the user.',
+      ].join('\n');
+      const message = this.database.createMessage({
+        threadId: agent.active_thread_id,
+        actorId: ctx.principal.principal_id,
+        deliveryRole: 'user',
+        displaySender: 'You (image paste)',
+        contentParts: [{ type: 'text', text: messageText }],
+        wakePolicy: 'ensure_running',
+        idempotencyKey: `image-upload:${body.upload_id}`,
+      });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.image_upload',
+        targetType: 'agent_instance',
+        targetId: agent.id,
+        projectId: agent.project_id,
+        newState: { upload_id: body.upload_id, relative_path: upload.relative_path, mime_type: upload.mime_type, size_bytes: upload.size_bytes },
+      });
+      if (!message.duplicate) queueMicrotask(() => this.#dispatchMessage(message.message.id).catch((error) => this.#logError(error)));
+      return { upload, message: message.message, duplicate: upload.duplicate && message.duplicate };
+    });
     route('POST', '/api/v1/terminals/:id:stop', async (ctx) => {
       const terminal = this.database.getTerminal(ctx.params.id);
       invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
@@ -1349,7 +1406,8 @@ export class Hub {
 
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-    if (!['index.html', 'app.js', 'markdown.js', 'random.js', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-maths.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);

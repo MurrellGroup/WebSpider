@@ -239,7 +239,7 @@ test('agent launch materializes the inherited project agreement without workspac
   fs.mkdirSync(inheritedCodexHome);
   fs.writeFileSync(path.join(inheritedCodexHome, 'AGENTS.md'), '# User defaults\nPreserve the user rule.');
   const fakeCodex = path.join(directory, 'codex');
-  fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -n "$HOME" && test -n "$USER" && test -n "$LOGNAME" && test -n "$SHELL" && test -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test"\n');
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -n "$HOME" && test -n "$USER" && test -n "$LOGNAME" && test -n "$SHELL" && test -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -f "$WEBSPIDER_USER_GUIDE" && grep -q "Master Spider" "$WEBSPIDER_USER_GUIDE" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test"\n');
   fs.chmodSync(fakeCodex, 0o700);
   const database = new NodeDatabase(path.join(directory, 'node.db'));
   const roots = new RootedFileService([{ id: 'awr_context', path: workspace }]);
@@ -274,6 +274,7 @@ test('agent launch materializes the inherited project agreement without workspac
   const managedAgents = fs.readFileSync(path.join(directory, 'agent-context', 'agt_context', 'codex-home', 'AGENTS.md'), 'utf8');
   assert.match(managedAgents, /Preserve the user rule/);
   assert.match(managedAgents, /Reduce user burden/);
+  assert.match(fs.readFileSync(path.join(workspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'), /Master Spider/);
   const controlScriptPath = path.join(directory, 'agent-context', 'agt_context', 'webspider-control');
   const controlScript = fs.readFileSync(controlScriptPath, 'utf8');
   assert.equal(spawnSync(process.execPath, ['--check', controlScriptPath]).status, 0);

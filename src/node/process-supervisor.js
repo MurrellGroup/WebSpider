@@ -8,6 +8,7 @@ import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 
 const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
+const MASTER_USER_GUIDE = fileURLToPath(new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url));
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
@@ -529,6 +530,12 @@ export class ProcessSupervisor extends EventEmitter {
         fs.closeSync(prior);
       }
     }
+    const guideEnvironment = kind === 'agent' && policySnapshot?.agent_role === 'main'
+      ? (() => {
+        const guide = this.rootService.writeUserGuide(rootId, fs.readFileSync(MASTER_USER_GUIDE));
+        return { WEBSPIDER_USER_GUIDE: path.join(root.canonical, guide.relative_path) };
+      })()
+      : {};
     const policyEnvironment = kind === 'agent'
       ? materializePolicyContext(this.stateDir, agentInstanceId, policySnapshot, {
         argv, environment, agentControl, recoveryContext,
@@ -553,6 +560,7 @@ export class ProcessSupervisor extends EventEmitter {
         WEBSPIDER_TASK_ID: taskId || '',
         WEBSPIDER_ROOT_ID: rootId,
         ...environment,
+        ...guideEnvironment,
         ...policyEnvironment,
       },
     });

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { WebSpiderError, invariant } from '../lib/errors.js';
+import { validateImageUpload } from '../lib/image-upload.js';
 
 const {
   O_RDONLY,
@@ -182,6 +183,98 @@ export class RootedFileService {
     const resolved = fs.realpathSync(destination);
     invariant(within(rootPath, resolved), 'WS_PATH_ESCAPE_BLOCKED', 'Inbox document escaped the workspace root.', 403);
     return { document_id: documentId, relative_path: relativePath, filename, sha256: digest, size_bytes: bytes.length, duplicate: false };
+  }
+
+  writeUserGuide(rootId, bytes) {
+    const root = this.getRoot(rootId);
+    invariant(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 1024 * 1024,
+      'WS_REQUEST_TOO_LARGE', 'WebSpider user guide must contain between 1 byte and 1 MiB.', 413);
+    let decoded;
+    try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch {
+      throw new WebSpiderError('WS_VALIDATION', 'WebSpider user guide must be valid UTF-8 text.', 400);
+    }
+    invariant(!decoded.includes('\0'), 'WS_VALIDATION', 'WebSpider user guide must not contain NUL bytes.');
+
+    const rootPath = this.#currentRoot(root);
+    const directory = path.join(root.anchor, '.webspider');
+    try {
+      const stat = fs.lstatSync(directory);
+      invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+        'The reserved WebSpider path is not a real directory.', 403);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      fs.mkdirSync(directory, { mode: 0o700 });
+    }
+    invariant(within(rootPath, fs.realpathSync(directory)), 'WS_PATH_ESCAPE_BLOCKED',
+      'The reserved WebSpider path escaped the workspace root.', 403);
+
+    const relativePath = '.webspider/WEBSPIDER_USER_GUIDE.txt';
+    const destination = path.join(directory, 'WEBSPIDER_USER_GUIDE.txt');
+    try {
+      const stat = fs.lstatSync(destination);
+      invariant(stat.isFile() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+        'WebSpider user guide destination is not a regular file.', 403);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const temporary = path.join(directory, `.user-guide-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, destination);
+      fs.chmodSync(destination, 0o600);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* renamed or already removed */ }
+    }
+    invariant(within(rootPath, fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
+      'WebSpider user guide escaped the workspace root.', 403);
+    return { relative_path: relativePath, size_bytes: bytes.length };
+  }
+
+  writeImageUpload(rootId, { uploadId, mimeType, bytes, sha256 }) {
+    const root = this.getRoot(rootId);
+    const validated = validateImageUpload({ uploadId, mimeType, bytes, sha256 });
+    const rootPath = this.#currentRoot(root);
+    let directory = root.anchor;
+    for (const component of ['.webspider', 'uploads']) {
+      directory = path.join(directory, component);
+      try {
+        const stat = fs.lstatSync(directory);
+        invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'The reserved WebSpider upload path is not a real directory.', 403);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        fs.mkdirSync(directory, { mode: 0o700 });
+      }
+      invariant(within(rootPath, fs.realpathSync(directory)), 'WS_PATH_ESCAPE_BLOCKED',
+        'The reserved WebSpider upload path escaped the workspace root.', 403);
+    }
+
+    const storedName = `${uploadId}.${validated.extension}`;
+    const relativePath = `.webspider/uploads/${storedName}`;
+    const destination = path.join(directory, storedName);
+    try {
+      const stat = fs.lstatSync(destination);
+      invariant(stat.isFile() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+        'Image upload destination is not a regular file.', 403);
+      const existing = fs.readFileSync(destination);
+      invariant(createHash('sha256').update(existing).digest('hex') === validated.sha256,
+        'WS_CONFLICT', 'Image upload ID already exists with different content.', 409);
+      return { upload_id: uploadId, relative_path: relativePath, duplicate: true, ...validated };
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
+    const temporary = path.join(directory, `.image-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, destination);
+      fs.chmodSync(destination, 0o600);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* renamed or already removed */ }
+    }
+    invariant(within(rootPath, fs.realpathSync(destination)), 'WS_PATH_ESCAPE_BLOCKED',
+      'Pasted image escaped the workspace root.', 403);
+    return { upload_id: uploadId, relative_path: relativePath, duplicate: false, ...validated };
   }
 
   #candidate(root, parts) {

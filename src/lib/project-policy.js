@@ -238,6 +238,7 @@ function renderMainInstructions(project, policy, customInstructions = '') {
     'Use judgment. Inspect first, infer routine details, preserve existing work, and ask only for material choices, missing authority, or unavailable essentials. Validate before claiming completion.',
     'Use `portfolio list` and `agents list/send` for coordination. Delegate outcomes and real constraints—not generic workflow—and avoid overlapping writes.',
     'Use `documents send --agent AGENT_ID --file PATH` for long byte-exact handoffs, `tasks run --agent AGENT_ID --argv-json JSON [--notify self|master|none]` for work that outlives a turn, and `reminders add/list/cancel` for durable future input.',
+    'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt` for usage questions.',
     'Only change project/system behavior after an explicit user request. Inspect first and make the narrowest versioned patch.',
     'Harness-native child agents follow their delegated objective, not this Master role; they do not invoke `$WEBSPIDER_CONTROL` and return a UTC completion time.',
   ];

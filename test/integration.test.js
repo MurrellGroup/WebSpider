@@ -463,11 +463,11 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   node.start();
   await online;
   t.after(async () => {
-    const documentWorkerRuntime = node.database.getProcessByAgent('agt_e2e_worker');
-    if (documentWorkerRuntime?.state === 'running') {
-      node.supervisor.stopProcess(documentWorkerRuntime.id, 'SIGTERM');
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    for (const agentId of [bootstrap.agent.id, 'agt_e2e_worker']) {
+      const runtime = node.database.getProcessByAgent(agentId);
+      if (runtime?.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
     }
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await node.stop();
     await hub.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -480,6 +480,21 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const unauthenticated = await fetch(`${listening.url}/api/v1/projects`);
   assert.equal(unauthenticated.status, 401);
   assert.equal(bootstrap.agent.orchestration_role, 'main');
+
+  const pastedPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const imageUpload = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}/uploads`, listening.ownerToken, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      upload_id: 'upl_e2eclipboard123456', terminal_id: bootstrap.agent.terminal_id,
+      filename: 'clipboard.png', mime_type: 'image/png', data_base64: pastedPng.toString('base64'),
+    }),
+  });
+  assert.equal(imageUpload.response.status, 200);
+  assert.equal(imageUpload.body.upload.relative_path, '.webspider/uploads/upl_e2eclipboard123456.png');
+  assert.deepEqual(fs.readFileSync(path.join(workspace, imageUpload.body.upload.relative_path)), pastedPng);
+  assert.match(imageUpload.body.message.content_parts[0].text, /Inspect the local image/);
+  assert.match(imageUpload.body.message.content_parts[0].text, /\.webspider\/uploads\/upl_e2eclipboard123456\.png/);
 
   const policy = await jsonFetch(`${listening.url}/api/v1/projects/${bootstrap.project.id}/policy`, listening.ownerToken);
   assert.equal(policy.response.status, 200);
@@ -628,6 +643,13 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.match(terminalModule.headers.get('content-type'), /javascript/);
   assert.equal(terminalModule.headers.get('cache-control'), 'public, max-age=3600');
   assert.match(await terminalModule.text(), /export\{.*Terminal/);
+  const mathJaxModule = await fetch(`${listening.url}/vendor/mathjax.js`);
+  assert.equal(mathJaxModule.status, 200);
+  assert.match(mathJaxModule.headers.get('content-type'), /javascript/);
+  assert.equal(mathJaxModule.headers.get('cache-control'), 'public, max-age=3600');
+  const mathJaxFont = await fetch(`${listening.url}/vendor/mathjax-fonts/woff-v2/MathJax_Main-Regular.woff`);
+  assert.equal(mathJaxFont.status, 200);
+  assert.match(mathJaxFont.headers.get('content-type'), /font\/woff/);
   const fitModule = await fetch(`${listening.url}/vendor/addon-fit.mjs`);
   assert.equal(fitModule.status, 200);
   assert.match(fitModule.headers.get('content-type'), /javascript/);

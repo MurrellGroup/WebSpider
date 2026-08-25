@@ -138,3 +138,52 @@ test('document handoffs reject a symlinked reserved inbox', (t) => {
   }), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
   assert.equal(fs.existsSync(path.join(value.outside, 'inbox')), false);
 });
+
+test('the package-owned Master guide is refreshed atomically inside the workspace', (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const first = value.service.writeUserGuide('awr_test', Buffer.from('WebSpider guide version one\n'));
+  assert.equal(first.relative_path, '.webspider/WEBSPIDER_USER_GUIDE.txt');
+  const guidePath = path.join(value.root, first.relative_path);
+  assert.equal(fs.readFileSync(guidePath, 'utf8'), 'WebSpider guide version one\n');
+  assert.equal(fs.statSync(guidePath).mode & 0o777, 0o600);
+  value.service.writeUserGuide('awr_test', Buffer.from('WebSpider guide version two\n'));
+  assert.equal(fs.readFileSync(guidePath, 'utf8'), 'WebSpider guide version two\n');
+});
+
+test('the Master guide rejects a symlinked reserved WebSpider path', (t) => {
+  const value = fixture();
+  fs.symlinkSync(value.outside, path.join(value.root, '.webspider'));
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  assert.throws(() => value.service.writeUserGuide('awr_test', Buffer.from('do not escape')),
+    (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
+  assert.equal(fs.existsSync(path.join(value.outside, 'WEBSPIDER_USER_GUIDE.txt')), false);
+});
+
+test('clipboard images are checksum-verified and written privately inside the workspace', (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const upload = value.service.writeImageUpload('awr_test', {
+    uploadId: 'upl_abcdefgh12345678', mimeType: 'image/png', bytes, sha256,
+  });
+  assert.equal(upload.relative_path, '.webspider/uploads/upl_abcdefgh12345678.png');
+  assert.deepEqual(fs.readFileSync(path.join(value.root, upload.relative_path)), bytes);
+  assert.equal(fs.statSync(path.join(value.root, upload.relative_path)).mode & 0o777, 0o600);
+  assert.equal(value.service.writeImageUpload('awr_test', {
+    uploadId: 'upl_abcdefgh12345678', mimeType: 'image/png', bytes, sha256,
+  }).duplicate, true);
+  assert.throws(() => value.service.writeImageUpload('awr_test', {
+    uploadId: 'upl_wrongtype12345678', mimeType: 'image/jpeg', bytes, sha256,
+  }), (error) => error.code === 'WS_UPLOAD_INVALID');
+});

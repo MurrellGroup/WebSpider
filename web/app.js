@@ -1,5 +1,6 @@
-import { renderMarkdown, stripTerminalFormatting } from './markdown.js';
+import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
+import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
@@ -46,9 +47,13 @@ const state = {
   terminalInputAcknowledged: 0,
   terminalCompositionTimer: null,
   terminalText: '',
-  terminalView: 'terminal',
+  terminalView: localStorage.getItem('webspider_terminal_view') === 'reading'
+    ? 'maths'
+    : localStorage.getItem('webspider_terminal_view') || 'terminal',
   terminalInputMode: 'direct',
   terminalRenderTimer: null,
+  terminalMathsGeneration: 0,
+  terminalImageUploading: false,
   filePath: '',
   fileShowHidden: false,
   activeRoot: null,
@@ -238,6 +243,9 @@ function closeTerminal() {
   state.terminalKeyboardProtocol = false;
   state.terminalBracketedPaste = false;
   state.terminalProtocolTail = '';
+  clearTimeout(state.terminalRenderTimer);
+  state.terminalRenderTimer = null;
+  state.terminalMathsGeneration += 1;
   state.terminalEmulator?.dispose();
   state.terminalEmulator = null;
 }
@@ -539,7 +547,9 @@ async function renderActivity(agent) {
 
 function bytesToBase64(bytes) {
   let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
   return btoa(binary);
 }
 
@@ -600,20 +610,81 @@ function submitTerminalComposition(text) {
   return true;
 }
 
-function updateTerminalReading(immediate = false) {
+function updateTerminalMaths(immediate = false) {
   clearTimeout(state.terminalRenderTimer);
-  const render = () => {
-    const readable = $('#terminal-readable');
-    if (!readable) return;
-    const normalized = stripTerminalFormatting(state.terminalText);
-    readable.innerHTML = normalized.trim()
-      ? renderMarkdown(normalized)
-      : '<div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div>';
-    readable.scrollTop = readable.scrollHeight;
+  if (state.terminalView === 'terminal' && !immediate) return;
+  const render = async () => {
+    const maths = $('#terminal-maths');
+    const buffer = state.terminalEmulator?.buffer?.active;
+    if (!maths || !buffer) return;
+    const transcript = terminalBufferText(buffer);
+    const generation = ++state.terminalMathsGeneration;
+    const pinnedToBottom = maths.scrollHeight - maths.scrollTop - maths.clientHeight < 48;
+    window.MathJax?.typesetClear?.([maths]);
+    if (!transcript) {
+      maths.innerHTML = '<div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div>';
+      return;
+    }
+    const content = document.createElement('div');
+    content.className = 'terminal-maths-transcript';
+    content.textContent = prepareTerminalMaths(transcript);
+    maths.replaceChildren(content);
+    try {
+      await window.MathJax?.typesetPromise?.([content]);
+    } catch (error) {
+      console.warn('MathJax could not typeset the terminal transcript.', error);
+    }
+    if (generation === state.terminalMathsGeneration && pinnedToBottom) maths.scrollTop = maths.scrollHeight;
   };
-  if (immediate) render();
-  else state.terminalRenderTimer = setTimeout(render, 120);
+  if (immediate) void render();
+  else state.terminalRenderTimer = setTimeout(render, 180);
 }
+
+async function uploadPastedTerminalImages(files) {
+  if (state.terminalImageUploading) {
+    toast('An image upload is already in progress.', true);
+    return;
+  }
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+  if (!state.selectedAgent || !terminal) return;
+  state.terminalImageUploading = true;
+  try {
+    for (const file of files.slice(0, 4)) {
+      if (file.size > 8 * 1024 * 1024) throw new Error('Pasted images must be 8 MiB or smaller.');
+      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
+        throw new Error('Paste a PNG, JPEG, GIF, or WebP image.');
+      }
+      toast(`Uploading ${file.name || 'clipboard image'}…`);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await api(`/api/v1/agent-instances/${encodeURIComponent(state.selectedAgent.id)}/uploads`, {
+        method: 'POST',
+        body: {
+          upload_id: `upl_${randomIdentifier()}`,
+          terminal_id: terminal.id,
+          filename: file.name || 'clipboard-image',
+          mime_type: file.type,
+          data_base64: bytesToBase64(bytes),
+        },
+      });
+      toast(`Image sent to the agent: ${result.upload.relative_path}`);
+    }
+  } catch (error) {
+    toast(friendlyError(error), true);
+  } finally {
+    state.terminalImageUploading = false;
+  }
+}
+
+document.addEventListener('paste', (event) => {
+  if (!event.target.closest('#terminal-output, #terminal-compose')) return;
+  const images = [...(event.clipboardData?.items || [])]
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (!images.length) return;
+  event.preventDefault();
+  void uploadPastedTerminalImages(images);
+});
 
 function transmitTerminalInput(data) {
   if (!data) return;
@@ -735,7 +806,7 @@ function transmitTerminalResize() {
 }
 
 function fitTerminal() {
-  if (!state.terminalEmulator || !state.terminalFitAddon || state.terminalView === 'reading') return;
+  if (!state.terminalEmulator || !state.terminalFitAddon || state.terminalView === 'maths') return;
   state.terminalFitAddon.fit();
   const dimensions = { columns: state.terminalEmulator.cols, rows: state.terminalEmulator.rows };
   const output = $('#terminal-output');
@@ -763,15 +834,15 @@ async function renderTerminal(agent) {
   state.selectedTerminalId = terminal.id;
   const agentEnded = ['stopped', 'failed', 'hibernated'].includes(agent.state);
   const interactive = terminal.state === 'attached' && !(terminal.kind === 'primary_agent' && agentEnded);
-  if (!['terminal', 'reading', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
+  if (!['terminal', 'maths', 'split'].includes(state.terminalView)) state.terminalView = 'terminal';
   $('#agent-content').innerHTML = `<section class="terminal-shell">
     <div class="terminal-session-tabs">${state.terminals.map((item) => {
     const label = item.kind === 'primary_agent' ? agent.title || 'Agent'
       : item.kind === 'task_shell' && item.label === 'Terminal' ? `Task ${item.id.slice(-4)}` : item.label;
     return `<div class="terminal-tab ${item.id === terminal.id ? 'selected' : ''}"><button class="terminal-select" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i><span>${h(label)}</span></button>${item.kind !== 'primary_agent' ? `<button class="terminal-tab-close" data-action="close-terminal" data-terminal-id="${h(item.id)}" aria-label="Close ${h(label)} terminal tab" title="${item.kind === 'task_shell' ? 'Dismiss task terminal; the task keeps running' : 'Close terminal and stop its shell'}">×</button>` : ''}</div>`;
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="reading">Readable</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
-    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-readable" class="terminal-readable markdown-body" aria-live="polite"><div class="terminal-reading-empty">Readable output will appear here as the agent writes.</div></div></div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? '<div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose">Text box</button></div>' : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
+    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="Write before sending to the terminal"></textarea><button class="primary" type="submit">Send</button></form>' : ''}
   </section>`;
   applyTerminalView();
@@ -821,9 +892,8 @@ async function renderTerminal(agent) {
       if (Number(frame.sequence || 0) >= state.terminalSequence) {
         state.terminalText = frame.text || '';
         state.terminalEmulator.reset();
-        state.terminalEmulator.write(state.terminalText);
+        state.terminalEmulator.write(state.terminalText, () => updateTerminalMaths(true));
         state.terminalSequence = Number(frame.sequence || 0);
-        updateTerminalReading(true);
       }
     }
     if (frame.type === 'OUTPUT' && Number(frame.sequence_end) > state.terminalSequence) {
@@ -832,9 +902,8 @@ async function renderTerminal(agent) {
       const addition = new TextDecoder().decode(overlap ? bytes.slice(overlap) : bytes);
       state.terminalText += addition;
       observeTerminalProtocol(addition);
-      state.terminalEmulator.write(overlap ? bytes.slice(overlap) : bytes);
+      state.terminalEmulator.write(overlap ? bytes.slice(overlap) : bytes, () => updateTerminalMaths());
       state.terminalSequence = Number(frame.sequence_end);
-      updateTerminalReading();
     }
     if (frame.type === 'RESIZE_ACK') {
       const output = $('#terminal-output');
@@ -1134,7 +1203,7 @@ document.addEventListener('click', async (event) => {
   if (terminalView) {
     state.terminalView = terminalView.dataset.terminalView;
     applyTerminalView();
-    updateTerminalReading(true);
+    updateTerminalMaths(true);
     requestAnimationFrame(fitTerminal);
     return;
   }

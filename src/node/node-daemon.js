@@ -297,6 +297,13 @@ export class NodeDaemon extends EventEmitter {
         return this.rootService.search(payload.root_id, payload.query, payload.path || '', payload.options || {});
       case 'files.git-status':
         return this.rootService.gitStatus(payload.root_id, payload.path || '');
+      case 'files.upload-image':
+        return this.rootService.writeImageUpload(payload.root_id, {
+          uploadId: payload.upload_id,
+          mimeType: payload.mime_type,
+          bytes: Buffer.from(payload.data_base64 || '', 'base64'),
+          sha256: payload.sha256,
+        });
       case 'process.start-agent': {
         const existing = this.database.getProcessByAgent(payload.agent_instance_id);
         if (existing && existing.state === 'running') return { runtime: existing, resumed: true };

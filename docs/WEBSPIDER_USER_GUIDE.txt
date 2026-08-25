@@ -1,0 +1,265 @@
+WEBSPIDER USER GUIDE
+====================
+
+Purpose
+-------
+
+WebSpider keeps one Master Spider and multiple project-specific Sub-Spiders available through a browser. This guide is installed by WebSpider at:
+
+    .webspider/WEBSPIDER_USER_GUIDE.txt
+
+The Master Spider should read this file when the user asks how WebSpider works or how to perform an operation. The installed package refreshes it whenever the Master is launched. A WebSpider source checkout is not required.
+
+1. Roles and mental model
+-------------------------
+
+Master Spider
+    The persistent multi-project manager. It maintains the portfolio view, delegates bounded work, follows up on workers, integrates results, and gives the user one coherent account.
+
+Sub-Spider / worker
+    A persistent agent assigned to one registered project root, often on another machine. It should work only in that project, report durable status, and return results to the Master.
+
+Meta-Spider
+    A separate, user-invoked Codex session for installing, upgrading, diagnosing, or repairing WebSpider itself. It is not part of normal portfolio work and should not routinely prod the Master.
+
+Hub
+    The authoritative WebSpider service. It stores projects, threads, messages, tasks, reminders, policies, events, audit records, and node registration in SQLite.
+
+Node
+    A workstation connected outbound to the Hub. It owns local workspace paths, running PTYs, Codex processes, terminal logs, and node-local command receipts.
+
+2. Normal workflow
+------------------
+
+1. Tell the Master the outcome you want.
+2. Let the Master inspect the portfolio and decide whether to work directly or delegate.
+3. Open a Sub-Spider only when you want to observe or steer that particular project.
+4. Keep important work products in clean Git repositories and commit meaningful checkpoints.
+5. Use durable WebSpider messages, tasks, reminders, and document handoffs for work that must survive browser or network interruptions.
+
+The user should not need to supervise terminals, translate a goal into a task graph, or repeatedly ask workers for status.
+
+3. Browser interaction surfaces
+-------------------------------
+
+Master terminal
+    The live Master Codex PTY. Closing or reloading the browser does not stop it. Direct keyboard input goes to the PTY and is visible in the node-local terminal log.
+
+Master Text box
+    On the primary Master terminal, Text box submissions are accepted as durable WebSpider messages before being delivered. Prefer this for important instructions that should remain in the WebSpider thread.
+
+Conversation tab
+    Shows durable WebSpider messages. Messages are queued while a node is offline and delivered when it reconnects.
+
+Sub-Spider terminal
+    A direct view of that worker's PTY. It does not route through the Master. The network path is browser -> Hub -> owning node -> PTY.
+
+Additional terminal tabs
+    Independent login shells for monitoring or ad hoc commands. They are not orchestration targets and do not receive Master/Sub-Spider messages.
+
+Direct mode
+    Best for normal terminal control, interactive programs, control keys, and short commands.
+
+Text box mode
+    Best for drafting or mouse-editing text before sending. On Sub-Spider and auxiliary terminals it sends to the PTY. On the primary Master terminal it creates a durable message.
+
+Paste an image
+    Paste a PNG, JPEG, GIF, or WebP into a terminal or its text box. WebSpider writes a private copy under `.webspider/uploads/` in that agent's workspace, then sends the agent a durable message containing the exact local path and checksum. Images may be up to 8 MiB. Uploads remain in the workspace until removed.
+
+Maths mode
+    The same xterm-parsed transcript, spacing, and line wrapping as Terminal mode, with recognized TeX equations typeset by the locally bundled MathJax. It does not reflow prose as Markdown. Standard \(...\), \[...\], $...$, and $$...$$ forms work; WebSpider also recognizes agent output that puts a TeX equation between standalone [ and ] lines.
+
+Terminal control
+    Many browsers may watch, but only one attachment holds the input lease. Choose Take control to type. Another viewer remains read-only until control is released or expires.
+
+4. Projects and Sub-Spiders
+---------------------------
+
+Add project
+    Use Add project in the portfolio. WebSpider creates the project record and a short-lived, single-use worker enrollment command.
+
+Connect worker
+    Run the generated enrollment command once on the intended node from the directory that should become that project's workspace root. A node connects outbound; it does not open an inbound WebSpider port.
+
+One node, multiple projects
+    A node may register several project roots. Each project receives its own Sub-Spider and workspace boundary.
+
+One project, multiple Git repositories
+    This is supported. Do not assume the project root itself is one repository.
+
+Archive
+    Hides an inactive project while retaining WebSpider history. Active agents, shells, or tasks must be stopped or completed first.
+
+Delete permanently
+    Available only after archive and exact-name confirmation. It removes WebSpider's records, not workspace files.
+
+5. Durable orchestration
+------------------------
+
+Messages
+    Accepted transactionally by the Hub with an idempotency key. Offline messages remain queued. Important user instructions should use the Master Text box or Conversation surface rather than relying only on direct terminal keystrokes.
+
+Tasks
+    Detached commands assigned to a registered agent/root. Tasks have durable IDs, states, attempts, terminal logs, and exit results. A task can notify itself or the Master when it completes.
+
+Completion hooks
+    A task may inject a durable user-role message when it finishes. The message includes task ID, title, status, source agent, and optional custom completion text.
+
+Reminders
+    One-shot or recurring future messages. They survive Hub restarts, can target the creating Sub-Spider or the Master, and can be listed or cancelled.
+
+Documents
+    Long or byte-exact text should use document handoff. WebSpider checksum-verifies the content, writes a mode-0600 file under the destination workspace's .webspider/inbox directory, and sends a short durable message naming it.
+
+Artifacts
+    Promote important outputs when they should be tracked by WebSpider independently of a workspace path. Promotion records a SHA-256 digest and metadata on the Hub.
+
+Worker status
+    Workers should report working, blocked, completed, or idle with a concise evidence-bearing summary. The Master can inspect these states without opening every terminal.
+
+6. Agent-side control helper
+----------------------------
+
+Managed agents receive the executable path in:
+
+    $WEBSPIDER_CONTROL
+
+Common Master operations:
+
+    $WEBSPIDER_CONTROL portfolio list
+    $WEBSPIDER_CONTROL agents list
+    $WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT
+    $WEBSPIDER_CONTROL tasks list
+    $WEBSPIDER_CONTROL reminders list
+    $WEBSPIDER_CONTROL policy show
+
+Use the helper's own usage output for the exact options supported by the installed version. Workers receive a narrower helper and cannot inspect the whole portfolio, message peer workers, or edit policy.
+
+7. Instructions and policy
+--------------------------
+
+System defaults
+    Apply beneath all projects.
+
+Project instructions
+    Apply to the Master and workers for one project.
+
+All Sub-Spiders
+    The browser's shared Sub-Spider instruction editor adds compact worker-only instructions without changing the Master.
+
+Per-agent instructions
+    The Instructions tab stores concise overrides for one agent. Saving affects the next launch; Save & restart activates them immediately.
+
+Instruction changes are revisioned. Running agents keep their immutable launch snapshot until restarted.
+
+8. Persistence and recovery
+---------------------------
+
+Browser closed or reloaded
+    Safe. The PTY continues and the browser reattaches from a terminal snapshot.
+
+Hub service restarted or temporarily offline
+    Running node PTYs continue. Nodes reconnect, replay durable events, and queued messages/tasks resume.
+
+Node daemon restarted
+    Existing detached PTYs normally survive. The node reconciles process IDs, FIFOs, output offsets, and exit markers, then reports its runtime inventory to the Hub.
+
+Whole node machine rebooted
+    PTY processes do not survive. WebSpider detects the missing runtime and, when restart policy permits, launches a replacement agent. It supplies up to the last 200,000 bytes of the prior terminal log through $WEBSPIDER_RECOVERY_CONTEXT and injects a durable recovery message.
+
+Important limitation
+    Machine-reboot recovery reconstructs work; it does not guarantee continuation of the exact in-flight Codex turn. Managed Codex session files and terminal logs are node-local. WebSpider currently launches a replacement Codex rather than automatically selecting an old Codex session.
+
+Disk loss or corrupted state
+    Not covered by restart recovery. Hub state, every node's WebSpider state, and project workspaces require independent backups on other storage. The current package does not yet provide a built-in webspider backup/restore command.
+
+Direct terminal history
+    Node-local terminal logs retain it while the node state survives, but direct keystrokes are not canonical WebSpider thread messages. Use durable messages for instructions you cannot afford to lose.
+
+Work products
+    WebSpider is not a substitute for Git remotes, data backups, or artifact storage. Commit checkpoints locally and push or back up irreplaceable code/results outside the workstation.
+
+9. Recovery-oriented usage
+--------------------------
+
+For instructions that must be recoverable:
+    Send them through the Master Text box or Conversation tab.
+
+For work that may outlive an agent turn:
+    Use a detached task and a completion hook.
+
+For a future follow-up:
+    Use a reminder rather than relying on the agent to remember elapsed wall time.
+
+For long specifications or reports:
+    Use a document handoff.
+
+For code or results:
+    Keep a clean Git repository, commit checkpoints, and use an external remote or backup.
+
+Before rebooting a node intentionally:
+    Ask the worker to save/commit, report status, and stop at a clean boundary. A daemon/service restart is much less disruptive than a machine reboot.
+
+10. Service and connectivity checks
+-----------------------------------
+
+Hub service:
+
+    webspider service status
+
+Worker service:
+
+    webspider service status-node
+
+General checks:
+
+    webspider doctor
+
+Owner login token on the Hub:
+
+    webspider auth token
+
+A healthy worker status includes connection_state online. If a node repeatedly reports "Node handshake expired", compare UTC clocks and restore NTP synchronization. If a workspace root was moved or deleted, repair the registered root without reusing a consumed enrollment token.
+
+11. Security and authority
+--------------------------
+
+WebSpider assumes all managed agents have the permissions of their host user. Managed Codex profiles currently run unattended with full host-user access. Project/root APIs are confined, but the PTY process itself is not an OS sandbox.
+
+Use a private tailnet or HTTPS reverse proxy. Do not expose the plain HTTP Hub directly to the public internet.
+
+Enrollment tokens are short-lived and single-use. Node identities use local Ed25519 keys. Browser mutations require an authenticated session and CSRF token; WebSockets require the session and same origin.
+
+Agents must not buy credits, change billing/authentication, redeem resets, or move work to API-funded execution. Those actions remain human-only.
+
+12. What to do when something looks wrong
+-----------------------------------------
+
+Agent terminal alive but portal stale
+    Reload once. Check Hub health and the node's online state.
+
+Node offline
+    Leave durable messages queued. Check the node user service and its connection status. Do not re-enroll unless identity recovery is genuinely impossible.
+
+Agent process missing after reconnect
+    WebSpider should mark the old runtime failed, start a replacement according to policy, attach recovery context, and inject a recovery message. Inspect the Activity and Conversation tabs.
+
+Task appears stuck
+    Inspect its task terminal and node status. Cancel only if the command should stop; otherwise preserve the task ID for diagnosis.
+
+WebSpider itself broken
+    Invoke the Meta-Spider from the package's documented prompt. The Meta-Spider should preserve state and identities, diagnose narrowly, and return normal control to the Master.
+
+13. Durability checklist for real projects
+------------------------------------------
+
+- Important user instructions sent as durable messages.
+- Meaningful code/results committed to Git.
+- Irreplaceable repositories and data backed up off-machine.
+- Hub WebSpider state backed up off-machine.
+- Every worker node's WebSpider state backed up off-machine if its Codex sessions or terminal history matter.
+- Long-running work represented by tasks with completion hooks.
+- Workers report status before planned machine reboots.
+- Archived projects used instead of deletion unless permanent removal is intended.
+
+If the question is about WebSpider operation, consult this file first. If behavior differs, trust the installed version's UI/help and report the discrepancy to the Meta-Spider.

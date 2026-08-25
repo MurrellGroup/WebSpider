@@ -49,6 +49,7 @@ test('project policy patches preserve inherited defaults and render an actionabl
   assert.match(main, /persistent multi-project manager/i);
   assert.match(main, /Use judgment/i);
   assert.match(main, /documents send.*tasks run.*reminders add\/list\/cancel/i);
+  assert.match(main, /\.webspider\/WEBSPIDER_USER_GUIDE\.txt/);
   assert.match(main, /Only change project\/system behavior after an explicit user request/i);
   assert.match(main, /do not invoke `\$WEBSPIDER_CONTROL`/i);
   assert.match(main, /UTC completion time/i);

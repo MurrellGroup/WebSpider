@@ -206,14 +206,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .terminal-input-switch button { border: 0; border-radius: 5px; padding: 5px 8px; background: transparent; color: var(--muted-2); font-size: 9px; cursor: pointer; }
 .terminal-input-switch button.selected { color: #07110d; background: var(--blue); }
 .terminal-layout { flex: 1; min-height: 0; display: grid; }
-.terminal-layout[data-view="terminal"] .terminal-readable, .terminal-layout[data-view="reading"] .terminal-output { display: none; }
+.terminal-layout[data-view="terminal"] .terminal-maths, .terminal-layout[data-view="maths"] .terminal-output { display: none; }
 .terminal-layout[data-view="split"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .terminal-layout[data-view="split"] .terminal-output { border-right: 1px solid #202733; }
 .terminal-output { min-height: 0; padding: 12px; overflow: hidden; background: #07090d; }
 .terminal-output .xterm { height: 100%; }
 .terminal-output .xterm-viewport { scrollbar-color: #354154 #0a0d12; }
-.terminal-readable { min-height: 0; padding: clamp(18px, 3vw, 34px); overflow: auto; background: #0b0e14; }
-.terminal-reading-empty { color: var(--muted-2); min-height: 340px; display: grid; place-items: center; font-size: 11px; }
+.terminal-maths { min-height: 0; padding: 12px; overflow: auto; background: #07090d; color: #d7e0e3; }
+.terminal-maths-transcript { min-height: 100%; white-space: pre-wrap; overflow-wrap: normal; tab-size: 8; font: 12px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.terminal-maths-transcript mjx-container { color: inherit; white-space: normal; }
+.terminal-maths-transcript mjx-container[display="true"] { margin: .6em 0 !important; overflow-x: auto; overflow-y: hidden; }
+.terminal-maths-empty { color: var(--muted-2); min-height: 340px; display: grid; place-items: center; font-size: 11px; }
 .terminal-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 9px; border-top: 1px solid #202733; background: #10141c; }
 .terminal-compose textarea { width: 100%; min-height: 68px; max-height: 190px; resize: vertical; padding: 9px 10px; background: #07090d; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .terminal-compose button { align-self: end; }
