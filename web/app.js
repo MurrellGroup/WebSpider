@@ -5,7 +5,7 @@ import { directKeyInput, enqueueTerminalData, kittySequence } from './terminal-i
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.4';
+const PORTAL_VERSION = '0.6.5';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -778,6 +778,7 @@ function handleTerminalData(data) {
 function handleTerminalKey(event) {
   const input = directKeyInput(event, state.terminalKeyboardProtocol);
   if (input == null) return true;
+  event.preventDefault();
   handleTerminalData(input);
   return false;
 }
