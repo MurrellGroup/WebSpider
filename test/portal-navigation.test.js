@@ -14,6 +14,8 @@ test('portal and hub version are synchronized and version skew is explicit', () 
   assert.match(app, new RegExp(`const PORTAL_VERSION = '${packageVersion.replaceAll('.', '\\.')}'`));
   assert.match(hub, new RegExp(`version: '${packageVersion.replaceAll('.', '\\.')}'`));
   assert.match(app, /health\.version !== PORTAL_VERSION/);
+  assert.match(app, /health\.portal_build.*PORTAL_BUILD/);
+  assert.match(app, /location\.reload\(\)/);
   assert.match(app, /showVersionMismatch\(health\.version\)/);
   assert.match(app, /systemctl --user restart webspider\.service/);
 });
@@ -21,7 +23,7 @@ test('portal and hub version are synchronized and version skew is explicit', () 
 test('Master Spider navigation opens its terminal and portfolio is separate', () => {
   assert.match(page, /class="nav-master selected" data-action="master"/);
   assert.match(page, /<strong>Master Spider<\/strong><small>Persistent terminal<\/small>/);
-  assert.match(app, /if \(action === 'master'\) return openMasterTerminal\(\)/);
+  assert.match(app, /if \(action === 'master'\).*openMasterTerminal\(\)/);
   assert.match(app, /if \(parts\[0\] === 'home'\) return openMasterTerminal\(\)/);
   assert.match(app, /orchestration_role === 'main'.*data-action="overview".*Portfolio/);
   assert.match(app, /history\.replaceState\(null, '', '#\/overview'\)/);
@@ -35,6 +37,7 @@ test('agent pages expose compact editable custom instructions', () => {
   assert.match(app, /\/api\/v1\/agent-instances\/\$\{encodeURIComponent\(agentId\)\}\/instructions/);
   assert.match(app, /Save & restart/);
   assert.match(app, /Full instruction preview/);
+  assert.match(app, /Instructions unchanged/);
 });
 
 test('one browser editor manages worker-only instructions without changing the Master', () => {
@@ -51,6 +54,14 @@ test('project onboarding uses the current hub route', () => {
   assert.match(page, /data-action="onboard-project" title="Add project"/);
   assert.match(app, /if \(action === 'onboard-project'\) return showProjectOnboarding\(\)/);
   assert.match(app, /api\('\/api\/v1\/projects\/onboard'/);
+});
+
+test('mobile navigation keeps project actions available and More opens the navigation drawer', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.doesNotMatch(styles, /header-actions button:not\(\.mobile-primary\).*display: none/);
+  assert.doesNotMatch(styles, /header-actions \.action-menu.*display: none/);
+  assert.match(app, /if \(action === 'show-more'\).*mobile-open/s);
+  assert.match(app, /function closeMobileSidebar\(\)/);
 });
 
 test('archived projects have a dedicated restore and guarded-delete view', () => {
@@ -71,9 +82,20 @@ test('worker command copy supports plain HTTP without the Clipboard API', () => 
   assert.match(app, /Command selected; press Ctrl\/Cmd\+C to copy it\./);
 });
 
+test('login preserves the useful authentication error returned by the hub', () => {
+  assert.match(app, /response\.status === 401[\s\S]*value\?\.error\?\.message \|\| 'Authentication required'/);
+  assert.match(app, /code: value\?\.error\?\.code/);
+});
+
 test('note editor clicks do not reopen the note and discard the active draft', () => {
   assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
   assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);
+  assert.match(app, /Creating note…/);
+});
+
+test('project navigation does not intercept controls inside project forms', () => {
+  assert.match(app, /closest\('\.project-heading\[data-project-id\], \.portfolio-row\[data-project-id\]'\)/);
+  assert.doesNotMatch(app, /closest\('\[data-project-id\]:not\(\[data-action\]\)'\)/);
 });
 
 test('terminal pages begin in watch mode and acquire control only on interaction', () => {
@@ -82,5 +104,26 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.doesNotMatch(app, /frame\.type === 'ATTACHED'.*LEASE_REQUEST/);
   assert.match(app, /function requestTerminalLease\(\)/);
   assert.match(app, /if \(terminalInputMode\).*requestTerminalLease\(\)/s);
+  assert.match(app, /function handleTerminalData\(data\)[\s\S]*!state\.terminalLease && !state\.terminalLeaseRequested/);
+  assert.match(app, /addEventListener\('pointerdown', requestTerminalLease\)/);
+  assert.match(app, /emulator\.onData\(handleTerminalData\)/);
+  assert.doesNotMatch(app, /emulator\.onData\(queueTerminalInput\)/);
+  assert.doesNotMatch(app, /if \(state\.terminalInputMode === 'direct'\) emulator\.focus\(\)/);
   assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);
+});
+
+test('every extra shell tab has an explicit close control that deletes the tab', () => {
+  assert.match(app, /class="terminal-tab-close"/);
+  assert.match(app, /aria-label="Close .* terminal tab"/);
+  assert.match(app, /method: 'DELETE'/);
+  assert.match(app, /Terminal tab closed\./);
+  assert.match(app, /item\.kind === 'primary_agent' \|\| item\.state !== 'exited'/);
+  assert.match(app, /async function renderTerminal\(agent\) \{\s*closeTerminal\(\)/);
+});
+
+test('file browser can reveal hidden workspace files explicitly', () => {
+  assert.match(app, /fileShowHidden: false/);
+  assert.match(app, /hidden=\$\{state\.fileShowHidden\}/);
+  assert.match(app, /data-action="toggle-hidden-files"/);
+  assert.match(app, /Show hidden/);
 });

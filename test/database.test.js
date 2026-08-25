@@ -67,6 +67,12 @@ test('projects can be safely archived, restored, and permanently removed without
     (error) => error.code === 'WS_PROJECT_ACTIVE' && /shell/.test(error.message),
   );
   database.setTerminalState(shell.id, 'exited');
+  assert.equal(database.deleteInteractiveTerminal(shell.id).id, shell.id);
+  assert.equal(database.getTerminal(shell.id), null);
+  assert.throws(
+    () => database.deleteInteractiveTerminal(agent.terminal_id),
+    (error) => error.code === 'WS_FORBIDDEN',
+  );
 
   database.setAgentState(agent.id, 'stopping');
   assert.throws(
@@ -226,6 +232,10 @@ test('project policy is defaulted, versioned, and snapshotted for agent launches
   const instructed = database.updateAgentInstructions(agent.id, 'Keep reports compact.', 'owner:test', { expectedRevision: 1 });
   assert.equal(instructed.custom_instructions, 'Keep reports compact.');
   assert.equal(instructed.instruction_revision, 2);
+  assert.equal(
+    database.updateAgentInstructions(agent.id, 'Keep reports compact.', 'owner:test', { expectedRevision: 2 }).instruction_revision,
+    2,
+  );
   assert.throws(
     () => database.updateAgentInstructions(agent.id, 'stale edit', 'owner:test', { expectedRevision: 1 }),
     (error) => error.code === 'WS_INSTRUCTION_REVISION_CONFLICT' && error.status === 409,
@@ -254,6 +264,7 @@ test('system defaults remain layered beneath project overrides with optimistic r
     { expectedRevision: 1, actor: 'agent:main', reason: 'User requested a system default change.' },
   );
   assert.equal(updatedSystem.revision, 2);
+  assert.equal(database.updateSystemPolicy({}, { expectedRevision: updatedSystem.revision }).revision, updatedSystem.revision);
   assert.equal(database.getProject('prj_test').policy.execution.use_project_conventions, false);
   const project = database.updateProjectPolicy(
     'prj_test',

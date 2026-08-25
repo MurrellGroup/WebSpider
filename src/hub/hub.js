@@ -102,6 +102,11 @@ export class Hub {
     this.publicBaseURL = publicBaseURL;
     this.allowedOrigins = allowedOrigins;
     this.webDir = webDir;
+    const portalHash = createHash('sha256');
+    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js']) {
+      portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
+    }
+    this.portalBuild = portalHash.digest('hex').slice(0, 16);
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(stateDir, 'artifacts'), { recursive: true, mode: 0o700 });
     this.notesDir = path.join(stateDir, 'notes');
@@ -220,7 +225,9 @@ export class Hub {
   #registerRoutes() {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
-    route('GET', '/healthz', async () => ({ status: 'ok', version: '0.6.2', time: nowISO() }), { auth: false, csrf: false });
+    route('GET', '/healthz', async () => ({
+      status: 'ok', version: '0.6.2', portal_build: this.portalBuild, time: nowISO(),
+    }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -259,15 +266,18 @@ export class Hub {
         expectedRevision: body.expected_revision,
         reason: body.reason || 'Owner updated system defaults.',
       });
-      this.database.audit({
-        actorId: ctx.principal.principal_id,
-        action: 'system.policy.update',
-        targetType: 'system_policy',
-        targetId: policy.id,
-        previousState: { revision: previous.revision },
-        newState: { revision: policy.revision, reason: body.reason || null },
-      });
-      return policy;
+      const changed = policy.revision !== previous.revision;
+      if (changed) {
+        this.database.audit({
+          actorId: ctx.principal.principal_id,
+          action: 'system.policy.update',
+          targetType: 'system_policy',
+          targetId: policy.id,
+          previousState: { revision: previous.revision },
+          newState: { revision: policy.revision, reason: body.reason || null },
+        });
+      }
+      return { ...policy, changed };
     });
     route('GET', '/api/v1/projects', async (ctx) => {
       const requested = ctx.url.searchParams.get('archived');
@@ -1031,20 +1041,24 @@ export class Hub {
         ctx.principal.principal_id,
         { expectedRevision: body.expected_revision },
       );
-      this.database.audit({
-        actorId: ctx.principal.principal_id,
-        action: 'agent.instructions.update',
-        targetType: 'agent_instance',
-        targetId: agent.id,
-        projectId: agent.project_id,
-        previousState: { instruction_revision: previous.instruction_revision },
-        newState: { instruction_revision: agent.instruction_revision },
-      });
+      const changed = agent.instruction_revision !== previous.instruction_revision;
+      if (changed) {
+        this.database.audit({
+          actorId: ctx.principal.principal_id,
+          action: 'agent.instructions.update',
+          targetType: 'agent_instance',
+          targetId: agent.id,
+          projectId: agent.project_id,
+          previousState: { instruction_revision: previous.instruction_revision },
+          newState: { instruction_revision: agent.instruction_revision },
+        });
+      }
       return {
         agent_id: agent.id,
         custom_instructions: agent.custom_instructions,
         instruction_revision: agent.instruction_revision,
-        restart_required: ['ready', 'busy'].includes(agent.state),
+        changed,
+        restart_required: changed && ['ready', 'busy'].includes(agent.state),
       };
     });
     route('POST', '/api/v1/agent-instances/:id:wake', async (ctx) => this.#wakeAgent(ctx.params.id, ctx.principal.principal_id));
@@ -1070,6 +1084,26 @@ export class Hub {
       this.database.setTerminalState(terminal.id, 'exited');
       this.database.audit({ actorId: ctx.principal.principal_id, action: 'terminal.stop', targetType: 'terminal', targetId: terminal.id });
       return this.database.getTerminal(terminal.id);
+    });
+    route('DELETE', '/api/v1/terminals/:id', async (ctx) => {
+      const terminal = this.database.getTerminal(ctx.params.id);
+      invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
+      invariant(terminal.kind === 'shell_tab', 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
+      if (terminal.state === 'attached') {
+        invariant(this.broker.isOnline(terminal.node_id), 'WS_NODE_OFFLINE', 'The workstation is offline; reconnect it before closing this running shell.', 503);
+        await this.broker.request(terminal.node_id, 'terminal.stop', { terminal_id: terminal.id });
+        this.database.setTerminalState(terminal.id, 'exited');
+      }
+      this.database.deleteInteractiveTerminal(terminal.id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'terminal.delete',
+        targetType: 'terminal',
+        targetId: terminal.id,
+        previousState: { agent_instance_id: terminal.agent_instance_id, label: terminal.label, state: terminal.state },
+        newState: { deleted: true },
+      });
+      return { id: terminal.id, deleted: true };
     });
 
     route('GET', '/api/v1/threads/:id', async (ctx) => {
@@ -1321,7 +1355,10 @@ export class Hub {
     }
     const filePath = path.join(this.webDir, relative);
     if (!fs.existsSync(filePath)) throw new WebSpiderError('WS_NOT_FOUND', 'Portal asset not found.', 404);
-    const bytes = fs.readFileSync(filePath);
+    let bytes = fs.readFileSync(filePath);
+    if (relative === 'index.html') {
+      bytes = Buffer.from(bytes.toString('utf8').replace('__WEBSPIDER_PORTAL_BUILD__', this.portalBuild));
+    }
     response.writeHead(200, {
       'content-type': fileMime(filePath),
       'content-length': bytes.length,

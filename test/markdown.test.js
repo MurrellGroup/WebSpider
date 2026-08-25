@@ -49,7 +49,7 @@ test('an exited primary agent terminal becomes read-only with a restart action',
   const application = fs.readFileSync(path.join(repository, 'web', 'app.js'), 'utf8');
   assert.match(application, /Restart agent/);
   assert.match(application, /interactive \? 'Take control' : 'Not running'/);
-  assert.match(application, /if \(interactive\) state\.terminalInputSubscription/);
+  assert.match(application, /if \(interactive\) \{[\s\S]*state\.terminalInputSubscription = emulator\.onData\(handleTerminalData\)/);
   assert.match(application, /state\.selectedAgent\.state !== previousAgentState/);
 });
 

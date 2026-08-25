@@ -979,6 +979,7 @@ export class HubDatabase extends EventEmitter {
         { expected_revision: Number(expectedRevision), current_revision: previous.revision });
     }
     const overrides = mergeProjectPolicy(previous.overrides, patch);
+    if (encode(overrides) === encode(previous.overrides)) return previous;
     const revision = previous.revision + 1;
     const updated = nowISO();
     this.db.prepare("UPDATE system_policies SET policy_json = ?, revision = ?, updated_at = ? WHERE id = 'default'")
@@ -1338,6 +1339,7 @@ export class HubDatabase extends EventEmitter {
         'Agent instructions changed since they were opened.', 409,
         { expected_revision: Number(expectedRevision), current_revision: previous.instruction_revision });
     }
+    if (normalized === previous.custom_instructions) return previous;
     const revision = previous.instruction_revision + 1;
     this.db.prepare('UPDATE agent_instances SET custom_instructions = ?, instruction_revision = ? WHERE id = ?')
       .run(normalized, revision, id);
@@ -1622,6 +1624,17 @@ export class HubDatabase extends EventEmitter {
   listAgentTerminals(agentInstanceId) {
     return this.db.prepare('SELECT id FROM terminal_sessions WHERE agent_instance_id = ? ORDER BY created_at')
       .all(agentInstanceId).map((row) => this.getTerminal(row.id));
+  }
+
+  deleteInteractiveTerminal(id) {
+    const terminal = this.getTerminal(id);
+    invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
+    invariant(terminal.kind === 'shell_tab', 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM terminal_leases WHERE terminal_id = ?').run(id);
+      this.db.prepare('DELETE FROM terminal_sessions WHERE id = ?').run(id);
+    });
+    return terminal;
   }
 
   setTerminalState(id, state) {
