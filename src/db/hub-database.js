@@ -918,6 +918,17 @@ export class HubDatabase extends EventEmitter {
     return this.createNode(input);
   }
 
+  ensureLocalNode(input) {
+    const existing = this.getNode(input.id, true);
+    if (!existing) return this.createNode(input);
+    invariant(existing.labels?.location === 'local', 'WS_CONFLICT', 'Only the trusted local node credential can be refreshed.', 409);
+    if (existing.public_key !== input.publicKey) {
+      this.db.prepare(`UPDATE nodes SET public_key = ?, credential_version = credential_version + 1,
+        status = 'offline' WHERE id = ?`).run(input.publicKey, input.id);
+    }
+    return this.getNode(input.id, true);
+  }
+
   getNode(id, includeKey = false) {
     const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
     if (!row) return null;

@@ -230,6 +230,30 @@ test('node join tokens are one-time and expire atomically', (t) => {
   assert.throws(() => database.consumeJoinToken('wsj_expired', identity.publicKey, 'expired'), (error) => error.code === 'WS_AUTH_REQUIRED');
 });
 
+test('trusted local bootstrap can refresh only its own isolated node credential', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-local-node-key-'));
+  const database = new HubDatabase(path.join(directory, 'hub.db'));
+  t.after(() => {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const first = generateNodeIdentity();
+  const second = generateNodeIdentity();
+  database.ensureLocalNode({
+    id: 'nod_local', displayName: 'Local workstation', publicKey: first.publicKey, labels: { location: 'local' },
+  });
+  const refreshed = database.ensureLocalNode({
+    id: 'nod_local', displayName: 'Local workstation', publicKey: second.publicKey, labels: { location: 'local' },
+  });
+  assert.equal(refreshed.public_key, second.publicKey);
+  assert.equal(database.db.prepare('SELECT credential_version FROM nodes WHERE id = ?').get('nod_local').credential_version, 2);
+
+  database.createNode({ id: 'nod_worker', displayName: 'Worker', publicKey: first.publicKey });
+  assert.throws(() => database.ensureLocalNode({
+    id: 'nod_worker', displayName: 'Worker', publicKey: second.publicKey,
+  }), (error) => error.code === 'WS_CONFLICT');
+});
+
 test('project policy is defaulted, versioned, and snapshotted for agent launches', (t) => {
   const { database, agent } = databaseFixture(t);
   const initial = database.getProject('prj_test');

@@ -78,6 +78,51 @@ test('an installer attachment re-enrolls a node identity forgotten by a rebuilt 
   assert.equal(hub.database.listAgents(project.id).length, 1);
 });
 
+test('same-machine Hub and worker identities stay online across one shared process store', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-same-machine-nodes-'));
+  const hubWorkspace = path.join(directory, 'hub-workspace');
+  const workerWorkspace = path.join(directory, 'worker-workspace');
+  fs.mkdirSync(hubWorkspace);
+  fs.mkdirSync(workerWorkspace);
+  const localIdentity = generateNodeIdentity();
+  const workerIdentity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  hub.bootstrapLocal({ nodeId: 'nod_local', publicKey: localIdentity.publicKey, workspace: hubWorkspace });
+  hub.database.createNode({ id: 'nod_worker', displayName: 'Same machine worker', publicKey: workerIdentity.publicKey });
+  const listening = await hub.listen();
+  const sharedState = path.join(directory, 'shared-process-state');
+  const local = new NodeDaemon({
+    stateDir: sharedState, hubURL: listening.url, nodeId: 'nod_local', displayName: 'Local workstation',
+    publicKey: localIdentity.publicKey, privateKey: localIdentity.privateKey,
+    roots: [{ id: 'awr_local', path: hubWorkspace }], reconnect: false,
+  });
+  const worker = new NodeDaemon({
+    stateDir: sharedState, hubURL: listening.url, nodeId: 'nod_worker', displayName: 'Same machine worker',
+    publicKey: workerIdentity.publicKey, privateKey: workerIdentity.privateKey,
+    roots: [{ id: 'awr_worker', path: workerWorkspace }], reconnect: false,
+  });
+  local.on('error', () => {});
+  worker.on('error', () => {});
+  let unexpectedOffline = 0;
+  local.on('offline', () => { unexpectedOffline += 1; });
+  worker.on('offline', () => { unexpectedOffline += 1; });
+  t.after(async () => {
+    await local.stop();
+    await worker.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const localOnline = onceWithTimeout(local, 'online');
+  const workerOnline = onceWithTimeout(worker, 'online');
+  local.start();
+  worker.start();
+  await Promise.all([localOnline, workerOnline]);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(hub.broker.isOnline('nod_local'), true);
+  assert.equal(hub.broker.isOnline('nod_worker'), true);
+  assert.equal(unexpectedOffline, 0);
+});
+
 test('inbound agent messages include source, UTC time, elapsed context, and observed weekly allowance', () => {
   const formatted = formatInboundMessage({
     created_at: '2026-08-24T10:30:00.000Z',

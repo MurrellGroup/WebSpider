@@ -5,9 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   existingNodeRoots,
+  localNodeIdentityStateDir,
   resolveAgentProfile,
   writeNodeConfig,
 } from '../src/cli.js';
+
+test('the built-in Hub node identity is isolated from enrolled worker state', () => {
+  assert.equal(localNodeIdentityStateDir('/var/lib/webspider'), '/var/lib/webspider/local-node-identity');
+  assert.notEqual(localNodeIdentityStateDir('/var/lib/webspider'), path.join('/var/lib/webspider', 'node'));
+});
 
 test('the default profile is a persistent login shell', () => {
   const profile = resolveAgentProfile();

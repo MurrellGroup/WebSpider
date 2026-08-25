@@ -23,6 +23,8 @@ The same release also contains fully self-contained installers for direct or off
 | macOS Intel | `WebSpider_Install_0.6.2_macos_x64.run` |
 | macOS Apple silicon | `WebSpider_Install_0.6.2_macos_arm64.run` |
 
+The Hub's built-in local node keeps an authentication identity separate from any enrolled worker service on the same machine. Hub upgrades therefore do not displace a same-machine project worker, and both detached session stores remain recoverable.
+
 Run the downloaded asset directly through the system shell:
 
 ```bash

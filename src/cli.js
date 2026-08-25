@@ -45,6 +45,10 @@ function defaultStateDir() {
     || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'webspider');
 }
 
+export function localNodeIdentityStateDir(stateDir) {
+  return path.join(path.resolve(stateDir), 'local-node-identity');
+}
+
 function parseListen(value = '127.0.0.1:7340') {
   const lastColon = value.lastIndexOf(':');
   if (lastColon < 0) return { host: value, port: 7340 };
@@ -158,7 +162,12 @@ async function runUp(options) {
   const projectContext = inferProjectContext(workspace);
   const agentProfile = resolveAgentProfile(options);
   const listen = parseListen(options.listen);
-  const identity = loadOrCreateIdentity(nodeStateDir, 'nod_local');
+  // A Hub and an enrolled project worker may legitimately run on the same
+  // workstation. Their process database remains shared so detached sessions
+  // survive upgrades, but their authentication identities must never be. A
+  // worker enrollment may replace node/identity.json; keeping the built-in
+  // identity here prevents both daemons from reconnecting as the same node.
+  const identity = loadOrCreateIdentity(localNodeIdentityStateDir(stateDir), 'nod_local');
   const hub = new Hub({
     stateDir: hubStateDir,
     listenHost: listen.host,
@@ -457,7 +466,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.6.9\n\n`);
+  process.stdout.write(`WebSpider 0.6.10\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);
