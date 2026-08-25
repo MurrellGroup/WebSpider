@@ -820,6 +820,17 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   assert.equal(hub.database.getTerminal(shellTab.body.id), null);
   await waitUntil(() => node.database.getProcessByTerminal(shellTab.body.id)?.state !== 'running', 5_000);
 
+  const taskTerminal = hub.database.createTaskTerminal(worker.id, 'Detached benchmark');
+  hub.database.setTerminalState(taskTerminal.id, 'attached');
+  const dismissedTaskTerminal = await jsonFetch(`${listening.url}/api/v1/terminals/${taskTerminal.id}`, listening.ownerToken, {
+    method: 'DELETE',
+  });
+  assert.equal(dismissedTaskTerminal.response.status, 200);
+  assert.equal(dismissedTaskTerminal.body.deleted, true);
+  assert.equal(dismissedTaskTerminal.body.process_stopped, false);
+  assert.equal(dismissedTaskTerminal.body.task_continues, true);
+  assert.equal(hub.database.getTerminal(taskTerminal.id), null);
+
   const secondProject = await jsonFetch(`${listening.url}/api/v1/projects/onboard`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ project_name: 'Second remote study', node_name: 'GPU workstation' }),

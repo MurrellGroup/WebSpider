@@ -1597,14 +1597,14 @@ export class HubDatabase extends EventEmitter {
     };
   }
 
-  createTaskTerminal(agentInstanceId) {
+  createTaskTerminal(agentInstanceId, label = 'Task') {
     const agent = this.getAgent(agentInstanceId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     const id = makeId('trm');
     this.db.prepare(`INSERT INTO terminal_sessions
-      (id, agent_instance_id, node_id, kind, state, created_at)
-      VALUES (?, ?, ?, 'task_shell', 'detached', ?)`)
-      .run(id, agentInstanceId, agent.node_id, nowISO());
+      (id, agent_instance_id, node_id, kind, state, label, created_at)
+      VALUES (?, ?, ?, 'task_shell', 'detached', ?, ?)`)
+      .run(id, agentInstanceId, agent.node_id, String(label || 'Task').slice(0, 80), nowISO());
     return this.getTerminal(id);
   }
 
@@ -1626,10 +1626,10 @@ export class HubDatabase extends EventEmitter {
       .all(agentInstanceId).map((row) => this.getTerminal(row.id));
   }
 
-  deleteInteractiveTerminal(id) {
+  deleteAuxiliaryTerminal(id) {
     const terminal = this.getTerminal(id);
     invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
-    invariant(terminal.kind === 'shell_tab', 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
+    invariant(['shell_tab', 'task_shell'].includes(terminal.kind), 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
     this.transaction(() => {
       this.db.prepare('DELETE FROM terminal_leases WHERE terminal_id = ?').run(id);
       this.db.prepare('DELETE FROM terminal_sessions WHERE id = ?').run(id);

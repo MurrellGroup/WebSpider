@@ -189,7 +189,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .terminal-session-tabs .terminal-select { flex: 1 1 auto; border: 0; border-radius: 0; padding-right: 7px; }
 .terminal-tab.selected .terminal-select { color: var(--text); }
 .terminal-session-tabs .terminal-select span { overflow: hidden; text-overflow: ellipsis; }
-.terminal-session-tabs .terminal-tab-close { width: 27px; flex: 0 0 27px; justify-content: center; padding: 0; border: 0; border-radius: 0; color: var(--muted-2); font-size: 15px; }
+.terminal-session-tabs .terminal-tab-close { width: 27px; flex: 0 0 27px; justify-content: center; padding: 0; border: 0; border-left: 1px solid rgb(255 255 255 / 7%); border-radius: 0; color: var(--muted); background: rgb(255 255 255 / 3%); font-size: 16px; }
 .terminal-session-tabs .terminal-tab-close:hover { color: var(--red); background: rgb(251 125 136 / 8%); }
 .terminal-session-tabs .terminal-add { width: 31px; flex: 0 0 31px; justify-content: center; font-size: 16px; }
 .terminal-toolbar { min-height: 42px; background: #10141c; border-bottom: 1px solid #202733; padding: 0 10px; display: flex; align-items: center; gap: 7px; }

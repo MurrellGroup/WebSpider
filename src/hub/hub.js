@@ -1088,22 +1088,23 @@ export class Hub {
     route('DELETE', '/api/v1/terminals/:id', async (ctx) => {
       const terminal = this.database.getTerminal(ctx.params.id);
       invariant(terminal, 'WS_NOT_FOUND', 'Terminal not found.', 404);
-      invariant(terminal.kind === 'shell_tab', 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
-      if (terminal.state === 'attached') {
+      invariant(['shell_tab', 'task_shell'].includes(terminal.kind), 'WS_FORBIDDEN', 'The primary agent terminal cannot be deleted.', 403);
+      const stopProcess = terminal.kind === 'shell_tab' && terminal.state === 'attached';
+      if (stopProcess) {
         invariant(this.broker.isOnline(terminal.node_id), 'WS_NODE_OFFLINE', 'The workstation is offline; reconnect it before closing this running shell.', 503);
         await this.broker.request(terminal.node_id, 'terminal.stop', { terminal_id: terminal.id });
         this.database.setTerminalState(terminal.id, 'exited');
       }
-      this.database.deleteInteractiveTerminal(terminal.id);
+      this.database.deleteAuxiliaryTerminal(terminal.id);
       this.database.audit({
         actorId: ctx.principal.principal_id,
         action: 'terminal.delete',
         targetType: 'terminal',
         targetId: terminal.id,
         previousState: { agent_instance_id: terminal.agent_instance_id, label: terminal.label, state: terminal.state },
-        newState: { deleted: true },
+        newState: { deleted: true, process_stopped: stopProcess, task_continues: terminal.kind === 'task_shell' },
       });
-      return { id: terminal.id, deleted: true };
+      return { id: terminal.id, deleted: true, process_stopped: stopProcess, task_continues: terminal.kind === 'task_shell' };
     });
 
     route('GET', '/api/v1/threads/:id', async (ctx) => {
@@ -1795,7 +1796,7 @@ export class Hub {
     const nodeId = task.node_id || agent.node_id;
     this.database.setTaskState(task.id, 'runnable', null, 'hub:scheduler');
     if (!this.broker.isOnline(nodeId)) return;
-    const terminal = this.database.createTaskTerminal(agent.id);
+    const terminal = this.database.createTaskTerminal(agent.id, task.title);
     const epoch = this.broker.connectionEpoch(nodeId);
     this.database.createTaskAttempt(task.id, nodeId, agent.id, epoch, randomToken('lease'));
     await this.broker.request(nodeId, 'task.start', {

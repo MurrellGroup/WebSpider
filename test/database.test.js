@@ -67,10 +67,14 @@ test('projects can be safely archived, restored, and permanently removed without
     (error) => error.code === 'WS_PROJECT_ACTIVE' && /shell/.test(error.message),
   );
   database.setTerminalState(shell.id, 'exited');
-  assert.equal(database.deleteInteractiveTerminal(shell.id).id, shell.id);
+  assert.equal(database.deleteAuxiliaryTerminal(shell.id).id, shell.id);
   assert.equal(database.getTerminal(shell.id), null);
+  const taskTerminal = database.createTaskTerminal(agent.id, 'Benchmark run');
+  assert.equal(taskTerminal.label, 'Benchmark run');
+  assert.equal(database.deleteAuxiliaryTerminal(taskTerminal.id).kind, 'task_shell');
+  assert.equal(database.getTerminal(taskTerminal.id), null);
   assert.throws(
-    () => database.deleteInteractiveTerminal(agent.terminal_id),
+    () => database.deleteAuxiliaryTerminal(agent.terminal_id),
     (error) => error.code === 'WS_FORBIDDEN',
   );
 

@@ -112,12 +112,14 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);
 });
 
-test('every extra shell tab has an explicit close control that deletes the tab', () => {
+test('every non-primary terminal tab has an explicit close control', () => {
   assert.match(app, /class="terminal-tab-close"/);
   assert.match(app, /aria-label="Close .* terminal tab"/);
   assert.match(app, /method: 'DELETE'/);
   assert.match(app, /Terminal tab closed\./);
   assert.match(app, /item\.kind === 'primary_agent' \|\| item\.state !== 'exited'/);
+  assert.match(app, /item\.kind !== 'primary_agent'/);
+  assert.match(app, /Dismiss task terminal; the task keeps running/);
   assert.match(app, /async function renderTerminal\(agent\) \{\s*closeTerminal\(\)/);
 });
 
