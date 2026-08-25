@@ -2,10 +2,11 @@ import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import { directKeyInput, enqueueTerminalData, kittySequence } from './terminal-input.js';
+import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.6';
+const PORTAL_VERSION = '0.6.7';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -32,6 +33,11 @@ const state = {
   terminalLease: null,
   terminalLeaseRequested: false,
   terminalSequence: 0,
+  terminalSnapshotReady: false,
+  terminalOutputBacklog: [],
+  terminalResyncing: false,
+  terminalResyncCount: 0,
+  terminalGeneration: 0,
   terminalHeartbeat: null,
   terminalEmulator: null,
   terminalFitAddon: null,
@@ -231,6 +237,7 @@ function showVersionMismatch(hubVersion) {
 }
 
 function closeTerminal() {
+  state.terminalGeneration += 1;
   state.terminalSocket?.close();
   state.terminalSocket = null;
   if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
@@ -245,6 +252,11 @@ function closeTerminal() {
   state.terminalInputBuffer = '';
   state.terminalInputSequence = 0;
   state.terminalInputAcknowledged = 0;
+  state.terminalSequence = 0;
+  state.terminalSnapshotReady = false;
+  state.terminalOutputBacklog = [];
+  state.terminalResyncing = false;
+  state.terminalResyncCount = 0;
   state.terminalInputSubscription?.dispose();
   state.terminalInputSubscription = null;
   state.terminalResizeObserver?.disconnect();
@@ -796,6 +808,78 @@ function observeTerminalProtocol(text) {
   if (output) output.dataset.keyboardProtocol = String(state.terminalKeyboardProtocol);
 }
 
+function applyTerminalSnapshot(snapshot) {
+  const sequence = Number(snapshot?.sequence || 0);
+  if (!Number.isSafeInteger(sequence) || sequence < state.terminalSequence || !state.terminalEmulator) return false;
+  state.terminalText = snapshot?.text || '';
+  observeTerminalProtocol(state.terminalText);
+  state.terminalEmulator.reset();
+  state.terminalEmulator.write(state.terminalText, () => updateTerminalMaths(true));
+  state.terminalSequence = sequence;
+  const output = $('#terminal-output');
+  if (output) output.dataset.outputSequence = String(sequence);
+  return true;
+}
+
+function rememberTerminalOutput(frame) {
+  state.terminalOutputBacklog.push(frame);
+  if (state.terminalOutputBacklog.length > 4_096) state.terminalOutputBacklog.shift();
+}
+
+function appendTerminalOutput(frame) {
+  const plan = reconcileTerminalOutput(state.terminalSequence, frame, base64ToBytes(frame.data));
+  if (plan.kind === 'stale') return true;
+  if (plan.kind !== 'append') return false;
+  const addition = new TextDecoder().decode(plan.bytes);
+  state.terminalText += addition;
+  observeTerminalProtocol(addition);
+  state.terminalEmulator.write(plan.bytes, () => updateTerminalMaths());
+  state.terminalSequence = plan.sequence;
+  const output = $('#terminal-output');
+  if (output) output.dataset.outputSequence = String(plan.sequence);
+  return true;
+}
+
+function drainTerminalOutputBacklog() {
+  const frames = orderTerminalOutputFrames(state.terminalOutputBacklog);
+  state.terminalOutputBacklog = [];
+  for (const frame of frames) queueTerminalOutput(frame);
+}
+
+async function resyncTerminalOutput() {
+  if (state.terminalResyncing || !state.selectedTerminalId || !state.terminalEmulator) return;
+  const terminalId = state.selectedTerminalId;
+  const generation = state.terminalGeneration;
+  state.terminalResyncing = true;
+  state.terminalResyncCount += 1;
+  const output = $('#terminal-output');
+  if (output) output.dataset.outputResyncs = String(state.terminalResyncCount);
+  let recovered = false;
+  try {
+    const snapshot = await api(`/api/v1/terminals/${encodeURIComponent(terminalId)}/log`);
+    if (generation !== state.terminalGeneration || terminalId !== state.selectedTerminalId || !state.terminalEmulator) return;
+    recovered = applyTerminalSnapshot(snapshot);
+    state.terminalSnapshotReady = true;
+  } catch (error) {
+    if (generation === state.terminalGeneration) toast(`Terminal display resync failed: ${friendlyError(error)}`, true);
+  } finally {
+    if (generation === state.terminalGeneration && terminalId === state.selectedTerminalId) {
+      state.terminalResyncing = false;
+      if (recovered) drainTerminalOutputBacklog();
+    }
+  }
+}
+
+function queueTerminalOutput(frame) {
+  if (!state.terminalSnapshotReady || state.terminalResyncing) {
+    rememberTerminalOutput(frame);
+    return;
+  }
+  if (appendTerminalOutput(frame)) return;
+  rememberTerminalOutput(frame);
+  void resyncTerminalOutput();
+}
+
 function flushTerminalInput() {
   const pending = state.terminalPendingInput;
   state.terminalPendingInput = [];
@@ -891,6 +975,8 @@ async function renderTerminal(agent) {
   const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
   state.terminalSequence = 0;
+  state.terminalSnapshotReady = false;
+  state.terminalOutputBacklog = [];
   const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminal.id)}?attachment=${encodeURIComponent(attachment)}`);
   state.terminalSocket = socket;
   socket.addEventListener('open', () => {
@@ -900,23 +986,12 @@ async function renderTerminal(agent) {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
     if (frame.type === 'SNAPSHOT') {
-      observeTerminalProtocol(frame.text || '');
-      if (Number(frame.sequence || 0) >= state.terminalSequence) {
-        state.terminalText = frame.text || '';
-        state.terminalEmulator.reset();
-        state.terminalEmulator.write(state.terminalText, () => updateTerminalMaths(true));
-        state.terminalSequence = Number(frame.sequence || 0);
-      }
+      applyTerminalSnapshot(frame);
+      state.terminalSnapshotReady = true;
+      drainTerminalOutputBacklog();
     }
-    if (frame.type === 'OUTPUT' && Number(frame.sequence_end) > state.terminalSequence) {
-      const bytes = base64ToBytes(frame.data);
-      const overlap = Math.max(0, state.terminalSequence - Number(frame.sequence_start));
-      const addition = new TextDecoder().decode(overlap ? bytes.slice(overlap) : bytes);
-      state.terminalText += addition;
-      observeTerminalProtocol(addition);
-      state.terminalEmulator.write(overlap ? bytes.slice(overlap) : bytes, () => updateTerminalMaths());
-      state.terminalSequence = Number(frame.sequence_end);
-    }
+    if (frame.type === 'OUTPUT') queueTerminalOutput(frame);
+    if (frame.type === 'RESYNC_REQUIRED') void resyncTerminalOutput();
     if (frame.type === 'RESIZE_ACK') {
       const output = $('#terminal-output');
       if (output) output.dataset.ptyResized = String(frame.result?.resized === true);

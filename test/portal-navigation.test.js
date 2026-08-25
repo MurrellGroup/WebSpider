@@ -120,6 +120,11 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(app, /socket\.addEventListener\('open',[\s\S]*terminalPendingInput\.length[\s\S]*requestTerminalLease\(\)/);
   assert.match(app, /addEventListener\('pointerdown', requestTerminalLease\)/);
   assert.match(app, /emulator\.onData\(handleTerminalData\)/);
+  assert.match(app, /frame\.type === 'OUTPUT'\) queueTerminalOutput\(frame\)/);
+  assert.match(app, /frame\.type === 'RESYNC_REQUIRED'\) void resyncTerminalOutput\(\)/);
+  assert.match(app, /reconcileTerminalOutput\(state\.terminalSequence/);
+  assert.match(app, /terminalSnapshotReady \|\| state\.terminalResyncing/);
+  assert.match(hub, /node\.online\.v1'[\s\S]*RESYNC_REQUIRED/);
   assert.doesNotMatch(app, /emulator\.onData\(queueTerminalInput\)/);
   assert.doesNotMatch(app, /if \(state\.terminalInputMode === 'direct'\) emulator\.focus\(\)/);
   assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);

@@ -108,7 +108,7 @@ export class Hub {
     this.allowedOrigins = allowedOrigins;
     this.webDir = webDir;
     const portalHash = createHash('sha256');
-    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js']) {
+    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js']) {
       portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
     }
     this.portalBuild = portalHash.digest('hex').slice(0, 16);
@@ -231,7 +231,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.6', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: '0.6.7', portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
@@ -1459,7 +1459,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-maths.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
@@ -1547,9 +1547,16 @@ export class Hub {
       });
     };
     this.broker.on('terminal.output', outputListener);
+    const nodeOnlineListener = (event) => {
+      if (event.type === 'node.online.v1' && event.scope_id === terminal.node_id) {
+        connection.sendJSON({ type: 'RESYNC_REQUIRED', reason: 'node_reconnected' });
+      }
+    };
+    this.database.on('event', nodeOnlineListener);
     let activeLease = null;
     connection.on('close', () => {
       this.broker.off('terminal.output', outputListener);
+      this.database.off('event', nodeOnlineListener);
       if (activeLease) this.database.releaseTerminalLease(terminalId, activeLease.id, leasePrincipal);
     });
     let clientAttached = true;
