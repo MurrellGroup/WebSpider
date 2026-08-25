@@ -3,12 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
 
-const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
-const MASTER_USER_GUIDE = fileURLToPath(new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url));
+const MASTER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
@@ -543,10 +541,10 @@ export class ProcessSupervisor extends EventEmitter {
       : {};
     const wrappedCommand = commandString(argv);
     const scriptCommand = process.platform === 'darwin'
-      ? 'expect -f "$4" "$1"'
+      ? 'script -q /dev/null /bin/sh -c "$1"'
       : 'script -qefc "$1" /dev/null';
     const wrapper = `${scriptCommand}; code=$?; /bin/kill -TERM -- "-$3" 2>/dev/null || /bin/kill -TERM "$3" 2>/dev/null || true; printf "%s" "$code" > "$2"; exit "$code"`;
-    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid), EXPECT_BRIDGE], {
+    const child = spawn('sh', ['-c', wrapper, 'webspider-task-wrapper', wrappedCommand, exitFile, String(keeper.pid)], {
       cwd: root.canonical,
       detached: true,
       stdio: [inputFd, outputFd, outputFd],
