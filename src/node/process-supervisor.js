@@ -233,7 +233,7 @@ async function main() {
   const [resource, action = 'show'] = process.argv.slice(2);
   const valid = (resource === 'policy' && ['show', 'patch'].includes(action))
     || (resource === 'usage' && ['show', 'report'].includes(action))
-    || (resource === 'agents' && ['list', 'send'].includes(action))
+    || (resource === 'agents' && ['list', 'send', 'choose'].includes(action))
     || (resource === 'documents' && action === 'send')
     || (resource === 'files' && ['targets', 'send'].includes(action))
     || (resource === 'tasks' && ['list', 'run'].includes(action))
@@ -243,7 +243,7 @@ async function main() {
     || (resource === 'updates' && action === 'ready')
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | updates ready --rollout ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | agents choose --agent ID --option 1..9 | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | updates ready --rollout ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -432,6 +432,17 @@ async function main() {
       return;
     }
     const agent = option('--agent');
+    if (action === 'choose') {
+      const selected = Number(option('--option'));
+      if (!agent || !Number.isInteger(selected) || selected < 1 || selected > 9) {
+        console.error('agents choose requires --agent ID and --option 1..9');
+        process.exit(2);
+      }
+      console.log(JSON.stringify(await request('agents/' + encodeURIComponent(agent) + '/prompt-choice', 'POST', {
+        option: selected,
+      }), null, 2));
+      return;
+    }
     const messageOption = option('--message');
     const file = option('--file');
     const wake = option('--wake') || 'ensure_running';

@@ -15,6 +15,7 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'usage:write',
   'agents:read',
   'messages:write',
+  'prompts:answer',
   'documents:write',
   'files:transfer',
   'tasks:read',

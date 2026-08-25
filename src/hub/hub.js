@@ -35,6 +35,7 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'usage:write',
   'agents:read',
   'messages:write',
+  'prompts:answer',
   'documents:write',
   'files:transfer',
   'tasks:read',
@@ -954,6 +955,60 @@ export class Hub {
       if (!result.duplicate) queueMicrotask(() => this.#dispatchMessage(result.message.id).catch((error) => this.#logError(error)));
       return result;
     }, { agentOnly: true, agentScopes: ['messages:write'] });
+
+    route('POST', '/api/v1/agent-control/agents/:id/prompt-choice', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const source = this.database.getAgent(ctx.principal.agent_instance_id);
+      const target = this.database.getAgent(ctx.params.id);
+      invariant(source?.orchestration_role === 'main', 'WS_FORBIDDEN',
+        'Only the Master Spider can answer a Sub-Spider prompt.', 403);
+      invariant(target, 'WS_NOT_FOUND', 'Target agent not found.', 404);
+      invariant(target.id !== source.id && target.orchestration_role === 'worker', 'WS_FORBIDDEN',
+        'Prompt choices can target only a Sub-Spider.', 403);
+      invariant(target.codex_capable, 'WS_ADAPTER_UNAVAILABLE',
+        'Numbered prompt selection is supported only for Codex agents.', 409);
+      invariant(Number.isInteger(body.option) && body.option >= 1 && body.option <= 9,
+        'WS_VALIDATION', 'option must be an integer from 1 to 9.');
+      const terminal = this.database.listAgentTerminals(target.id)
+        .find((candidate) => candidate.kind === 'primary_agent');
+      invariant(terminal?.kind === 'primary_agent' && terminal.state === 'attached', 'WS_AGENT_NOT_READY',
+        'The Sub-Spider primary terminal is not attached.', 409);
+      invariant(this.broker.isOnline(target.node_id), 'WS_NODE_OFFLINE',
+        'The Sub-Spider workstation is offline.', 503);
+      invariant(!this.#agentUpdateBlocked(target.id), 'WS_UPDATE_AGENT_READY',
+        'This Sub-Spider is checkpointed for a coordinated update.', 409);
+      const leasePrincipal = `${ctx.principal.principal_id}#prompt-choice`;
+      const lease = this.database.acquireTerminalLease(terminal.id, leasePrincipal);
+      let result;
+      try {
+        const bytes = Buffer.from(String(body.option));
+        result = await this.broker.request(target.node_id, 'terminal.input', {
+          terminal_id: terminal.id,
+          data: bytes.toString('base64'),
+        });
+        invariant(Number(result?.accepted_bytes) === bytes.length,
+          'WS_TERMINAL_INPUT_UNCERTAIN', 'The node did not acknowledge the prompt-choice keystroke.', 502);
+      } finally {
+        this.database.releaseTerminalLease(terminal.id, lease.id, leasePrincipal);
+      }
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.prompt_choice.send',
+        targetType: 'agent_instance',
+        targetId: target.id,
+        projectId: target.project_id,
+        decision: 'allowed_main_to_worker_prompt_choice',
+        newState: { terminal_id: terminal.id, option: body.option, accepted_bytes: result.accepted_bytes },
+      });
+      return {
+        agent_id: target.id,
+        terminal_id: terminal.id,
+        option: body.option,
+        accepted_bytes: result.accepted_bytes,
+        certainty: 'best_effort',
+        message_created: false,
+      };
+    }, { agentOnly: true, agentScopes: ['prompts:answer'] });
 
     route('POST', '/api/v1/agent-control/agents/:id/documents', async (ctx) => {
       const body = await readJSON(ctx.request, 800_000);

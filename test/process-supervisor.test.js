@@ -415,6 +415,8 @@ test('agent launch materializes the inherited project agreement without workspac
   assert.match(controlScript, /usage report --weekly-remaining PERCENT/);
   assert.match(controlScript, /request\('usage', 'POST', body\)/);
   assert.match(controlScript, /agents list/);
+  assert.match(controlScript, /agents choose --agent ID --option 1\.\.9/);
+  assert.match(controlScript, /prompt-choice/);
   assert.match(controlScript, /files targets/);
   assert.match(controlScript, /request\('files\/targets'\)/);
   assert.match(controlScript, /source_path: relative/);

@@ -238,7 +238,7 @@ function renderMainInstructions(project, policy, customInstructions = '') {
     '',
     'You are the on-demand multi-project Master Spider. The user normally works directly with project Sub-Spiders. Engage for unattended/cross-project coordination, delegation, follow-up, exceptions, and integration. Never acknowledge or summarize routine direct Sub-Spider activity.',
     'Use judgment. Inspect first, infer routine details, preserve existing work, and ask only for material choices, missing authority, or unavailable essentials. Validate before claiming completion.',
-    'Use `portfolio list` and `agents list/send` for coordination. Delegate outcomes and real constraints—not generic workflow—and avoid overlapping writes.',
+    'Coordinate via `portfolio list` and `agents list/send`; answer a visible Codex option with `agents choose --agent ID --option N`. Avoid write overlap.',
     'Use `files send --agent ID --file PATH` for large/binary cross-machine handoffs and `documents send --agent ID --file PATH` for small text; use `tasks run` for durable commands and `reminders add/list/cancel` for future input.',
     'For an update request, checkpoint, run the supplied `updates ready --rollout ID`, end the turn; never self-update.',
     'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt` for usage questions.',

@@ -373,6 +373,10 @@ test('worker tokens are confined to self controls and root-confined file relay',
     () => database.issueAgentControlToken(agent.id, 'wsa_worker', ['policy:read']),
     (error) => error.code === 'WS_FORBIDDEN',
   );
+  assert.throws(
+    () => database.issueAgentControlToken(agent.id, 'wsa_worker_prompt', ['prompts:answer']),
+    (error) => error.code === 'WS_FORBIDDEN',
+  );
   database.issueAgentControlToken(agent.id, 'wsa_worker_hooks', [
     'status:write:self', 'tasks:read', 'tasks:write', 'reminders:read:self', 'reminders:write:self', 'files:transfer',
   ]);
@@ -381,10 +385,14 @@ test('worker tokens are confined to self controls and root-confined file relay',
   ]);
   const main = database.setAgentRole(agent.id, 'main');
   assert.equal(main.can_edit_behavior, true);
-  database.issueAgentControlToken(main.id, 'wsa_main', ['policy:read', 'policy:write:project', 'tasks:read', 'tasks:write']);
+  database.issueAgentControlToken(main.id, 'wsa_main', [
+    'policy:read', 'policy:write:project', 'prompts:answer', 'tasks:read', 'tasks:write',
+  ]);
   const principal = database.getAgentControlToken('wsa_main');
   assert.equal(principal.agent_instance_id, main.id);
-  assert.deepEqual(principal.scopes, ['policy:read', 'policy:write:project', 'tasks:read', 'tasks:write']);
+  assert.deepEqual(principal.scopes, [
+    'policy:read', 'policy:write:project', 'prompts:answer', 'tasks:read', 'tasks:write',
+  ]);
   assert.equal(database.revokeAgentControlTokens(main.id), true);
   assert.equal(database.getAgentControlToken('wsa_main'), null);
   assert.throws(

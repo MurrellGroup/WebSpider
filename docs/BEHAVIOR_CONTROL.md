@@ -68,6 +68,14 @@ $WEBSPIDER_CONTROL agents list
 $WEBSPIDER_CONTROL agents send --agent AGENT_ID --message 'Check the benchmark and report the result.'
 ```
 
+If that Sub-Spider is visibly waiting at a numbered Codex option prompt, answer the prompt itself rather than sending a wrapped message:
+
+```bash
+$WEBSPIDER_CONTROL agents choose --agent AGENT_ID --option 2
+```
+
+Codex accepts a single digit from `1` through `9` as an immediate option selection, so WebSpider sends only that digit—no Enter and no inbound-message envelope. This main-only action requires the live primary terminal, takes the same exclusive terminal-control lease as the browser, and is rejected while another controller holds it. PTY delivery is best-effort: inspect the visible prompt before choosing and do not retry blindly if acknowledgement is uncertain.
+
 For a long instruction, runbook, or result that must arrive byte-for-byte, send a document instead of pasting it into a terminal:
 
 ```bash

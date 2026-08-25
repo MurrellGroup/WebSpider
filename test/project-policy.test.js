@@ -50,6 +50,7 @@ test('project policy patches preserve inherited defaults and render an actionabl
   assert.match(main, /user normally works directly with project Sub-Spiders/i);
   assert.match(main, /Never acknowledge or summarize routine direct Sub-Spider activity/i);
   assert.match(main, /Use judgment/i);
+  assert.match(main, /agents choose --agent ID --option N/i);
   assert.match(main, /documents send.*tasks run.*reminders add\/list\/cancel/i);
   assert.match(main, /\.webspider\/WEBSPIDER_USER_GUIDE\.txt/);
   assert.match(main, /Only change project\/system behavior after an explicit user request/i);

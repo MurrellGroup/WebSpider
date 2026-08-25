@@ -1149,6 +1149,93 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert(events.body.events.some((event) => event.type === 'message.accepted.v1'));
 });
 
+test('the Master can answer a numbered Sub-Spider prompt with one fenced bare digit', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-prompt-choice-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_prompt_choice', publicKey: identity.publicKey, workspace,
+    agentProfile: {
+      id: 'apf_prompt_choice', name: 'Codex prompt test', adapterKind: 'pty', executable: 'codex', arguments: [],
+    },
+  });
+  const worker = hub.database.createAgent({
+    id: 'agt_prompt_worker', profileId: bootstrap.profile.id, projectId: bootstrap.project.id,
+    nodeId: bootstrap.agent.node_id, title: 'Prompt worker', orchestrationRole: 'worker',
+    root: {
+      id: 'awr_prompt_worker', node_root_id: bootstrap.root_id,
+      logical_name: 'workspace', access_mode: 'read_write',
+    },
+  });
+  hub.database.setAgentState(worker.id, 'ready');
+  hub.database.setTerminalState(worker.terminal_id, 'attached');
+  const commands = [];
+  hub.broker.isOnline = () => true;
+  hub.broker.request = async (nodeId, type, payload) => {
+    commands.push({ nodeId, type, payload });
+    return { accepted_bytes: Buffer.from(payload.data, 'base64').length };
+  };
+  const listening = await hub.listen();
+  t.after(async () => {
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_prompt_master', ['prompts:answer']);
+
+  const messagesBefore = hub.database.listMessages(worker.active_thread_id).length;
+  const chosen = await jsonFetch(
+    `${listening.url}/api/v1/agent-control/agents/${worker.id}/prompt-choice`,
+    'wsa_prompt_master',
+    {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ option: 2 }),
+    },
+  );
+  assert.equal(chosen.response.status, 200, JSON.stringify(chosen.body));
+  assert.deepEqual(chosen.body, {
+    agent_id: worker.id,
+    terminal_id: worker.terminal_id,
+    option: 2,
+    accepted_bytes: 1,
+    certainty: 'best_effort',
+    message_created: false,
+  });
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].nodeId, worker.node_id);
+  assert.equal(commands[0].type, 'terminal.input');
+  assert.equal(commands[0].payload.terminal_id, worker.terminal_id);
+  assert.equal(Buffer.from(commands[0].payload.data, 'base64').toString('utf8'), '2');
+  assert.equal(hub.database.listMessages(worker.active_thread_id).length, messagesBefore);
+
+  const browserLease = hub.database.acquireTerminalLease(worker.terminal_id, 'owner:test#browser');
+  const fenced = await jsonFetch(
+    `${listening.url}/api/v1/agent-control/agents/${worker.id}/prompt-choice`,
+    'wsa_prompt_master',
+    {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ option: 3 }),
+    },
+  );
+  assert.equal(fenced.response.status, 409);
+  assert.equal(fenced.body.error.code, 'WS_TERMINAL_LEASE_REQUIRED');
+  assert.equal(commands.length, 1);
+  hub.database.releaseTerminalLease(worker.terminal_id, browserLease.id, 'owner:test#browser');
+
+  const invalid = await jsonFetch(
+    `${listening.url}/api/v1/agent-control/agents/${worker.id}/prompt-choice`,
+    'wsa_prompt_master',
+    {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ option: 10 }),
+    },
+  );
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.body.error.code, 'WS_VALIDATION');
+  assert.equal(commands.length, 1);
+});
+
 test('a project invite provisions a persistent remote Codex worker with reports and shell tabs', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-portfolio-'));
   const localWorkspace = path.join(directory, 'master');

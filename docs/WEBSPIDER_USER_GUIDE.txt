@@ -141,6 +141,7 @@ Common Master operations:
     $WEBSPIDER_CONTROL portfolio list
     $WEBSPIDER_CONTROL agents list
     $WEBSPIDER_CONTROL agents send --agent AGENT_ID --message TEXT
+    $WEBSPIDER_CONTROL agents choose --agent AGENT_ID --option 1..9
     $WEBSPIDER_CONTROL files targets
     $WEBSPIDER_CONTROL files send --agent AGENT_ID --file PATH
     $WEBSPIDER_CONTROL tasks list
@@ -148,6 +149,8 @@ Common Master operations:
     $WEBSPIDER_CONTROL policy show
 
 Use the helper's own usage output for the exact options supported by the installed version. Workers receive a narrower helper and cannot inspect the whole portfolio, message or command peer workers, or edit policy. They can list only valid file-transfer destinations and send an explicit root-confined file to one of them.
+
+`agents choose` is a Master-only answer to a visibly waiting numbered Codex prompt. It sends the bare digit to the live Sub-Spider terminal without a message header or Enter. Browser and Master input are lease-fenced; inspect before choosing and do not retry an uncertain PTY acknowledgement blindly.
 
 7. Instructions and policy
 --------------------------
