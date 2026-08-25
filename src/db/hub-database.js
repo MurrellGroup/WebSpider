@@ -259,6 +259,7 @@ function fleetUpdateRow(row) {
     node_ids: decode(row.node_ids_json, []),
     agent_ids: decode(row.agent_ids_json, []),
     ready_agents: decode(row.ready_agents_json, {}),
+    allowed_task_ids: decode(row.allowed_task_ids_json, []),
     node_status: decode(row.node_status_json, {}),
     error: row.error || null,
     created_at: row.created_at,
@@ -631,6 +632,7 @@ export class HubDatabase extends EventEmitter {
         node_ids_json TEXT NOT NULL DEFAULT '[]',
         agent_ids_json TEXT NOT NULL DEFAULT '[]',
         ready_agents_json TEXT NOT NULL DEFAULT '{}',
+        allowed_task_ids_json TEXT NOT NULL DEFAULT '[]',
         node_status_json TEXT NOT NULL DEFAULT '{}',
         error TEXT,
         created_at TEXT NOT NULL,
@@ -688,6 +690,8 @@ export class HubDatabase extends EventEmitter {
     if (!agentColumns.has('instruction_revision')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN instruction_revision INTEGER NOT NULL DEFAULT 1');
     if (!agentColumns.has('codex_session_json')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN codex_session_json TEXT');
     if (!agentColumns.has('resume_managed_once')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN resume_managed_once INTEGER NOT NULL DEFAULT 0');
+    const fleetColumns = new Set(this.db.prepare('PRAGMA table_info(fleet_updates)').all().map((column) => column.name));
+    if (!fleetColumns.has('allowed_task_ids_json')) this.db.exec("ALTER TABLE fleet_updates ADD COLUMN allowed_task_ids_json TEXT NOT NULL DEFAULT '[]'");
     const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
     if (!joinColumns.has('metadata_json')) this.db.exec("ALTER TABLE join_tokens ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
     const rootColumns = new Set(this.db.prepare('PRAGMA table_info(workspace_roots)').all().map((column) => column.name));
@@ -786,6 +790,23 @@ export class HubDatabase extends EventEmitter {
       if (!update.ready_agents[agentId]) update = this.markFleetAgentReady(id, agentId, actor, { override: true });
     }
     return update;
+  }
+
+  allowFleetTask(id, taskId, actor) {
+    const update = this.getFleetUpdate(id);
+    invariant(update && ['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state),
+      'WS_UPDATE_NOT_WAITING', 'This fleet update is no longer accepting task overrides.', 409);
+    const task = this.getTask(taskId);
+    invariant(task && task.type === 'command' && task.specification?.fleet_update_id !== id,
+      'WS_NOT_FOUND', 'Active blocking task not found.', 404);
+    invariant(['pending', 'runnable', 'running', 'cancel_requested'].includes(task.state),
+      'WS_TASK_NOT_ACTIVE', 'This task is no longer an active update blocker.', 409);
+    if (update.allowed_task_ids.includes(taskId)) return update;
+    const allowedTaskIds = [...update.allowed_task_ids, taskId];
+    this.db.prepare('UPDATE fleet_updates SET allowed_task_ids_json = ?, updated_at = ? WHERE id = ?')
+      .run(encode(allowedTaskIds), nowISO(), id);
+    this.appendEvent('fleet_update', id, 'fleet_update.task_allowed.v1', actor, taskId, { task_id: taskId });
+    return this.getFleetUpdate(id);
   }
 
   setFleetUpdateNodeStatus(id, nodeId, status) {

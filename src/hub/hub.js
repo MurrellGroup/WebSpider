@@ -21,7 +21,8 @@ import {
   validateTransferFilename, validateTransferId, validateTransferSize,
 } from '../lib/file-transfer.js';
 import {
-  fleetUpdateArgv, resolveLatestReleaseVersion, WEBSPIDER_UPDATE_PROTOCOL, WEBSPIDER_VERSION,
+  fleetUpdateArgv, resolveLatestReleaseVersion, webSpiderVersionAtLeast,
+  WEBSPIDER_UPDATE_PROTOCOL, WEBSPIDER_VERSION,
 } from '../lib/self-update.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -305,6 +306,45 @@ export class Hub {
       });
       this.#scheduleFleetUpdateAdvance({ grace: true });
       return this.#fleetUpdateView(update);
+    });
+    route('POST', '/api/v1/fleet-updates/:id/tasks/:task:allow', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(body.confirmation === ctx.params.task, 'WS_VALIDATION', 'Confirm the exact task before allowing it through the update.');
+      const update = this.database.allowFleetTask(ctx.params.id, ctx.params.task, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'fleet_update.task.allow',
+        targetType: 'task',
+        targetId: ctx.params.task,
+        decision: 'owner_keep_running',
+        newState: { fleet_update_id: update.id },
+      });
+      this.#scheduleFleetUpdateAdvance();
+      return this.#fleetUpdateView(update);
+    });
+    route('POST', '/api/v1/fleet-updates/:id/tasks/:task:stop', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(body.confirmation === ctx.params.task, 'WS_VALIDATION', 'Confirm the exact task before stopping it.');
+      const update = this.database.getFleetUpdate(ctx.params.id);
+      invariant(update && ['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state),
+        'WS_UPDATE_NOT_WAITING', 'This fleet update is no longer waiting for task decisions.', 409);
+      const task = this.#fleetUpdateBlockingTasks(update).find((candidate) => candidate.id === ctx.params.task);
+      invariant(task, 'WS_NOT_FOUND', 'Active blocking task not found.', 404);
+      invariant(!task.node_id || this.broker.isOnline(task.node_id), 'WS_NODE_OFFLINE', 'Reconnect the task node before stopping its command.', 503);
+      if (task.node_id) {
+        await this.broker.request(task.node_id, 'task.cancel', { task_id: task.id });
+      }
+      this.database.setTaskState(task.id, 'cancelled', { status: 'cancelled', summary: 'Stopped by the owner for a fleet update.' }, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'fleet_update.task.stop',
+        targetType: 'task',
+        targetId: task.id,
+        decision: 'owner_stop_for_update',
+        newState: { fleet_update_id: update.id },
+      });
+      this.#scheduleFleetUpdateAdvance({ grace: true });
+      return this.#fleetUpdateView(this.database.getFleetUpdate(update.id));
     });
     route('POST', '/api/v1/fleet-updates/:id:cancel', async (ctx) => {
       const update = this.database.getFleetUpdate(ctx.params.id);
@@ -1495,7 +1535,9 @@ export class Hub {
       const task = this.database.getTask(ctx.params.id);
       invariant(task, 'WS_NOT_FOUND', 'Task not found.', 404);
       if (task.node_id && this.broker.isOnline(task.node_id)) await this.broker.request(task.node_id, 'task.cancel', { task_id: task.id });
-      return this.database.setTaskState(task.id, 'cancelled', null, ctx.principal.principal_id);
+      const cancelled = this.database.setTaskState(task.id, 'cancelled', null, ctx.principal.principal_id);
+      this.#scheduleFleetUpdateAdvance({ grace: true });
+      return cancelled;
     });
     route('POST', '/api/v1/tasks/:id:retry', async (ctx) => {
       const task = this.database.setTaskState(ctx.params.id, 'pending', null, ctx.principal.principal_id);
@@ -2344,8 +2386,10 @@ export class Hub {
 
   #fleetUpdateBlockingTasks(update) {
     const active = new Set(['pending', 'runnable', 'running', 'cancel_requested']);
+    const allowed = new Set(update?.allowed_task_ids || []);
     return this.database.listTasks().filter((task) => active.has(task.state)
       && task.type === 'command'
+      && !allowed.has(task.id)
       && task.specification?.fleet_update_id !== update?.id);
   }
 
@@ -2376,7 +2420,14 @@ export class Hub {
         blockers: {
           pending_agents: pendingAgents.map((agent) => ({ id: agent.id, title: agent.title, project_name: agent.project_name })),
           offline_nodes: offlineNodes.map((node) => ({ id: node.id, display_name: node.display_name })),
-          active_tasks: blockingTasks.map((task) => ({ id: task.id, title: task.title, state: task.state })),
+          active_tasks: blockingTasks.map((task) => ({
+            id: task.id,
+            title: task.title,
+            state: task.state,
+            argv: task.specification?.requested_argv || task.specification?.argv || [],
+            agent_id: task.assigned_agent_instance_id || null,
+            node_id: task.node_id || null,
+          })),
         },
       },
     };
@@ -2497,10 +2548,10 @@ export class Hub {
       const remoteNodeIds = update.node_ids.filter((nodeId) => nodeId !== 'nod_local');
       for (const nodeId of remoteNodeIds) {
         const node = this.database.getNode(nodeId, true);
-        if (node?.capabilities?.webspider_version === update.target_version) {
+        if (webSpiderVersionAtLeast(node?.capabilities?.webspider_version, update.target_version)) {
           if (update.node_status[nodeId]?.phase !== 'complete') {
             update = this.database.setFleetUpdateNodeStatus(update.id, nodeId, {
-              phase: 'complete', version: update.target_version, completed_at: nowISO(),
+              phase: 'complete', version: node.capabilities.webspider_version, completed_at: nowISO(),
             });
           }
           continue;
@@ -2527,7 +2578,7 @@ export class Hub {
       update = this.database.setFleetUpdateState(update.id, 'updating_hub');
     }
     if (update.state === 'updating_hub') {
-      if (this.version === update.target_version) {
+      if (webSpiderVersionAtLeast(this.version, update.target_version)) {
         update = this.database.setFleetUpdateNodeStatus(update.id, 'nod_local', {
           phase: 'complete', version: this.version, completed_at: nowISO(),
         });

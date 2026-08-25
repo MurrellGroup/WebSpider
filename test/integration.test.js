@@ -177,6 +177,20 @@ while :; do sleep 0.05; done
     directory, 'node', 'agent-context', bootstrap.agent.id, 'codex-home',
     'sessions', '2026', '08', '25', 'fleet-session.jsonl',
   )));
+  const blockingTask = hub.database.createTask({
+    projectId: hub.database.getAgent(bootstrap.agent.id).project_id,
+    type: 'command', title: 'Persistent preview server',
+    specification: { argv: ['python3', '-m', 'http.server', '8765'] },
+    assignedAgentInstanceId: bootstrap.agent.id, nodeId: 'nod_local', createdBy: `agent:${bootstrap.agent.id}`,
+  });
+  hub.database.setTaskState(blockingTask.id, 'running');
+  const stoppableTask = hub.database.createTask({
+    projectId: hub.database.getAgent(bootstrap.agent.id).project_id,
+    type: 'command', title: 'Disposable preview server',
+    specification: { argv: ['python3', '-m', 'http.server', '8766'] },
+    assignedAgentInstanceId: bootstrap.agent.id, createdBy: `agent:${bootstrap.agent.id}`,
+  });
+  hub.database.setTaskState(stoppableTask.id, 'running');
 
   const prepared = await jsonFetch(`${listening.url}/api/v1/fleet-updates`, listening.ownerToken, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirmation: 'update-all' }),
@@ -190,6 +204,20 @@ while :; do sleep 0.05; done
     method: 'POST', headers: { authorization: `Bearer ${readyToken}`, 'content-type': 'application/json' }, body: '{}',
   });
   assert.equal(ready.status, 200);
+  await waitUntil(() => hub.database.latestFleetUpdate()?.state === 'waiting_for_tasks');
+  const blocked = await jsonFetch(`${listening.url}/api/v1/fleet-updates/latest`, listening.ownerToken);
+  assert.deepEqual(blocked.body.update.blockers.active_tasks.find((task) => task.id === blockingTask.id).argv,
+    ['python3', '-m', 'http.server', '8765']);
+  const stopped = await jsonFetch(`${listening.url}/api/v1/fleet-updates/${updateId}/tasks/${stoppableTask.id}:stop`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirmation: stoppableTask.id }),
+  });
+  assert.equal(stopped.response.status, 200);
+  assert.equal(hub.database.getTask(stoppableTask.id).state, 'cancelled');
+  const allowed = await jsonFetch(`${listening.url}/api/v1/fleet-updates/${updateId}/tasks/${blockingTask.id}:allow`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirmation: blockingTask.id }),
+  });
+  assert.equal(allowed.response.status, 200);
+  assert.deepEqual(allowed.body.update.allowed_task_ids, [blockingTask.id]);
   await waitUntil(() => hub.database.latestFleetUpdate()?.state === 'completed', 10_000);
   await waitUntil(() => fs.existsSync(path.join(workspace, 'fleet-resume-args.txt')), 5_000);
   const resumeArgs = fs.readFileSync(path.join(workspace, 'fleet-resume-args.txt'), 'utf8').trim().split('\n');

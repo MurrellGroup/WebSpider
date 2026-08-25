@@ -22,12 +22,16 @@ test('portal and hub version are synchronized and version skew is explicit', () 
   assert.match(app, /systemctl --user restart webspider\.service/);
 });
 
-test('Nodes exposes a Hub-last coordinated update with readiness and owner override controls', () => {
+test('Nodes exposes a Hub-last coordinated update with persistent owner rescue controls', () => {
   assert.match(app, /data-action="prepare-fleet-update"/);
   assert.match(app, /updates remote nodes first and the Hub last/i);
-  assert.match(app, /data-action="override-fleet-readiness"/);
-  assert.match(app, /Override pending acknowledgements/);
-  assert.match(app, /Offline nodes and active detached tasks will remain blocked/);
+  assert.match(app, /data-action="override-fleet-blockers"/);
+  assert.match(app, /Override \/ rescue/);
+  assert.match(app, /data-action="stop-fleet-task"/);
+  assert.match(app, /Stop task and continue/);
+  assert.match(app, /data-action="allow-fleet-task"/);
+  assert.match(app, /Keep task running and continue/);
+  assert.match(app, /Only offline nodes remain/i);
   assert.match(app, /data-action="cancel-fleet-update"/);
   assert.match(app, /codex sessions in their registered project directories/i);
 });

@@ -1,10 +1,24 @@
 import { invariant } from './errors.js';
 
-export const WEBSPIDER_VERSION = '0.6.14';
+export const WEBSPIDER_VERSION = '0.6.15';
 export const WEBSPIDER_REPOSITORY = 'MurrellGroup/WebSpider';
 export const WEBSPIDER_UPDATE_PROTOCOL = 1;
 
 const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9.-]+)?$/;
+
+export function webSpiderVersionAtLeast(installed, target) {
+  const parse = (value) => {
+    const match = String(value || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return match ? match.slice(1).map(Number) : null;
+  };
+  const left = parse(installed);
+  const right = parse(target);
+  if (!left || !right) return installed === target;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return true;
+}
 
 export function validateReleaseVersion(value) {
   const version = String(value || '').trim();

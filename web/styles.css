@@ -377,6 +377,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .fleet-update-summary p { margin: 5px 0 0; max-width: 760px; line-height: 1.55; }
 .callout.warning { border: 1px solid rgb(243 193 92 / 25%); background: rgb(243 193 92 / 5%); border-radius: 9px; padding: 12px; color: var(--muted); }
 .callout.warning ul { margin: 8px 0 0; padding-left: 20px; }
+.fleet-task-blocker { margin-top: 12px; }
+.fleet-task-blocker code { display: block; margin: 7px 0; padding: 8px; border-radius: 6px; background: rgb(0 0 0 / 20%); color: var(--text); overflow-wrap: anywhere; }
+.fleet-task-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .mobile-nav { display: none; }
 .toast { position: fixed; right: 20px; bottom: 20px; background: #202936; border: 1px solid #354154; border-radius: 9px; padding: 10px 13px; box-shadow: var(--shadow); z-index: 50; color: var(--text); font-size: 11px; max-width: 340px; }
 .modal { width: min(620px, calc(100vw - 28px)); padding: 0; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface); box-shadow: var(--shadow); }

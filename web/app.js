@@ -8,7 +8,7 @@ import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-o
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.14';
+const PORTAL_VERSION = '0.6.15';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1464,18 +1464,19 @@ async function renderNodes() {
   history.replaceState(null, '', '#/nodes');
   const update = state.fleetUpdate;
   const activeStates = new Set(['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes', 'stopping_agents', 'updating_nodes', 'updating_hub', 'resuming_agents']);
+  const waitingStates = new Set(['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes']);
   const active = update && activeStates.has(update.state);
   const pending = update?.blockers?.pending_agents || [];
-  const blockers = [
-    ...(update?.blockers?.offline_nodes || []).map((node) => `Offline node: ${node.display_name} (${node.id})`),
-    ...(update?.blockers?.active_tasks || []).map((task) => `Active task: ${task.title} (${task.id}, ${task.state})`),
-  ];
+  const offlineNodes = update?.blockers?.offline_nodes || [];
+  const activeTasks = update?.blockers?.active_tasks || [];
+  const blockerBody = `${offlineNodes.map((node) => `<li>Offline node: ${h(node.display_name)} <span class="mono">${h(node.id)}</span></li>`).join('')}${activeTasks.map((task) => `<li class="fleet-task-blocker"><div><strong>${h(task.title)}</strong> <span class="mono muted">${h(task.id)} · ${h(task.state)}</span></div>${task.argv?.length ? `<code>${h(task.argv.join(' '))}</code>` : ''}<div class="fleet-task-actions"><button class="danger" data-action="stop-fleet-task" data-task-id="${h(task.id)}">Stop task and continue</button><button class="secondary" data-action="allow-fleet-task" data-task-id="${h(task.id)}">Keep task running and continue</button></div></li>`).join('')}`;
   const updateActions = active
-    ? `<button class="secondary" data-action="cancel-fleet-update" ${['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state) ? '' : 'disabled'}>Cancel</button>${pending.length ? '<button class="danger" data-action="override-fleet-readiness">Override pending acknowledgements</button>' : ''}`
+    ? `<button class="secondary" data-action="cancel-fleet-update" ${waitingStates.has(update.state) ? '' : 'disabled'}>Cancel</button>${waitingStates.has(update.state) ? '<button class="danger" data-action="override-fleet-blockers">Override / rescue…</button>' : ''}`
     : '<button class="primary" data-action="prepare-fleet-update">Update everything</button>';
   const updateBody = update ? `<div class="fleet-update-summary"><div><span class="status-pill ${h(update.state === 'completed' ? 'succeeded' : update.state === 'failed' ? 'failed' : 'running')}">${h(update.state.replaceAll('_', ' '))}</span><strong>Target WebSpider ${h(update.target_version)}</strong><span class="muted mono">${h(update.id)}</span></div><div>${updateActions}</div></div>
       ${update.error ? `<p class="form-error">${h(update.error)}</p>` : ''}
-      ${blockers.length ? `<div class="callout warning"><strong>Waiting on hard blockers</strong><ul>${blockers.map((item) => `<li>${h(item)}</li>`).join('')}</ul></div>` : ''}
+      ${blockerBody ? `<div class="callout warning"><strong>Waiting for your decision</strong><ul>${blockerBody}</ul></div>` : ''}
+      ${update.allowed_task_ids?.length ? `<p class="muted">${h(update.allowed_task_ids.length)} detached task${update.allowed_task_ids.length === 1 ? '' : 's'} allowed to remain running through this update.</p>` : ''}
       ${update.agents?.length ? `<h3>Session checkpoints</h3><table class="data-table"><thead><tr><th>Spider</th><th>Project</th><th>Readiness</th></tr></thead><tbody>${update.agents.map((agent) => `<tr><td>${h(agent.title)}</td><td>${h(agent.project_name)}</td><td>${agent.ready ? `<span class="status-pill succeeded">${agent.ready.override ? 'owner override' : 'acknowledged'}</span><br><small>${h(formatTime(agent.ready.ready_at, true))}</small>` : '<span class="status-pill running">waiting</span>'}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No running spiders need a session checkpoint.</p>'}
       ${update.nodes?.length ? `<h3>Package rollout</h3><table class="data-table"><thead><tr><th>Node</th><th>Connection</th><th>Version</th><th>Update</th></tr></thead><tbody>${update.nodes.map((node) => `<tr><td><strong>${h(node.display_name)}</strong><br><span class="mono muted">${h(node.id)}</span></td><td><span class="status-pill ${node.online ? 'online' : 'offline'}">${node.online ? 'online' : 'offline'}</span></td><td class="mono">${h(node.version || 'pre-0.6.13')}</td><td>${h(node.update_status?.phase || 'pending')}</td></tr>`).join('')}</tbody></table>` : ''}` : `<div class="fleet-update-summary"><div><strong>Coordinated update all</strong><p class="muted">Requests safe checkpoints from every running spider, updates remote nodes first and the Hub last, then resumes Codex sessions in their registered project directories.</p></div><div>${updateActions}</div></div>`;
   $('#main-view').innerHTML = `<div class="page">${pageHeader('Nodes', 'Outbound authenticated worker connections')}<div class="page-content"><section class="panel"><div class="panel-header"><h2>Coordinated update</h2><span>Hub and every active node</span></div><div class="panel-body fleet-update">${updateBody}</div></section><section class="panel"><div class="panel-header"><h2>Node fabric</h2><span>${state.nodes.length} enrolled</span></div><div class="panel-body"><table class="data-table"><thead><tr><th>Node</th><th>Status</th><th>Version</th><th>Epoch</th><th>Last seen</th></tr></thead><tbody>${state.nodes.map((node) => `<tr><td><strong>${h(node.display_name)}</strong><br><span class="mono muted">${h(node.id)}</span></td><td><span class="status-pill ${h(node.status)}">${h(node.status)}</span></td><td class="mono">${h(node.capabilities?.webspider_version || 'pre-0.6.13')}</td><td>${h(node.connection_epoch)}</td><td>${h(formatTime(node.last_seen_at, true))}</td></tr>`).join('')}</tbody></table></div></section></div></div>`;
@@ -1681,14 +1682,53 @@ document.addEventListener('click', async (event) => {
       toast('Checkpoint requests sent to every running spider.');
       return renderNodes();
     }
-    if (action === 'override-fleet-readiness') {
+    if (action === 'override-fleet-blockers') {
       const update = state.fleetUpdate;
-      if (!update || !confirm('Override every missing spider acknowledgement? Use this only after you have verified those terminals are at safe breakpoints. Offline nodes and active detached tasks will remain blocked.')) return;
-      await api(`/api/v1/fleet-updates/${encodeURIComponent(update.id)}:override-readiness`, {
-        method: 'POST', body: { confirmation: update.id },
+      const pendingAgents = update?.blockers?.pending_agents || [];
+      const tasks = update?.blockers?.active_tasks || [];
+      if (!update) return;
+      if (!pendingAgents.length && !tasks.length) return alert('Only offline nodes remain. Reconnect them or cancel the update; WebSpider cannot safely override a missing machine.');
+      const decision = [
+        pendingAgents.length ? `override ${pendingAgents.length} missing spider acknowledgement${pendingAgents.length === 1 ? '' : 's'}` : '',
+        tasks.length ? `keep ${tasks.length} detached task${tasks.length === 1 ? '' : 's'} running through service updates` : '',
+      ].filter(Boolean).join(' and ');
+      if (!confirm(`Owner rescue will ${decision}. These decisions are audit-logged. Continue?`)) return;
+      if (pendingAgents.length) {
+        await api(`/api/v1/fleet-updates/${encodeURIComponent(update.id)}:override-readiness`, {
+          method: 'POST', body: { confirmation: update.id },
+        });
+      }
+      for (const task of tasks) {
+        await api(`/api/v1/fleet-updates/${encodeURIComponent(update.id)}/tasks/${encodeURIComponent(task.id)}:allow`, {
+          method: 'POST', body: { confirmation: task.id },
+        });
+      }
+      await loadData();
+      toast('Owner rescue decisions recorded in the audit log.');
+      return renderNodes();
+    }
+    if (action === 'allow-fleet-task') {
+      const update = state.fleetUpdate;
+      const taskId = actionTarget.dataset.taskId;
+      const task = update?.blockers?.active_tasks?.find((candidate) => candidate.id === taskId);
+      if (!update || !task || !confirm(`Keep this command running while WebSpider services update?\n\n${task.argv?.join(' ') || task.title}`)) return;
+      await api(`/api/v1/fleet-updates/${encodeURIComponent(update.id)}/tasks/${encodeURIComponent(task.id)}:allow`, {
+        method: 'POST', body: { confirmation: task.id },
       });
       await loadData();
-      toast('Owner readiness override recorded in the audit log.');
+      toast('Task will keep running; the decision was audit-logged.');
+      return renderNodes();
+    }
+    if (action === 'stop-fleet-task') {
+      const update = state.fleetUpdate;
+      const taskId = actionTarget.dataset.taskId;
+      const task = update?.blockers?.active_tasks?.find((candidate) => candidate.id === taskId);
+      if (!update || !task || !confirm(`Stop this command and continue the coordinated update?\n\n${task.argv?.join(' ') || task.title}`)) return;
+      await api(`/api/v1/fleet-updates/${encodeURIComponent(update.id)}/tasks/${encodeURIComponent(task.id)}:stop`, {
+        method: 'POST', body: { confirmation: task.id },
+      });
+      await loadData();
+      toast('Task stopped; the update will continue after a short safety delay.');
       return renderNodes();
     }
     if (action === 'cancel-fleet-update') {

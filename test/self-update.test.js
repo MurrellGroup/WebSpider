@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fleetUpdateArgv, parseReleaseBootstrap, resolveLatestReleaseVersion, WEBSPIDER_VERSION } from '../src/lib/self-update.js';
+import {
+  fleetUpdateArgv, parseReleaseBootstrap, resolveLatestReleaseVersion,
+  webSpiderVersionAtLeast, WEBSPIDER_VERSION,
+} from '../src/lib/self-update.js';
 
 test('official latest-release bootstraps resolve to a bounded fixed version', async () => {
   const source = "#!/bin/sh\nrepository='MurrellGroup/WebSpider'\nversion='9.8.7'\n";
@@ -29,6 +32,14 @@ test('fleet updater pins the release and preserves role-specific installer seman
 test('package, portal, and fleet protocol use one release version', () => {
   const packageVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
   assert.equal(WEBSPIDER_VERSION, packageVersion);
+});
+
+test('a newer installed package satisfies an older in-progress rollout target', () => {
+  assert.equal(webSpiderVersionAtLeast('0.6.15', '0.6.14'), true);
+  assert.equal(webSpiderVersionAtLeast('0.6.14', '0.6.14'), true);
+  assert.equal(webSpiderVersionAtLeast('0.6.13', '0.6.14'), false);
+  assert.equal(webSpiderVersionAtLeast('development', 'development'), true);
+  assert.equal(webSpiderVersionAtLeast('development', '0.6.14'), false);
 });
 
 test('the detached updater passes preserved node state to the verified installer bootstrap', (t) => {

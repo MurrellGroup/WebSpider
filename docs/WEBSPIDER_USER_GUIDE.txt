@@ -189,7 +189,7 @@ Update every WebSpider machine, including the Hub and Master
 
     A spider should finish its current operation, checkpoint durable work, run the exact `updates ready --rollout ID` command in the request, and end its turn. If an old helper does not know `updates`, the request includes a one-line compatibility command. Once acknowledged, that spider is frozen against direct terminal input until the rollout ends.
 
-    If a spider is clearly idle but fails to acknowledge, the owner may choose Override pending acknowledgements after inspecting its terminal. This break-glass decision is audited. It does not override an offline node or an active detached command; resolve those exact blockers or cancel the rollout.
+    Override / rescue remains available while the rollout waits. If a spider is clearly idle but fails to acknowledge, inspect its terminal and use the audited readiness override. For every active detached command, WebSpider shows the exact command and lets the owner choose Stop task and continue or Keep task running and continue. A kept command survives the service restart. Offline machines must reconnect and cannot be overridden.
 
     Remote nodes update first and report their installed versions. The Hub service updates last, restores the durable rollout record after restarting, and resumes every spider that was running before the update. Managed Codex sessions use `codex resume -C <registered-project> --last`; adopted sessions retain their configured selector. Agents that were already stopped remain stopped. Cancel is available only before package installation begins.
 

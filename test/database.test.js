@@ -224,6 +224,19 @@ test('fleet update readiness is durable, agent-specific, and auditable when the 
   const overridden = database.overrideFleetAgentReadiness(update.id, 'owner:test');
   assert.equal(overridden.ready_agents[agent.id].override, true);
   assert.equal(overridden.ready_agents[agent.id].actor_id, 'owner:test');
+  const task = database.createTask({
+    projectId: agent.project_id,
+    type: 'command',
+    title: 'Long preview server',
+    specification: { argv: ['python3', '-m', 'http.server'] },
+    assignedAgentInstanceId: agent.id,
+    nodeId: 'nod_test',
+    createdBy: `agent:${agent.id}`,
+  });
+  database.setTaskState(task.id, 'running');
+  const allowed = database.allowFleetTask(update.id, task.id, 'owner:test');
+  assert.deepEqual(allowed.allowed_task_ids, [task.id]);
+  assert.deepEqual(database.getFleetUpdate(update.id).allowed_task_ids, [task.id]);
   database.setFleetUpdateNodeStatus(update.id, 'nod_test', { phase: 'complete', version: '9.8.7' });
   const completed = database.setFleetUpdateState(update.id, 'completed');
   assert.equal(completed.node_status.nod_test.version, '9.8.7');
