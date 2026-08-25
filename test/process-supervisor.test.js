@@ -350,7 +350,9 @@ test('a lost managed Codex process automatically resumes its latest dedicated se
     rootId: 'awr_crash_resume', argv: [fakeCodex], policySnapshot,
   });
   assert.equal((await completion).exit_status, 0);
-  database.finishProcess('run_before_crash', 'lost', false);
+  // Model a crash already observed by the supervisor. Leaving completion unreported lets
+  // the polling loop legitimately reclassify the old exit marker while the next PTY starts.
+  database.finishProcess('run_before_crash', 'lost', true);
   completion = waitForCompletion(supervisor);
   supervisor.launch({
     id: 'run_after_crash', kind: 'agent', agentInstanceId: 'agt_crash_resume', terminalId: 'trm_crash_resume',
