@@ -240,9 +240,10 @@ async function main() {
     || (resource === 'reminders' && ['list', 'add', 'cancel'].includes(action))
     || (resource === 'portfolio' && action === 'list')
     || (resource === 'notes' && ['list', 'show'].includes(action))
+    || (resource === 'updates' && action === 'ready')
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | updates ready --rollout ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -401,6 +402,15 @@ async function main() {
       wake_policy: wake,
       transfer_id: transferId,
     }), null, 2));
+    return;
+  }
+  if (resource === 'updates') {
+    const rollout = option('--rollout');
+    if (!/^upd_[A-Za-z0-9_-]{10,100}$/.test(rollout || '')) {
+      console.error('updates ready requires --rollout with the WebSpider update ID');
+      process.exit(2);
+    }
+    console.log(JSON.stringify(await request('updates/' + encodeURIComponent(rollout) + ':ready', 'POST', {}), null, 2));
     return;
   }
   if (resource === 'report') {

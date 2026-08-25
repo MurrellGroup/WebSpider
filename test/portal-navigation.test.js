@@ -11,13 +11,25 @@ const packageVersion = JSON.parse(fs.readFileSync(path.join(repository, 'package
 
 test('portal and hub version are synchronized and version skew is explicit', () => {
   const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
+  const selfUpdate = fs.readFileSync(path.join(repository, 'src', 'lib', 'self-update.js'), 'utf8');
   assert.match(app, new RegExp(`const PORTAL_VERSION = '${packageVersion.replaceAll('.', '\\.')}'`));
-  assert.match(hub, new RegExp(`version: '${packageVersion.replaceAll('.', '\\.')}'`));
+  assert.match(selfUpdate, new RegExp(`WEBSPIDER_VERSION = '${packageVersion.replaceAll('.', '\\.')}'`));
+  assert.match(hub, /version: this\.version/);
   assert.match(app, /health\.version !== PORTAL_VERSION/);
   assert.match(app, /health\.portal_build.*PORTAL_BUILD/);
   assert.match(app, /location\.reload\(\)/);
   assert.match(app, /showVersionMismatch\(health\.version\)/);
   assert.match(app, /systemctl --user restart webspider\.service/);
+});
+
+test('Nodes exposes a Hub-last coordinated update with readiness and owner override controls', () => {
+  assert.match(app, /data-action="prepare-fleet-update"/);
+  assert.match(app, /updates remote nodes first and the Hub last/i);
+  assert.match(app, /data-action="override-fleet-readiness"/);
+  assert.match(app, /Override pending acknowledgements/);
+  assert.match(app, /Offline nodes and active detached tasks will remain blocked/);
+  assert.match(app, /data-action="cancel-fleet-update"/);
+  assert.match(app, /codex sessions in their registered project directories/i);
 });
 
 test('Master Spider navigation opens its terminal and portfolio is separate', () => {

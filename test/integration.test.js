@@ -11,6 +11,7 @@ import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
 import { FILE_TRANSFER_CHUNK_BYTES } from '../src/lib/file-transfer.js';
+import { WEBSPIDER_VERSION } from '../src/lib/self-update.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -123,6 +124,74 @@ test('same-machine Hub and worker identities stay online across one shared proce
   assert.equal(hub.broker.isOnline('nod_local'), true);
   assert.equal(hub.broker.isOnline('nod_worker'), true);
   assert.equal(unexpectedOffline, 0);
+});
+
+test('coordinated update waits for explicit readiness and resumes the Master Codex session', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-fleet-update-'));
+  const workspace = path.join(directory, 'workspace');
+  const bin = path.join(directory, 'bin');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(bin);
+  const fakeCodex = path.join(bin, 'codex');
+  fs.writeFileSync(fakeCodex, `#!/bin/sh
+mkdir -p "$CODEX_HOME/sessions/2026/08/25"
+printf '{}\\n' > "$CODEX_HOME/sessions/2026/08/25/fleet-session.jsonl"
+if [ "$1" = resume ]; then printf '%s\\n' "$@" > fleet-resume-args.txt; fi
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+`);
+  fs.chmodSync(fakeCodex, 0o700);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({
+    stateDir: path.join(directory, 'hub'), listenPort: 0,
+    latestReleaseResolver: async () => WEBSPIDER_VERSION,
+    fleetUpdateGraceMs: 0,
+  });
+  const bootstrap = hub.bootstrapLocal({
+    nodeId: 'nod_local', publicKey: identity.publicKey, workspace,
+    agentProfile: { id: 'apf_fleet_codex', name: 'Codex', adapterKind: 'pty', executable: fakeCodex, arguments: [] },
+  });
+  const listening = await hub.listen();
+  const node = new NodeDaemon({
+    stateDir: path.join(directory, 'node'), hubURL: listening.url,
+    nodeId: 'nod_local', displayName: 'Local workstation',
+    publicKey: identity.publicKey, privateKey: identity.privateKey,
+    roots: [{ id: bootstrap.root_id, path: workspace }], reconnect: false,
+  });
+  node.on('error', () => {});
+  t.after(async () => {
+    try {
+      await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}:stop`, listening.ownerToken, { method: 'POST' });
+    } catch {}
+    await node.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+  const woken = await jsonFetch(`${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}:wake`, listening.ownerToken, { method: 'POST' });
+  assert.equal(woken.response.status, 200);
+  await waitUntil(() => hub.database.getAgent(bootstrap.agent.id).state === 'ready');
+
+  const prepared = await jsonFetch(`${listening.url}/api/v1/fleet-updates`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirmation: 'update-all' }),
+  });
+  assert.equal(prepared.response.status, 200);
+  assert.equal(prepared.body.update.blockers.pending_agents.length, 1);
+  const updateId = prepared.body.update.id;
+  const readyToken = 'wsa_fleet_update_ready_test';
+  hub.database.issueAgentControlToken(bootstrap.agent.id, readyToken, ['updates:write:self']);
+  const ready = await fetch(`${listening.url}/api/v1/agent-control/updates/${updateId}:ready`, {
+    method: 'POST', headers: { authorization: `Bearer ${readyToken}`, 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(ready.status, 200);
+  await waitUntil(() => hub.database.latestFleetUpdate()?.state === 'completed', 10_000);
+  await waitUntil(() => fs.existsSync(path.join(workspace, 'fleet-resume-args.txt')), 5_000);
+  const resumeArgs = fs.readFileSync(path.join(workspace, 'fleet-resume-args.txt'), 'utf8').trim().split('\n');
+  assert.deepEqual(resumeArgs.slice(0, 3), ['resume', '-C', path.resolve(workspace)]);
+  assert.equal(resumeArgs.at(-1), '--last');
+  assert.equal(hub.database.getAgent(bootstrap.agent.id).state, 'ready');
 });
 
 test('quiet browser uploads and large agent file handoffs stream across nodes without SSH', async (t) => {

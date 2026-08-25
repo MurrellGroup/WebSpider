@@ -184,6 +184,17 @@ Whole node machine rebooted
 Important limitation
     A session resume restores the Codex conversation, but an in-flight turn interrupted between checkpoints may still need reconciliation from the terminal tail and durable WebSpider thread. Managed Codex session files and terminal logs are node-local; they survive a reboot only when the machine's WebSpider state directory survives.
 
+Update every WebSpider machine, including the Hub and Master
+    Open Nodes and choose Update everything. WebSpider resolves the latest official release, sends every running spider a checkpoint request, and shows each acknowledgement separately. The ordinary working/completed label is advisory and is not used as update approval.
+
+    A spider should finish its current operation, checkpoint durable work, run the exact `updates ready --rollout ID` command in the request, and end its turn. If an old helper does not know `updates`, the request includes a one-line compatibility command. Once acknowledged, that spider is frozen against direct terminal input until the rollout ends.
+
+    If a spider is clearly idle but fails to acknowledge, the owner may choose Override pending acknowledgements after inspecting its terminal. This break-glass decision is audited. It does not override an offline node or an active detached command; resolve those exact blockers or cancel the rollout.
+
+    Remote nodes update first and report their installed versions. The Hub service updates last, restores the durable rollout record after restarting, and resumes every spider that was running before the update. Managed Codex sessions use `codex resume -C <registered-project> --last`; adopted sessions retain their configured selector. Agents that were already stopped remain stopped. Cancel is available only before package installation begins.
+
+    The updater pins the resolved release and uses the official bootstrap/native-installer SHA-256 verification. A failed rollout attempts to resume stopped sessions and leaves its error and per-node progress visible on Nodes.
+
 Adopting a pre-existing Codex session
     Open the agent's Agent actions menu and choose Adopt Codex session. Select the latest session for that project or enter its UUID/name. WebSpider uses that workstation user's normal Codex session store while keeping WebSpider's compact instructions in an isolated Codex home. It always supplies the registered project directory to `codex resume -C`; the browser never accepts an arbitrary host path. The chosen external session remains associated with that agent until detached from the same dialog.
 

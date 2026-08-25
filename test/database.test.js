@@ -214,6 +214,25 @@ test('note metadata is private by default and supports explicit master visibilit
   assert.equal(database.getNote(note.id), null);
 });
 
+test('fleet update readiness is durable, agent-specific, and auditable when the owner overrides it', (t) => {
+  const { database, agent } = databaseFixture(t);
+  const update = database.createFleetUpdate({
+    targetVersion: '9.8.7', nodeIds: ['nod_test'], agentIds: [agent.id], requestedBy: 'owner:test',
+  });
+  assert.equal(database.getActiveFleetUpdate().id, update.id);
+  assert.deepEqual(database.getFleetUpdate(update.id).ready_agents, {});
+  const overridden = database.overrideFleetAgentReadiness(update.id, 'owner:test');
+  assert.equal(overridden.ready_agents[agent.id].override, true);
+  assert.equal(overridden.ready_agents[agent.id].actor_id, 'owner:test');
+  database.setFleetUpdateNodeStatus(update.id, 'nod_test', { phase: 'complete', version: '9.8.7' });
+  const completed = database.setFleetUpdateState(update.id, 'completed');
+  assert.equal(completed.node_status.nod_test.version, '9.8.7');
+  assert.equal(database.getActiveFleetUpdate(), null);
+  assert.equal(database.latestFleetUpdate().state, 'completed');
+  assert.throws(() => database.markFleetAgentReady(update.id, agent.id, 'agent:test'),
+    (error) => error.code === 'WS_UPDATE_NOT_WAITING');
+});
+
 test('node join tokens are one-time and expire atomically', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-token-'));
   const database = new HubDatabase(path.join(directory, 'hub.db'));

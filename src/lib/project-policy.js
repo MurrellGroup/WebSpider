@@ -222,6 +222,7 @@ function renderWorkerInstructions(project, policy, customInstructions = '') {
     '`report --status working|blocked|completed --summary TEXT` records local status. Add `--notify-master` only for delegated results or actionable blockers/risks/decisions. Never narrate routine direct work.',
     '`tasks run --argv-json JSON [--notify self|master|none]` outlives turns and returns to you by default; `reminders add/list/cancel` schedules input to self or Master.',
     'Use `files targets` then `files send --agent ID --file PATH` for large/binary peer handoffs through WebSpider; use `documents send --master --file PATH` for small text instructions.',
+    'For an update request, checkpoint, run the supplied `updates ready --rollout ID`, end the turn; never self-update.',
     'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt`.',
   ];
   const scholarly = scholarlyInvariants(policy);
@@ -239,6 +240,7 @@ function renderMainInstructions(project, policy, customInstructions = '') {
     'Use judgment. Inspect first, infer routine details, preserve existing work, and ask only for material choices, missing authority, or unavailable essentials. Validate before claiming completion.',
     'Use `portfolio list` and `agents list/send` for coordination. Delegate outcomes and real constraints—not generic workflow—and avoid overlapping writes.',
     'Use `files send --agent ID --file PATH` for large/binary cross-machine handoffs and `documents send --agent ID --file PATH` for small text; use `tasks run` for durable commands and `reminders add/list/cancel` for future input.',
+    'For an update request, checkpoint, run the supplied `updates ready --rollout ID`, end the turn; never self-update.',
     'WebSpider help: read `.webspider/WEBSPIDER_USER_GUIDE.txt` for usage questions.',
     'Only change project/system behavior after an explicit user request. Inspect first and make the narrowest versioned patch.',
     'Harness-native child agents follow their delegated objective, not this Master role; they do not invoke `$WEBSPIDER_CONTROL` and return a UTC completion time.',

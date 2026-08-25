@@ -24,6 +24,7 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'portfolio:read',
   'notes:read:visible',
   'status:write:self',
+  'updates:write:self',
 ]);
 
 function decode(value, fallback = null) {
@@ -140,6 +141,7 @@ function agentRow(row) {
     custom_instructions: row.custom_instructions || '',
     instruction_revision: Number(row.instruction_revision || 1),
     codex_session: decode(row.codex_session_json),
+    resume_managed_once: bool(row.resume_managed_once),
     codex_capable: path.basename(String(row.profile_executable || '')).toLowerCase().includes('codex'),
   };
 }
@@ -234,6 +236,35 @@ function noteRow(row) {
     visibility: row.visibility,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+const ACTIVE_FLEET_UPDATE_STATES = [
+  'waiting_for_agents',
+  'waiting_for_tasks',
+  'waiting_for_nodes',
+  'stopping_agents',
+  'updating_nodes',
+  'updating_hub',
+  'resuming_agents',
+];
+
+function fleetUpdateRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    target_version: row.target_version,
+    state: row.state,
+    requested_by: row.requested_by,
+    node_ids: decode(row.node_ids_json, []),
+    agent_ids: decode(row.agent_ids_json, []),
+    ready_agents: decode(row.ready_agents_json, {}),
+    node_status: decode(row.node_status_json, {}),
+    error: row.error || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    started_at: row.started_at || null,
+    completed_at: row.completed_at || null,
   };
 }
 
@@ -347,7 +378,8 @@ export class HubDatabase extends EventEmitter {
         status_updated_at TEXT,
         custom_instructions TEXT NOT NULL DEFAULT '',
         instruction_revision INTEGER NOT NULL DEFAULT 1,
-        codex_session_json TEXT
+        codex_session_json TEXT,
+        resume_managed_once INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS agent_control_tokens (
@@ -591,6 +623,22 @@ export class HubDatabase extends EventEmitter {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS fleet_updates (
+        id TEXT PRIMARY KEY,
+        target_version TEXT NOT NULL,
+        state TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        node_ids_json TEXT NOT NULL DEFAULT '[]',
+        agent_ids_json TEXT NOT NULL DEFAULT '[]',
+        ready_agents_json TEXT NOT NULL DEFAULT '{}',
+        node_status_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS idempotency (
         scope TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -609,6 +657,7 @@ export class HubDatabase extends EventEmitter {
       CREATE INDEX IF NOT EXISTS idx_policy_snapshots_agent ON policy_snapshots(agent_instance_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_agent_control_tokens_agent ON agent_control_tokens(agent_instance_id, expires_at);
       CREATE INDEX IF NOT EXISTS idx_account_usage_observed ON account_usage_snapshots(observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_fleet_updates_created ON fleet_updates(created_at DESC);
     `);
     const projectColumns = new Set(this.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
     if (!projectColumns.has('policy_json')) this.db.exec("ALTER TABLE projects ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'");
@@ -638,6 +687,7 @@ export class HubDatabase extends EventEmitter {
     if (!agentColumns.has('custom_instructions')) this.db.exec("ALTER TABLE agent_instances ADD COLUMN custom_instructions TEXT NOT NULL DEFAULT ''");
     if (!agentColumns.has('instruction_revision')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN instruction_revision INTEGER NOT NULL DEFAULT 1');
     if (!agentColumns.has('codex_session_json')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN codex_session_json TEXT');
+    if (!agentColumns.has('resume_managed_once')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN resume_managed_once INTEGER NOT NULL DEFAULT 0');
     const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
     if (!joinColumns.has('metadata_json')) this.db.exec("ALTER TABLE join_tokens ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
     const rootColumns = new Set(this.db.prepare('PRAGMA table_info(workspace_roots)').all().map((column) => column.name));
@@ -669,6 +719,101 @@ export class HubDatabase extends EventEmitter {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  createFleetUpdate({
+    id = makeId('upd'), targetVersion, nodeIds = [], agentIds = [], requestedBy = 'owner:local',
+  }) {
+    invariant(!this.getActiveFleetUpdate(), 'WS_UPDATE_ACTIVE', 'A WebSpider fleet update is already active.', 409);
+    invariant(typeof targetVersion === 'string' && targetVersion.length > 0 && targetVersion.length <= 80,
+      'WS_VALIDATION', 'A bounded target version is required.');
+    const nodes = [...new Set(nodeIds.map(String))];
+    const agents = [...new Set(agentIds.map(String))];
+    const now = nowISO();
+    this.db.prepare(`INSERT INTO fleet_updates
+      (id, target_version, state, requested_by, node_ids_json, agent_ids_json,
+       ready_agents_json, node_status_json, created_at, updated_at, started_at)
+      VALUES (?, ?, 'waiting_for_agents', ?, ?, ?, '{}', '{}', ?, ?, ?)`)
+      .run(id, targetVersion, requestedBy, encode(nodes), encode(agents), now, now, now);
+    const update = this.getFleetUpdate(id);
+    this.appendEvent('fleet_update', id, 'fleet_update.preparing.v1', requestedBy, id, {
+      target_version: targetVersion,
+      node_ids: nodes,
+      agent_ids: agents,
+    });
+    return update;
+  }
+
+  getFleetUpdate(id) {
+    return fleetUpdateRow(this.db.prepare('SELECT * FROM fleet_updates WHERE id = ?').get(id));
+  }
+
+  getActiveFleetUpdate() {
+    const placeholders = ACTIVE_FLEET_UPDATE_STATES.map(() => '?').join(', ');
+    return fleetUpdateRow(this.db.prepare(`SELECT * FROM fleet_updates WHERE state IN (${placeholders}) ORDER BY created_at DESC LIMIT 1`)
+      .get(...ACTIVE_FLEET_UPDATE_STATES));
+  }
+
+  latestFleetUpdate() {
+    return fleetUpdateRow(this.db.prepare('SELECT * FROM fleet_updates ORDER BY created_at DESC LIMIT 1').get());
+  }
+
+  markFleetAgentReady(id, agentId, actor, { override = false } = {}) {
+    const update = this.getFleetUpdate(id);
+    invariant(update && ['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state),
+      'WS_UPDATE_NOT_WAITING', 'This fleet update is no longer accepting readiness acknowledgements.', 409);
+    invariant(update.agent_ids.includes(agentId), 'WS_FORBIDDEN', 'This agent is not part of the fleet update.', 403);
+    if (update.ready_agents[agentId]) return update;
+    const readyAgents = {
+      ...update.ready_agents,
+      [agentId]: { ready_at: nowISO(), actor_id: actor, override: Boolean(override) },
+    };
+    const changed = nowISO();
+    this.db.prepare('UPDATE fleet_updates SET ready_agents_json = ?, updated_at = ? WHERE id = ?')
+      .run(encode(readyAgents), changed, id);
+    this.appendEvent('fleet_update', id, 'fleet_update.agent_ready.v1', actor, agentId, {
+      agent_id: agentId,
+      override: Boolean(override),
+    });
+    return this.getFleetUpdate(id);
+  }
+
+  overrideFleetAgentReadiness(id, actor) {
+    let update = this.getFleetUpdate(id);
+    invariant(update && ['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state),
+      'WS_UPDATE_NOT_WAITING', 'This fleet update is no longer accepting readiness overrides.', 409);
+    for (const agentId of update.agent_ids) {
+      if (!update.ready_agents[agentId]) update = this.markFleetAgentReady(id, agentId, actor, { override: true });
+    }
+    return update;
+  }
+
+  setFleetUpdateNodeStatus(id, nodeId, status) {
+    const update = this.getFleetUpdate(id);
+    invariant(update, 'WS_NOT_FOUND', 'Fleet update not found.', 404);
+    invariant(update.node_ids.includes(nodeId), 'WS_VALIDATION', 'Node is not part of the fleet update.');
+    const nodeStatus = { ...update.node_status, [nodeId]: { ...(update.node_status[nodeId] || {}), ...status } };
+    this.db.prepare('UPDATE fleet_updates SET node_status_json = ?, updated_at = ? WHERE id = ?')
+      .run(encode(nodeStatus), nowISO(), id);
+    return this.getFleetUpdate(id);
+  }
+
+  setFleetUpdateState(id, state, { error = null } = {}, actor = 'hub:fleet-update') {
+    const update = this.getFleetUpdate(id);
+    invariant(update, 'WS_NOT_FOUND', 'Fleet update not found.', 404);
+    const allowed = new Set([...ACTIVE_FLEET_UPDATE_STATES, 'completed', 'failed', 'cancelled']);
+    invariant(allowed.has(state), 'WS_VALIDATION', 'Invalid fleet update state.');
+    const now = nowISO();
+    const completedAt = ['completed', 'failed', 'cancelled'].includes(state) ? now : null;
+    this.db.prepare(`UPDATE fleet_updates SET state = ?, error = ?, updated_at = ?,
+      completed_at = COALESCE(?, completed_at) WHERE id = ?`)
+      .run(state, error, now, completedAt, id);
+    this.appendEvent('fleet_update', id, `fleet_update.${state}.v1`, actor, id, {
+      previous_state: update.state,
+      target_version: update.target_version,
+      error,
+    });
+    return this.getFleetUpdate(id);
   }
 
   createSession(secret, csrfToken, principalId = 'owner:local', role = 'owner', ttlMs = 43_200_000) {
@@ -717,6 +862,7 @@ export class HubDatabase extends EventEmitter {
         'reminders:write:self',
         'documents:write',
         'files:transfer',
+        'updates:write:self',
       ]);
       invariant(scopes.every((scope) => workerScopes.has(scope)), 'WS_FORBIDDEN',
         'A worker agent can only report status, manage its own detached tasks, and schedule its own hooks.', 403);
@@ -1366,6 +1512,12 @@ export class HubDatabase extends EventEmitter {
     this.appendEvent('agent', id, 'agent.codex_session.configured.v1', actor, id, {
       configured: Boolean(normalized), selector: normalized?.selector || null,
     });
+    return this.getAgent(id);
+  }
+
+  setAgentManagedResumePending(id, pending = true) {
+    invariant(this.getAgent(id), 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    this.db.prepare('UPDATE agent_instances SET resume_managed_once = ? WHERE id = ?').run(Number(Boolean(pending)), id);
     return this.getAgent(id);
   }
 

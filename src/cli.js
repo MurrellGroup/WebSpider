@@ -10,6 +10,7 @@ import { makeId } from './lib/ids.js';
 import { hubSynchronizedTimestamp } from './lib/hub-clock.js';
 import { agentLaunchArguments } from './lib/agent-profile.js';
 import { inferProjectContext } from './lib/project-policy.js';
+import { WEBSPIDER_UPDATE_PROTOCOL, WEBSPIDER_VERSION } from './lib/self-update.js';
 import {
   installNodeUserService,
   installUserService,
@@ -280,6 +281,8 @@ async function joinNode(options) {
         roots: roots.map((root) => ({ id: root.id, name: root.display_name || 'workspace' })),
         shell: process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
         codex: Boolean(findExecutable('codex')),
+        webspider_version: WEBSPIDER_VERSION,
+        fleet_update_protocol: WEBSPIDER_UPDATE_PROTOCOL,
       },
     }),
   });
@@ -466,7 +469,7 @@ function BunLikeSpawn(executable) {
 }
 
 function help() {
-  process.stdout.write(`WebSpider 0.6.12\n\n`);
+  process.stdout.write(`WebSpider ${WEBSPIDER_VERSION}\n\n`);
   process.stdout.write(`Usage:\n`);
   process.stdout.write(`  webspider up [--listen 127.0.0.1:7340] [--workspace PATH] [--agent-command PATH] [--agent-args JSON]\n`);
   process.stdout.write(`  webspider hub [--listen 127.0.0.1:7340]\n`);

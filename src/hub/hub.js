@@ -20,6 +20,9 @@ import {
   decodeTransferChunk, FILE_TRANSFER_CHUNK_BYTES, validateTransferConflict,
   validateTransferFilename, validateTransferId, validateTransferSize,
 } from '../lib/file-transfer.js';
+import {
+  fleetUpdateArgv, resolveLatestReleaseVersion, WEBSPIDER_UPDATE_PROTOCOL, WEBSPIDER_VERSION,
+} from '../lib/self-update.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIR = path.resolve(MODULE_DIR, '../../web');
@@ -39,6 +42,7 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'reminders:write:self',
   'portfolio:read',
   'notes:read:visible',
+  'updates:write:self',
 ];
 const WORKER_AGENT_CONTROL_SCOPES = [
   'status:write:self',
@@ -48,6 +52,7 @@ const WORKER_AGENT_CONTROL_SCOPES = [
   'reminders:write:self',
   'documents:write',
   'files:transfer',
+  'updates:write:self',
 ];
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 
@@ -107,6 +112,8 @@ export class Hub {
     allowedOrigins = [],
     webDir = DEFAULT_WEB_DIR,
     ownerToken = null,
+    latestReleaseResolver = resolveLatestReleaseVersion,
+    fleetUpdateGraceMs = 20_000,
   }) {
     this.stateDir = stateDir;
     this.listenHost = listenHost;
@@ -114,6 +121,11 @@ export class Hub {
     this.publicBaseURL = publicBaseURL;
     this.allowedOrigins = allowedOrigins;
     this.webDir = webDir;
+    this.version = WEBSPIDER_VERSION;
+    this.latestReleaseResolver = latestReleaseResolver;
+    this.fleetUpdateGraceMs = fleetUpdateGraceMs;
+    this.fleetUpdateTimer = null;
+    this.fleetUpdateAdvancing = null;
     const portalHash = createHash('sha256');
     for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js']) {
       portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
@@ -143,6 +155,7 @@ export class Hub {
           .then(async () => {
             await this.#drainDeliveries(event.scope_id);
             await this.#drainTasks(event.scope_id);
+            await this.#scheduleFleetUpdateAdvance();
           })
           .catch((error) => this.#logError(error));
       }
@@ -161,12 +174,15 @@ export class Hub {
     const host = this.listenHost.includes(':') ? `[${this.listenHost}]` : this.listenHost;
     this.url = this.publicBaseURL || `http://${host}:${address.port}`;
     this.#restoreReminders();
+    this.#restoreFleetUpdate();
     return { url: this.url, ownerToken: this.ownerToken, address };
   }
 
   async close() {
     for (const timer of this.reminderTimers.values()) clearTimeout(timer);
     this.reminderTimers.clear();
+    if (this.fleetUpdateTimer) clearTimeout(this.fleetUpdateTimer);
+    this.fleetUpdateTimer = null;
     const closed = new Promise((resolve) => this.server.close(() => resolve()));
     for (const connection of this.portalConnections) connection.close(1001, 'Hub stopping');
     for (const state of this.broker.connections.values()) state.connection.close(1001, 'Hub stopping');
@@ -238,7 +254,7 @@ export class Hub {
     const route = (method, pattern, handler, options) => this.router.add(method, pattern, handler, options);
 
     route('GET', '/healthz', async () => ({
-      status: 'ok', version: '0.6.12', portal_build: this.portalBuild, time: nowISO(),
+      status: 'ok', version: this.version, portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
@@ -268,6 +284,37 @@ export class Hub {
     }));
 
     route('GET', '/api/v1/summary', async () => this.database.countSummary());
+    route('GET', '/api/v1/fleet-updates/latest', async () => this.#fleetUpdateView(this.database.latestFleetUpdate()));
+    route('POST', '/api/v1/fleet-updates', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(body.confirmation === 'update-all', 'WS_VALIDATION', 'Confirm the coordinated update-all operation.');
+      const targetVersion = await this.latestReleaseResolver();
+      return this.#prepareFleetUpdate(targetVersion, ctx.principal.principal_id);
+    });
+    route('POST', '/api/v1/fleet-updates/:id:override-readiness', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(body.confirmation === ctx.params.id, 'WS_VALIDATION', 'Confirm the exact fleet update before overriding readiness.');
+      const update = this.database.overrideFleetAgentReadiness(ctx.params.id, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'fleet_update.readiness.override',
+        targetType: 'fleet_update',
+        targetId: update.id,
+        decision: 'owner_break_glass',
+        newState: { overridden_agent_ids: update.agent_ids.filter((id) => update.ready_agents[id]?.override) },
+      });
+      this.#scheduleFleetUpdateAdvance({ grace: true });
+      return this.#fleetUpdateView(update);
+    });
+    route('POST', '/api/v1/fleet-updates/:id:cancel', async (ctx) => {
+      const update = this.database.getFleetUpdate(ctx.params.id);
+      invariant(update && ['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state),
+        'WS_UPDATE_NOT_WAITING', 'Only a fleet update that has not begun installing can be cancelled.', 409);
+      const cancelled = this.database.setFleetUpdateState(update.id, 'cancelled', {}, ctx.principal.principal_id);
+      this.database.audit({ actorId: ctx.principal.principal_id, action: 'fleet_update.cancel', targetType: 'fleet_update', targetId: update.id });
+      queueMicrotask(() => this.#drainAllDeliveries());
+      return this.#fleetUpdateView(cancelled);
+    });
     route('GET', '/api/v1/account-usage', async () => this.database.accountUsageStatus());
     route('GET', '/api/v1/system/policy', async () => this.database.getSystemPolicy());
     route('PATCH', '/api/v1/system/policy', async (ctx) => {
@@ -818,6 +865,21 @@ export class Hub {
       }
       return { agent, notification };
     }, { agentOnly: true, agentScopes: ['status:write:self'] });
+
+    route('POST', '/api/v1/agent-control/updates/:id:ready', async (ctx) => {
+      const update = this.database.markFleetAgentReady(
+        ctx.params.id,
+        ctx.principal.agent_instance_id,
+        ctx.principal.principal_id,
+      );
+      this.#scheduleFleetUpdateAdvance({ grace: true });
+      return {
+        update_id: update.id,
+        target_version: update.target_version,
+        ready: true,
+        instruction: 'End this turn now and wait. WebSpider will resume this Codex session after the coordinated update.',
+      };
+    }, { agentOnly: true });
 
     route('POST', '/api/v1/agent-control/agents/:id/messages', async (ctx) => {
       const body = await readJSON(ctx.request, 262_144);
@@ -1650,7 +1712,7 @@ export class Hub {
       if (options.agentOnly) invariant(principal?.role === 'agent', 'WS_FORBIDDEN', 'This route requires a scoped main-agent token.', 403);
       if (principal?.role === 'agent') {
         const allowed = options.agentScopes || [];
-        invariant(allowed.length > 0 && allowed.some((scope) => principal.scopes.includes(scope)),
+        invariant((options.agentOnly && allowed.length === 0) || allowed.some((scope) => principal.scopes.includes(scope)),
           'WS_FORBIDDEN', 'This agent token is not valid for the requested route.', 403);
       }
       if (options.csrf !== false && principal && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !principal.viaBearer) {
@@ -1838,6 +1900,8 @@ export class Hub {
         }
         if (frame.type === 'INPUT') {
           const lease = this.database.validateTerminalLease(terminalId, frame.lease_id, frame.lease_epoch, leasePrincipal);
+          invariant(!this.#agentUpdateBlocked(terminal.agent_instance_id), 'WS_UPDATE_AGENT_READY',
+            'This agent is checkpointed for a coordinated update. Cancel the update before sending more terminal input.', 409);
           const bytes = Buffer.from(String(frame.data || ''), 'base64');
           inputPipeline.enqueue(bytes, { lease, input_sequence: Number(frame.input_sequence || 0) });
           return;
@@ -1943,7 +2007,7 @@ export class Hub {
     }
   }
 
-  async #wakeAgent(agentId, actor) {
+  async #wakeAgent(agentId, actor, { resumeManaged = false } = {}) {
     let agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
@@ -2002,9 +2066,12 @@ export class Hub {
         environment: profile.environment,
         policy_snapshot: policySnapshot,
         agent_control: agentControl,
-        codex_session: agent.codex_session,
+        codex_session: agent.codex_session || ((resumeManaged || agent.resume_managed_once) && agent.codex_capable
+          ? { source: 'managed', selector: 'last', automatic: true }
+          : null),
       }, { timeoutMs: 30_000 });
       if (started?.runtime?.id) this.agentRuntimes.set(agent.id, started.runtime.id);
+      if (agent.resume_managed_once) this.database.setAgentManagedResumePending(agent.id, false);
       this.database.setTerminalState(agent.terminal_id, 'attached');
       agent = this.database.setAgentState(agentId, 'ready', `node:${agent.node_id}`, { adapter_kind: profile.adapter_kind });
       this.database.audit({ actorId: actor, action: 'agent.wake', targetType: 'agent_instance', targetId: agentId, projectId: agent.project_id, newState: { state: agent.state } });
@@ -2024,7 +2091,10 @@ export class Hub {
     if (['stopped', 'failed'].includes(agent.state)) return agent;
     this.database.setAgentState(agentId, 'stopping', actor);
     if (this.broker.isOnline(agent.node_id)) {
-      await this.broker.request(agent.node_id, 'process.stop-agent', { agent_instance_id: agent.id });
+      await this.broker.request(agent.node_id, 'process.stop-agent', {
+        agent_instance_id: agent.id,
+        wait_ms: 15_000,
+      }, { timeoutMs: 20_000 });
     }
     this.database.setTerminalState(agent.terminal_id, 'exited');
     agent = this.database.setAgentState(agentId, 'stopped', `node:${agent.node_id}`);
@@ -2106,6 +2176,23 @@ export class Hub {
     if (!message || ['adapter_accepted', 'replied'].includes(message.delivery?.state)) return;
     const thread = this.database.getThread(message.thread_id);
     let agent = this.database.getAgent(thread.primary_agent_instance_id);
+    const fleetPreparation = /^system:fleet-update:(upd_[A-Za-z0-9_-]+)$/.exec(message.authenticated_actor_id || '');
+    if (fleetPreparation) {
+      const rollout = this.database.getFleetUpdate(fleetPreparation[1]);
+      if (rollout && (rollout.ready_agents[agent.id]
+        || !['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(rollout.state))) {
+        this.database.updateMessageDelivery(messageId, 'adapter_accepted', {
+          skipped: true,
+          reason: 'fleet_update_readiness_already_resolved',
+          update_id: rollout.id,
+        });
+        return;
+      }
+    }
+    if (this.#agentUpdateBlocked(agent.id)) {
+      this.database.updateMessageDelivery(messageId, 'queued');
+      return;
+    }
     if (!this.broker.isOnline(agent.node_id)) {
       this.database.updateMessageDelivery(messageId, 'queued');
       return;
@@ -2242,6 +2329,7 @@ export class Hub {
         if ((task.specification.notify_target || (task.specification.notify_master ? 'master' : 'none')) !== 'none') {
           await this.#notifyTaskCompletion(task, result);
         }
+        if (task.specification.fleet_update_id) this.#scheduleFleetUpdateAdvance();
       }
       this.database.appendEvent(runtime.kind === 'task' ? 'task' : 'agent', runtime.taskId || runtime.agentInstanceId,
         event.type === 'process.completed' ? 'runtime.completed.v1' : 'runtime.lost.v1', `node:${nodeId}`, runtime.id, {
@@ -2251,6 +2339,319 @@ export class Hub {
           stale_runtime: staleAgentRuntime,
           current_runtime_id: staleAgentRuntime ? currentAgentRuntime : undefined,
         });
+    }
+  }
+
+  #fleetUpdateBlockingTasks(update) {
+    const active = new Set(['pending', 'runnable', 'running', 'cancel_requested']);
+    return this.database.listTasks().filter((task) => active.has(task.state)
+      && task.type === 'command'
+      && task.specification?.fleet_update_id !== update?.id);
+  }
+
+  #fleetUpdateView(update) {
+    if (!update) return { update: null };
+    const agents = update.agent_ids.map((id) => this.database.getAgent(id)).filter(Boolean);
+    const nodes = update.node_ids.map((id) => this.database.getNode(id, true)).filter(Boolean);
+    const pendingAgents = agents.filter((agent) => !update.ready_agents[agent.id]);
+    const offlineNodes = nodes.filter((node) => node.status !== 'online' || !this.broker.isOnline(node.id));
+    const blockingTasks = this.#fleetUpdateBlockingTasks(update);
+    return {
+      update: {
+        ...update,
+        agents: agents.map((agent) => ({
+          id: agent.id,
+          title: agent.title,
+          project_name: agent.project_name,
+          node_id: agent.node_id,
+          ready: update.ready_agents[agent.id] || null,
+        })),
+        nodes: nodes.map((node) => ({
+          id: node.id,
+          display_name: node.display_name,
+          online: node.status === 'online' && this.broker.isOnline(node.id),
+          version: node.capabilities?.webspider_version || null,
+          update_status: update.node_status[node.id] || null,
+        })),
+        blockers: {
+          pending_agents: pendingAgents.map((agent) => ({ id: agent.id, title: agent.title, project_name: agent.project_name })),
+          offline_nodes: offlineNodes.map((node) => ({ id: node.id, display_name: node.display_name })),
+          active_tasks: blockingTasks.map((task) => ({ id: task.id, title: task.title, state: task.state })),
+        },
+      },
+    };
+  }
+
+  async #prepareFleetUpdate(targetVersion, actor) {
+    invariant(!this.database.getActiveFleetUpdate(), 'WS_UPDATE_ACTIVE', 'A WebSpider fleet update is already active.', 409);
+    const allAgents = this.database.listAgents().filter((agent) => !agent.project_archived_at);
+    const participatingAgents = allAgents.filter((agent) => ['ready', 'busy', 'starting'].includes(agent.state));
+    const nodeIds = [...new Set(allAgents.map((agent) => agent.node_id))]
+      .filter((nodeId) => !this.database.getNode(nodeId, true)?.revoked_at);
+    invariant(nodeIds.includes('nod_local'), 'WS_UPDATE_HUB_MISSING', 'The built-in Hub node is not enrolled.', 409);
+    const update = this.database.createFleetUpdate({
+      targetVersion,
+      nodeIds,
+      agentIds: participatingAgents.map((agent) => agent.id),
+      requestedBy: actor,
+    });
+    this.database.audit({
+      actorId: actor,
+      action: 'fleet_update.prepare',
+      targetType: 'fleet_update',
+      targetId: update.id,
+      newState: { target_version: targetVersion, node_ids: nodeIds, agent_ids: update.agent_ids },
+    });
+    for (const agent of participatingAgents) {
+      const directReady = [
+        'node -e',
+        `'fetch(process.env.WEBSPIDER_CONTROL_URL+"/updates/${update.id}:ready",{method:"POST",headers:{authorization:"Bearer "+process.env.WEBSPIDER_AGENT_TOKEN}}).then(async r=>{if(!r.ok)throw new Error(await r.text());console.log(await r.text())})'`,
+      ].join(' ');
+      const created = this.database.createMessage({
+        threadId: agent.active_thread_id,
+        actorId: `system:fleet-update:${update.id}`,
+        deliveryRole: 'user',
+        displaySender: `WebSpider coordinated update ${update.id}`,
+        contentParts: [{ type: 'text', text: [
+          '[WebSpider coordinated update request]',
+          `Update ID: ${update.id}`,
+          `Target version: ${targetVersion}`,
+          '',
+          'At your next safe breakpoint, finish the current operation, checkpoint durable work, and do not begin anything new. Ordinary working/completed status does not count as approval.',
+          `Then run: $WEBSPIDER_CONTROL updates ready --rollout ${update.id}`,
+          `If this older helper does not recognize "updates", run: ${directReady}`,
+          'After readiness succeeds, end the turn immediately. WebSpider will stop this process cleanly and resume the same Codex session in the registered project directory after every node and the Hub have updated.',
+        ].join('\n') }],
+        wakePolicy: 'interrupt',
+        idempotencyKey: `fleet-update:${update.id}:prepare:${agent.id}`,
+        traceId: makeId('trc'),
+        hopCount: 1,
+      });
+      if (!created.duplicate) await this.#dispatchMessage(created.message.id);
+    }
+    this.#scheduleFleetUpdateAdvance();
+    return this.#fleetUpdateView(update);
+  }
+
+  #agentUpdateBlocked(agentId) {
+    const update = this.database.getActiveFleetUpdate();
+    if (!update?.agent_ids.includes(agentId)) return false;
+    if (!['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state)) return true;
+    return Boolean(update.ready_agents[agentId]);
+  }
+
+  #restoreFleetUpdate() {
+    if (this.database.getActiveFleetUpdate()) this.#scheduleFleetUpdateAdvance();
+  }
+
+  #scheduleFleetUpdateAdvance({ grace = false } = {}) {
+    if (this.fleetUpdateTimer) return;
+    const delay = grace ? this.fleetUpdateGraceMs : 0;
+    this.fleetUpdateTimer = setTimeout(() => {
+      this.fleetUpdateTimer = null;
+      if (this.fleetUpdateAdvancing) return;
+      this.fleetUpdateAdvancing = this.#advanceFleetUpdate()
+        .catch((error) => this.#failFleetUpdate(error))
+        .finally(() => { this.fleetUpdateAdvancing = null; });
+    }, delay);
+    this.fleetUpdateTimer.unref?.();
+  }
+
+  async #advanceFleetUpdate() {
+    let update = this.database.getActiveFleetUpdate();
+    if (!update) return;
+    if (['waiting_for_agents', 'waiting_for_tasks', 'waiting_for_nodes'].includes(update.state)) {
+      const pending = update.agent_ids.filter((id) => !update.ready_agents[id]);
+      if (pending.length) {
+        if (update.state !== 'waiting_for_agents') this.database.setFleetUpdateState(update.id, 'waiting_for_agents');
+        return;
+      }
+      const latestReady = Math.max(0, ...Object.values(update.ready_agents)
+        .map((ready) => Date.parse(ready?.ready_at || 0)).filter(Number.isFinite));
+      const graceRemaining = this.fleetUpdateGraceMs - (Date.now() - latestReady);
+      if (graceRemaining > 0) {
+        this.fleetUpdateTimer = setTimeout(() => {
+          this.fleetUpdateTimer = null;
+          this.#scheduleFleetUpdateAdvance();
+        }, graceRemaining);
+        this.fleetUpdateTimer.unref?.();
+        return;
+      }
+      if (this.#fleetUpdateBlockingTasks(update).length) {
+        if (update.state !== 'waiting_for_tasks') this.database.setFleetUpdateState(update.id, 'waiting_for_tasks');
+        return;
+      }
+      const offline = update.node_ids.filter((nodeId) => !this.broker.isOnline(nodeId));
+      if (offline.length) {
+        if (update.state !== 'waiting_for_nodes') this.database.setFleetUpdateState(update.id, 'waiting_for_nodes');
+        this.#scheduleFleetUpdateAdvance({ grace: true });
+        return;
+      }
+      update = this.database.setFleetUpdateState(update.id, 'stopping_agents');
+    }
+    if (update.state === 'stopping_agents') {
+      for (const agentId of update.agent_ids) await this.#stopAgent(agentId, `system:fleet-update:${update.id}`);
+      update = this.database.setFleetUpdateState(update.id, 'updating_nodes');
+    }
+    if (update.state === 'updating_nodes') {
+      const remoteNodeIds = update.node_ids.filter((nodeId) => nodeId !== 'nod_local');
+      for (const nodeId of remoteNodeIds) {
+        const node = this.database.getNode(nodeId, true);
+        if (node?.capabilities?.webspider_version === update.target_version) {
+          if (update.node_status[nodeId]?.phase !== 'complete') {
+            update = this.database.setFleetUpdateNodeStatus(update.id, nodeId, {
+              phase: 'complete', version: update.target_version, completed_at: nowISO(),
+            });
+          }
+          continue;
+        }
+        const status = update.node_status[nodeId];
+        if (status?.phase === 'installing') {
+          const task = status.task_id ? this.database.getTask(status.task_id) : null;
+          if (task?.state === 'failed') throw new WebSpiderError('WS_UPDATE_FAILED', `Update failed on ${node?.display_name || nodeId}.`, 502);
+          if (Date.now() - Date.parse(status.started_at || update.updated_at) > 300_000) {
+            throw new WebSpiderError('WS_UPDATE_TIMEOUT', `Update timed out on ${node?.display_name || nodeId}.`, 504);
+          }
+          this.#scheduleFleetUpdateAdvance({ grace: true });
+          return;
+        }
+        invariant(this.broker.isOnline(nodeId), 'WS_NODE_OFFLINE', `Node ${node?.display_name || nodeId} went offline before its update.`, 503);
+        const task = await this.#launchFleetUpdateTask(update, nodeId, 'node');
+        this.database.setFleetUpdateNodeStatus(update.id, nodeId, {
+          phase: 'installing', task_id: task.id, from_version: node?.capabilities?.webspider_version || null,
+          started_at: nowISO(),
+        });
+        this.#scheduleFleetUpdateAdvance({ grace: true });
+        return;
+      }
+      update = this.database.setFleetUpdateState(update.id, 'updating_hub');
+    }
+    if (update.state === 'updating_hub') {
+      if (this.version === update.target_version) {
+        update = this.database.setFleetUpdateNodeStatus(update.id, 'nod_local', {
+          phase: 'complete', version: this.version, completed_at: nowISO(),
+        });
+        update = this.database.setFleetUpdateState(update.id, 'resuming_agents');
+      } else {
+        const status = update.node_status.nod_local;
+        if (status?.phase === 'installing') {
+          const task = status.task_id ? this.database.getTask(status.task_id) : null;
+          if (task?.state === 'failed') throw new WebSpiderError('WS_UPDATE_FAILED', 'The Hub update installer failed.', 502);
+          if (Date.now() - Date.parse(status.started_at || update.updated_at) > 300_000) {
+            throw new WebSpiderError('WS_UPDATE_TIMEOUT', 'The Hub update installer timed out.', 504);
+          }
+          this.#scheduleFleetUpdateAdvance({ grace: true });
+          return;
+        }
+        const task = await this.#launchFleetUpdateTask(update, 'nod_local', 'hub');
+        this.database.setFleetUpdateNodeStatus(update.id, 'nod_local', {
+          phase: 'installing', task_id: task.id, from_version: this.version, started_at: nowISO(),
+        });
+        return;
+      }
+    }
+    if (update.state === 'resuming_agents') {
+      const offline = update.node_ids.filter((nodeId) => !this.broker.isOnline(nodeId));
+      if (offline.length) {
+        this.#scheduleFleetUpdateAdvance({ grace: true });
+        return;
+      }
+      const agents = update.agent_ids.map((id) => this.database.getAgent(id)).filter(Boolean)
+        .sort((left, right) => Number(left.orchestration_role === 'main') - Number(right.orchestration_role === 'main'));
+      for (const agent of agents) {
+        await this.#wakeAgent(agent.id, `system:fleet-update:${update.id}`, { resumeManaged: true });
+      }
+      const completed = this.database.setFleetUpdateState(update.id, 'completed');
+      this.database.audit({
+        actorId: 'hub:fleet-update', action: 'fleet_update.complete', targetType: 'fleet_update', targetId: update.id,
+        newState: { target_version: completed.target_version, resumed_agent_ids: completed.agent_ids },
+      });
+      await this.#drainAllDeliveries();
+    }
+  }
+
+  async #launchFleetUpdateTask(update, nodeId, role) {
+    const node = this.database.getNode(nodeId, true);
+    const agent = this.database.listAgents().find((candidate) => candidate.node_id === nodeId && !candidate.project_archived_at);
+    invariant(agent, 'WS_UPDATE_NODE_EMPTY', `Node ${node?.display_name || nodeId} has no active project root for its updater.`, 409);
+    const root = this.database.listAgentRoots(agent.id)[0];
+    invariant(root, 'WS_ROOT_NOT_FOUND', `Node ${node?.display_name || nodeId} has no registered project root.`, 404);
+    const task = this.database.createTask({
+      projectId: agent.project_id,
+      type: 'command',
+      title: role === 'hub' ? `Update Hub to WebSpider ${update.target_version}` : `Update ${node.display_name} to WebSpider ${update.target_version}`,
+      specification: {
+        fleet_update_id: update.id,
+        fleet_update_role: role,
+        notify_target: 'none',
+      },
+      assignedAgentInstanceId: agent.id,
+      nodeId,
+      createdBy: `system:fleet-update:${update.id}`,
+    });
+    const terminal = this.database.createTaskTerminal(agent.id, task.title);
+    this.database.createTaskAttempt(task.id, nodeId, agent.id, this.broker.connectionEpoch(nodeId), randomToken('lease'));
+    const listenPort = this.server.address()?.port || this.listenPort;
+    const listen = `${this.listenHost}:${listenPort}`;
+    if (Number(node.capabilities?.fleet_update_protocol || 0) >= WEBSPIDER_UPDATE_PROTOCOL) {
+      await this.broker.request(nodeId, 'system.update', {
+        task_id: task.id,
+        agent_instance_id: agent.id,
+        terminal_id: terminal.id,
+        root_id: root.node_root_id,
+        version: update.target_version,
+        role,
+        listen,
+        public_base_url: this.publicBaseURL || '',
+      });
+    } else {
+      invariant(role === 'node', 'WS_UPDATE_PROTOCOL_REQUIRED', 'The local Hub updater protocol is unavailable.', 409);
+      await this.broker.request(nodeId, 'task.start', {
+        task_id: task.id,
+        agent_instance_id: agent.id,
+        terminal_id: terminal.id,
+        root_id: root.node_root_id,
+        argv: fleetUpdateArgv({
+          version: update.target_version,
+          role: 'node',
+          hubURL: this.url,
+        }),
+        environment: {},
+      });
+    }
+    this.database.setTerminalState(terminal.id, 'attached');
+    return this.database.setTaskState(task.id, 'running', null, `system:fleet-update:${update.id}`);
+  }
+
+  async #failFleetUpdate(error) {
+    const update = this.database.getActiveFleetUpdate();
+    if (!update) return;
+    const message = error?.message || String(error);
+    for (const agentId of update.agent_ids) {
+      const agent = this.database.getAgent(agentId);
+      if (!agent) continue;
+      if (!this.broker.isOnline(agent.node_id)) {
+        this.database.setAgentManagedResumePending(agent.id, true);
+        this.database.setAgentState(agent.id, 'starting', `system:fleet-update-recovery:${update.id}`, {
+          reason: 'resume_when_node_reconnects_after_failed_update',
+        });
+        continue;
+      }
+      try { await this.#wakeAgent(agentId, `system:fleet-update-recovery:${update.id}`, { resumeManaged: true }); }
+      catch (resumeError) { this.#logError(resumeError); }
+    }
+    this.database.setFleetUpdateState(update.id, 'failed', { error: message });
+    this.database.audit({
+      actorId: 'hub:fleet-update', action: 'fleet_update.fail', targetType: 'fleet_update', targetId: update.id,
+      decision: 'failed_safe', newState: { error: message },
+    });
+    await this.#drainAllDeliveries();
+    this.#logError(error);
+  }
+
+  async #drainAllDeliveries() {
+    for (const node of this.database.listNodes()) {
+      if (this.broker.isOnline(node.id)) await this.#drainDeliveries(node.id);
     }
   }
 

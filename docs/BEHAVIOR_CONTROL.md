@@ -150,6 +150,14 @@ WebSpider keeps three related values separate:
 
 The main agent checks at natural breakpoints: when a session begins without a fresh observation, before a materially costly delegation or long run, or when the last account observation is over two hours old. It never estimates between observations. A subagent may return an explicit `/status` or `/usage weekly` observation when useful; the main agent owns the durable snapshot and avoids polling that displaces useful work.
 
+## Coordinated package updates
+
+The owner starts **Update everything** on the Nodes page. WebSpider does not infer safety from advisory work-status labels. It durably asks each currently running Master/Sub-Spider to checkpoint at a natural breakpoint; each participant calls `updates ready --rollout ID` with its agent-scoped identity and ends its turn. Once ready, that session is frozen against new terminal input and durable messages wait until rollout completion.
+
+An owner may explicitly override missing agent acknowledgements after inspecting the terminals. The override names the rollout and is audited. It does not waive offline-node or active detached-command blockers.
+
+The Hub stops acknowledged processes cleanly, updates remote packages one at a time, verifies their reconnect-reported versions, updates its own service last, and restores the durable rollout after that restart. Previously-running Codex agents resume in their registered roots with their managed latest session or configured adopted-session selector; stopped agents remain stopped. Official version-pinned release bootstraps retain the native installer's published SHA-256 verification. Rollout state, participants, overrides, per-node progress, errors, and cancellation remain in the Hub database.
+
 After reading the provider output, the main agent can record it without managing the account:
 
 ```bash

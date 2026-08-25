@@ -9,6 +9,7 @@ import { makeId, nowISO } from '../lib/ids.js';
 import { signNodeHello } from '../lib/security.js';
 import { hubClockOffset } from '../lib/hub-clock.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
+import { fleetUpdateArgv, WEBSPIDER_UPDATE_PROTOCOL, WEBSPIDER_VERSION } from '../lib/self-update.js';
 
 function executableAvailable(name) {
   for (const directory of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
@@ -212,6 +213,8 @@ export class NodeDaemon extends EventEmitter {
       terminal_transport: 'script+fifo',
       shell: process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
       codex: executableAvailable('codex'),
+      webspider_version: WEBSPIDER_VERSION,
+      fleet_update_protocol: WEBSPIDER_UPDATE_PROTOCOL,
       root_ids: this.roots.map((root) => root.id),
       roots: this.roots.map((root) => ({ id: root.id, name: root.display_name || 'workspace' })),
     };
@@ -383,7 +386,42 @@ export class NodeDaemon extends EventEmitter {
       case 'process.stop-agent': {
         const runtime = this.database.getProcessByAgent(payload.agent_instance_id);
         if (!runtime) return { state: 'stopped', already_stopped: true };
-        return this.supervisor.stopProcess(runtime.id, payload.signal || 'SIGTERM');
+        const stopped = this.supervisor.stopProcess(runtime.id, payload.signal || 'SIGTERM');
+        const waitMs = Math.min(15_000, Math.max(0, Number(payload.wait_ms || 0)));
+        if (waitMs > 0) {
+          const deadline = Date.now() + waitMs;
+          while (Date.now() < deadline) {
+            const current = this.database.getProcessByAgent(payload.agent_instance_id);
+            if (!current || !['running', 'stopping'].includes(current.state)) {
+              return { state: current?.state || 'stopped', clean_exit_observed: true };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+        return stopped;
+      }
+      case 'system.update': {
+        const existing = this.database.listProcesses().find((runtime) => runtime.taskId === payload.task_id);
+        if (existing) return { runtime: existing, duplicate: true };
+        invariant(payload.role === 'node' || (payload.role === 'hub' && this.nodeId === 'nod_local'),
+          'WS_FORBIDDEN', 'Only the built-in local node may update the Hub.', 403);
+        const runtime = this.supervisor.launch({
+          kind: 'task',
+          taskId: payload.task_id,
+          agentInstanceId: payload.agent_instance_id,
+          terminalId: payload.terminal_id,
+          rootId: payload.root_id,
+          argv: fleetUpdateArgv({
+            version: payload.version,
+            role: payload.role,
+            hubURL: this.hubURL,
+            listen: payload.listen,
+            stateDir: path.dirname(this.stateDir),
+            publicBaseURL: payload.public_base_url,
+          }),
+          environment: {},
+        });
+        return { runtime };
       }
       case 'task.start': {
         const existing = this.database.listProcesses().find((runtime) => runtime.taskId === payload.task_id);
