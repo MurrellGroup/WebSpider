@@ -176,11 +176,25 @@ test('a maximum-size terminal write reaches the PTY without partial loss', async
   });
 
   const completion = waitForCompletion(supervisor);
+  const reader = [
+    "const fs = require('node:fs');",
+    "process.stdin.setRawMode(true);",
+    "process.stdin.resume();",
+    "fs.writeFileSync('input-ready', '');",
+    'const chunks = []; let length = 0;',
+    "process.stdin.on('data', (chunk) => {",
+    'chunks.push(chunk); length += chunk.length;',
+    'if (length < 64 * 1024) return;',
+    "fs.writeFileSync('received.bin', Buffer.concat(chunks, length));",
+    'process.exit(length === 64 * 1024 ? 0 : 2);',
+    '});',
+  ].join('');
   supervisor.launch({
     id: 'run_input_complete', kind: 'task', taskId: 'tsk_input_complete', terminalId: 'trm_input_complete',
     rootId: 'awr_input',
-    argv: ['/bin/sh', '-c', 'stty raw -echo; dd iflag=fullblock bs=65536 count=1 of=received.bin 2>/dev/null'],
+    argv: [process.execPath, '-e', reader],
   });
+  await waitUntil(() => fs.existsSync(path.join(workspace, 'input-ready')));
   const payload = Buffer.from(Array.from({ length: 64 * 1024 }, (_, index) => 33 + (index % 90)));
   const result = supervisor.input('trm_input_complete', payload);
   assert.equal(result.accepted_bytes, payload.length);
