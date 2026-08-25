@@ -48,7 +48,7 @@ Master terminal
     The live Master Codex PTY. Closing or reloading the browser does not stop it. Direct keyboard input goes to the PTY and is visible in the node-local terminal log.
 
 Primary-agent Text box
-    On either the Master or a Sub-Spider primary terminal, Text box submissions are accepted as durable WebSpider messages and delivered directly to that selected agent. Prefer this for important instructions that should remain recoverable in the WebSpider thread.
+    On either the Master or a Sub-Spider primary terminal, Text box submissions are accepted as durable WebSpider messages and delivered directly to that selected agent. Prefer this for important instructions that should remain recoverable in the WebSpider thread. An unsent draft is stored separately for each terminal in the current browser tab, so switching terminals, navigating elsewhere, or reloading the page does not discard or mix drafts. Sending or closing that terminal clears its draft.
 
 Conversation tab
     Shows durable WebSpider messages. Messages are queued while a node is offline and delivered when it reconnects.

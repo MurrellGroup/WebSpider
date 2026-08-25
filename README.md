@@ -134,7 +134,7 @@ webspider service status-node --state-dir "${XDG_DATA_HOME:-$HOME/.local/share}/
 
 ## Terminal input and notes
 
-Terminal tabs open in **Direct** mode, where the browser keyboard talks straight to xterm and the PTY. On any primary Master or Sub-Spider terminal, **Text box** sends a durable WebSpider message directly to that selected agent; Enter sends and Shift+Enter inserts a newline. On auxiliary shell tabs it writes drafted text to the PTY. The composer observes the running program's terminal modes and uses bracketed paste only when that program has enabled it.
+Terminal tabs open in **Direct** mode, where the browser keyboard talks straight to xterm and the PTY. On any primary Master or Sub-Spider terminal, **Text box** sends a durable WebSpider message directly to that selected agent; Enter sends and Shift+Enter inserts a newline. Unsent drafts are isolated per terminal and survive in-app navigation and page reloads in that browser tab. On auxiliary shell tabs the composer writes drafted text to the PTY, observing bracketed-paste mode only when the running program enables it.
 
 **Notes** are small plaintext editors stored on the hub machine. Each note body is an actual mode-`0600` `.txt` file under `<hub-state-dir>/notes`; SQLite stores only its title, filename, timestamps, and visibility. New notes default to **Just for me**. A note is readable by the main agent only after the owner checks **Visible to Master**; workers cannot read either class of note, and the main agent has no note-write scope.
 

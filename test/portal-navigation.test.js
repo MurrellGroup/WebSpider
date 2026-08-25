@@ -229,6 +229,13 @@ test('every primary agent Text box is described and delivered as a direct durabl
   assert.match(app, /state\.selectedAgent\.active_thread_id/);
 });
 
+test('Text box drafts persist independently across agent and terminal navigation', () => {
+  assert.match(app, /terminalDrafts: loadTerminalDrafts\(\)/);
+  assert.match(app, /saveTerminalDraft\(state\.terminalDrafts, event\.target\.dataset\.terminalId, event\.target\.value\)/);
+  assert.match(app, /terminalDraft\(state\.terminalDrafts, terminal\.id\)/);
+  assert.match(app, /clearTerminalDraft\(state\.terminalDrafts, terminal\.id\)/);
+});
+
 test('file browser can reveal hidden workspace files explicitly', () => {
   assert.match(app, /fileShowHidden: false/);
   assert.match(app, /hidden=\$\{state\.fileShowHidden\}/);

@@ -1070,6 +1070,10 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.match(markdownModule.headers.get('content-type'), /javascript/);
   assert.equal(markdownModule.headers.get('cache-control'), 'no-cache');
   assert.match(await markdownModule.text(), /renderMarkdown/);
+  const draftModule = await fetch(`${listening.url}/terminal-drafts.js`);
+  assert.equal(draftModule.status, 200);
+  assert.match(draftModule.headers.get('content-type'), /javascript/);
+  assert.match(await draftModule.text(), /saveTerminalDraft/);
   const randomModule = await fetch(`${listening.url}/random.js`);
   assert.equal(randomModule.status, 200);
   assert.match(randomModule.headers.get('content-type'), /javascript/);

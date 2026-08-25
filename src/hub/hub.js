@@ -128,7 +128,7 @@ export class Hub {
     this.fleetUpdateTimer = null;
     this.fleetUpdateAdvancing = null;
     const portalHash = createHash('sha256');
-    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js']) {
+    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js', 'terminal-drafts.js']) {
       portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
     }
     this.portalBuild = portalHash.digest('hex').slice(0, 16);
@@ -1797,7 +1797,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);

@@ -5,10 +5,11 @@ import {
   clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalAttachmentCommitKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
+import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraft } from './terminal-drafts.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.15';
+const PORTAL_VERSION = '0.6.16';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -58,6 +59,7 @@ const state = {
   terminalInputSequence: 0,
   terminalInputAcknowledged: 0,
   terminalCompositionTimer: null,
+  terminalDrafts: loadTerminalDrafts(),
   terminalText: '',
   terminalView: localStorage.getItem('webspider_terminal_view') === 'reading'
     ? 'maths'
@@ -271,6 +273,10 @@ function showVersionMismatch(hubVersion) {
 }
 
 function closeTerminal() {
+  const composer = $('#terminal-compose');
+  if (composer?.dataset.terminalId) {
+    saveTerminalDraft(state.terminalDrafts, composer.dataset.terminalId, composer.value);
+  }
   state.terminalGeneration += 1;
   state.terminalSocket?.close();
   state.terminalSocket = null;
@@ -925,6 +931,12 @@ document.addEventListener('change', (event) => {
   }
 });
 
+document.addEventListener('input', (event) => {
+  if (event.target.id === 'terminal-compose' && event.target.dataset.terminalId) {
+    saveTerminalDraft(state.terminalDrafts, event.target.dataset.terminalId, event.target.value);
+  }
+});
+
 function transmitTerminalInput(data) {
   if (!data) return;
   if (!state.terminalLease || state.terminalSocket?.readyState !== WebSocket.OPEN) {
@@ -1159,7 +1171,7 @@ async function renderTerminal(agent) {
     <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<input id="terminal-file-input" class="hidden" type="file" multiple aria-label="Choose files to attach"><div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged attachment previews"></div><div class="terminal-image-summary"><strong>Attachment ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged attachments" title="Discard staged attachments">×</button></div>' : ''}
-    ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}"></textarea><button class="primary" type="submit">Send</button></form>` : ''}
+    ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" data-terminal-id="${h(terminal.id)}" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}">${h(terminalDraft(state.terminalDrafts, terminal.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}
   </section>`;
   renderTerminalImageDraft();
   applyTerminalView();
@@ -1650,6 +1662,9 @@ document.addEventListener('click', async (event) => {
     if (action === 'close-terminal') {
       const terminalId = actionTarget.dataset.terminalId;
       await api(`/api/v1/terminals/${encodeURIComponent(terminalId)}`, { method: 'DELETE' });
+      const composer = $('#terminal-compose');
+      if (composer?.dataset.terminalId === terminalId) composer.value = '';
+      clearTerminalDraft(state.terminalDrafts, terminalId);
       if (state.selectedTerminalId === terminalId) state.selectedTerminalId = state.selectedAgent.terminal_id;
       toast('Terminal tab closed.');
       return renderTerminal(state.selectedAgent);
@@ -1879,6 +1894,7 @@ document.addEventListener('submit', async (event) => {
             body: { parts: [{ type: 'text', text: message }], delivery_role: 'user', wake_policy: 'ensure_running' },
           });
         textarea.value = '';
+        clearTerminalDraft(state.terminalDrafts, terminal.id);
         textarea.focus();
       } catch (error) { toast(friendlyError(error), true); }
       finally { button.disabled = false; }
@@ -1888,6 +1904,7 @@ document.addEventListener('submit', async (event) => {
     const submitted = submitTerminalComposition(textarea?.value || '');
     if (textarea && submitted) {
       textarea.value = '';
+      clearTerminalDraft(state.terminalDrafts, terminal.id);
     }
     return;
   }
