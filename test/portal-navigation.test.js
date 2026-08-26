@@ -198,6 +198,19 @@ test('every non-primary terminal tab has an explicit close control', () => {
   assert.match(app, /async function renderTerminal\(agent\) \{\s*closeTerminal\(\)/);
 });
 
+test('terminal layout has an explicit refit control and repairs itself after window changes', () => {
+  assert.match(app, /data-action="refit-terminal"[^>]*aria-label="Refit terminal"/);
+  assert.match(app, /action === 'refit-terminal'[^\n]*refreshTerminalLayout\(\{ syncPty: true \}\)/);
+  assert.match(app, /function refreshTerminalLayout\(\{ syncPty = false \} = \{\}\)/);
+  assert.match(app, /fitTerminal\(\{ redraw: true, syncPty \}\)/);
+  assert.match(app, /emulator\.refresh\(0, emulator\.rows - 1\)/);
+  assert.match(app, /changed \|\| syncPty/);
+  assert.match(app, /window\.addEventListener\('focus', \(\) => refreshTerminalLayout\(\)\)/);
+  assert.match(app, /window\.addEventListener\('resize', \(\) => refreshTerminalLayout\(\)\)/);
+  assert.match(app, /document\.addEventListener\('visibilitychange'/);
+  assert.match(app, /terminalResizeObserver = new ResizeObserver/);
+});
+
 test('Maths mode preserves the xterm transcript and typesets only equations', () => {
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
   assert.match(app, /data-terminal-view="maths">Maths/);

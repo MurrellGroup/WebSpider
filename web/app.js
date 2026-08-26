@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.20';
+const PORTAL_VERSION = '0.6.21';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -647,6 +647,7 @@ function applyTerminalView() {
   layout.dataset.view = state.terminalView;
   $$('[data-terminal-view]').forEach((button) => button.classList.toggle('selected', button.dataset.terminalView === state.terminalView));
   localStorage.setItem('webspider_terminal_view', state.terminalView);
+  refreshTerminalLayout();
 }
 
 function applyTerminalInputMode() {
@@ -659,6 +660,7 @@ function applyTerminalInputMode() {
   });
   if (composing) $('#terminal-compose')?.focus();
   else state.terminalEmulator?.focus();
+  refreshTerminalLayout();
 }
 
 function submitTerminalComposition(text) {
@@ -1149,18 +1151,34 @@ function transmitTerminalResize() {
   }));
 }
 
-function fitTerminal() {
+function fitTerminal({ redraw = false, syncPty = false } = {}) {
   if (!state.terminalEmulator || !state.terminalFitAddon || state.terminalView === 'maths') return;
+  const emulator = state.terminalEmulator;
   state.terminalFitAddon.fit();
-  const dimensions = { columns: state.terminalEmulator.cols, rows: state.terminalEmulator.rows };
+  const dimensions = { columns: emulator.cols, rows: emulator.rows };
   const output = $('#terminal-output');
   if (output) {
     output.dataset.columns = String(dimensions.columns);
     output.dataset.rows = String(dimensions.rows);
   }
-  if (dimensions.columns === state.terminalDimensions?.columns && dimensions.rows === state.terminalDimensions?.rows) return;
+  const changed = dimensions.columns !== state.terminalDimensions?.columns
+    || dimensions.rows !== state.terminalDimensions?.rows;
   state.terminalDimensions = dimensions;
-  transmitTerminalResize();
+  if (changed || syncPty) transmitTerminalResize();
+  if (redraw && emulator.rows > 0) emulator.refresh(0, emulator.rows - 1);
+}
+
+function refreshTerminalLayout({ syncPty = false } = {}) {
+  if (!state.terminalEmulator) return;
+  const generation = state.terminalGeneration;
+  requestAnimationFrame(() => {
+    if (generation !== state.terminalGeneration || !state.terminalEmulator) return;
+    fitTerminal({ redraw: true, syncPty });
+    // A restored/background window can report its old box for one frame.
+    requestAnimationFrame(() => {
+      if (generation === state.terminalGeneration) fitTerminal({ redraw: true });
+    });
+  });
 }
 
 async function renderTerminal(agent) {
@@ -1188,7 +1206,7 @@ async function renderTerminal(agent) {
       : item.kind === 'task_shell' && item.label === 'Terminal' ? `Task ${item.id.slice(-4)}` : item.label;
     return `<div class="terminal-tab ${item.id === terminal.id ? 'selected' : ''}"><button class="terminal-select" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i><span>${h(label)}</span></button>${item.kind !== 'primary_agent' ? `<button class="terminal-tab-close" data-action="close-terminal" data-terminal-id="${h(item.id)}" aria-label="Close ${h(label)} terminal tab" title="${item.kind === 'task_shell' ? 'Dismiss task terminal; the task keeps running' : 'Close terminal and stop its shell'}">×</button>` : ''}</div>`;
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div><button class="secondary terminal-refit" type="button" data-action="refit-terminal" title="Refit and redraw the terminal for this window" aria-label="Refit terminal">Refit</button>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<input id="terminal-file-input" class="hidden" type="file" multiple aria-label="Choose files to attach"><div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged attachment previews"></div><div class="terminal-image-summary"><strong>Attachment ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged attachments" title="Discard staged attachments">×</button></div>' : ''}
     ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" data-terminal-id="${h(terminal.id)}" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}">${h(terminalDraft(state.terminalDrafts, terminal.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}
@@ -1219,7 +1237,7 @@ async function renderTerminal(agent) {
   emulator.attachCustomKeyEventHandler(handleTerminalKey);
   emulator.open($('#terminal-output'));
   fitTerminal();
-  state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(fitTerminal));
+  state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(() => fitTerminal({ redraw: true })));
   state.terminalResizeObserver.observe($('#terminal-output'));
   if (interactive) {
     const output = $('#terminal-output');
@@ -1671,7 +1689,6 @@ document.addEventListener('click', async (event) => {
     state.terminalView = terminalView.dataset.terminalView;
     applyTerminalView();
     updateTerminalMaths(true);
-    requestAnimationFrame(fitTerminal);
     return;
   }
   const terminalInputMode = event.target.closest('[data-terminal-input-mode]');
@@ -1712,6 +1729,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
+    if (action === 'refit-terminal') return refreshTerminalLayout({ syncPty: true });
     if (action === 'adopt-codex-session') return showCodexSessionForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {
@@ -2154,6 +2172,12 @@ document.addEventListener('submit', async (event) => {
 document.addEventListener('keydown', (event) => trackTerminalKey(event, terminalKeyState), true);
 document.addEventListener('keyup', (event) => trackTerminalKey(event, terminalKeyState), true);
 window.addEventListener('blur', () => resetTerminalKeyState(terminalKeyState));
+window.addEventListener('focus', () => refreshTerminalLayout());
+window.addEventListener('resize', () => refreshTerminalLayout());
+window.addEventListener('pageshow', () => refreshTerminalLayout());
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshTerminalLayout();
+});
 
 document.addEventListener('keydown', (event) => {
   if (event.target.id === 'terminal-compose' && event.key === 'Enter') {
