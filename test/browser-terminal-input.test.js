@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
   resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from '../web/terminal-input.js';
 
@@ -36,6 +36,21 @@ test('clipboard paste shortcuts stay browser-owned when Kitty keyboard mode is a
   }
   assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'v', ctrlKey: true, altKey: true }), false);
   assert.equal(clipboardPasteShortcut({ type: 'keydown', key: 'c', metaKey: true }), false);
+});
+
+test('terminal copy shortcuts stay browser-owned exactly while text is selected', () => {
+  for (const event of [
+    { type: 'keydown', key: 'c', metaKey: true },
+    { type: 'keydown', key: 'C', metaKey: true, shiftKey: true },
+    { type: 'keydown', key: 'c', ctrlKey: true },
+    { type: 'keydown', key: 'C', ctrlKey: true, shiftKey: true },
+  ]) {
+    assert.equal(clipboardCopyShortcut(event, true), true);
+    assert.equal(clipboardCopyShortcut(event, false), false);
+  }
+  assert.equal(clipboardCopyShortcut({ type: 'keydown', key: 'c', ctrlKey: true, altKey: true }, true), false);
+  assert.equal(clipboardCopyShortcut({ type: 'keydown', key: 'v', metaKey: true }, true), false);
+  assert.equal(directKeyInput({ type: 'keydown', key: 'c', ctrlKey: true }, true), kittySequence(99, 5));
 });
 
 test('a staged image commits exactly on an unmodified Enter keydown', () => {

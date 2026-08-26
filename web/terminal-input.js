@@ -7,6 +7,12 @@ export function clipboardPasteShortcut(event) {
   return Boolean(event.metaKey) !== Boolean(event.ctrlKey) && (event.metaKey || event.ctrlKey);
 }
 
+export function clipboardCopyShortcut(event, hasSelection = false) {
+  if (!hasSelection || event?.type !== 'keydown'
+    || String(event.key || '').toLowerCase() !== 'c' || event.altKey) return false;
+  return Boolean(event.metaKey) !== Boolean(event.ctrlKey) && (event.metaKey || event.ctrlKey);
+}
+
 export function createTerminalKeyState() {
   return { shiftDown: false, shiftedEnterDown: false };
 }

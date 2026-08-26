@@ -167,6 +167,7 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(app, /function handleTerminalData\(data\)[\s\S]*enqueueTerminalData/);
   assert.match(terminalInput, /if \(!controlled && !requestPending\) requestControl\?\.\(\);[\s\S]*enqueue\?\.\(data\)/);
   assert.match(app, /const input = directKeyInput\(event,[\s\S]*event\.preventDefault\(\);[\s\S]*handleTerminalData\(input\)/);
+  assert.match(app, /clipboardCopyShortcut\(event, state\.terminalEmulator\?\.hasSelection\(\)\)[\s\S]*return false/);
   assert.match(app, /terminal\?\.kind === 'primary_agent' && state\.selectedAgent\?\.codex_capable/);
   assert.match(app, /frame\.type === 'ATTACHED' && frame\.keyboard_protocol === 'kitty'/);
   assert.match(hub, /keyboard_protocol: terminal\.kind === 'primary_agent' && terminalAgent\?\.codex_capable \? 'kitty' : null/);

@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import {
-  clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
   resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.19';
+const PORTAL_VERSION = '0.6.20';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1026,6 +1026,11 @@ function handleTerminalData(data) {
 }
 
 function handleTerminalKey(event) {
+  if (clipboardCopyShortcut(event, state.terminalEmulator?.hasSelection())) {
+    // Returning false leaves the native copy gesture untouched. xterm's copy
+    // listener then places its canvas-backed selection on the clipboard.
+    return false;
+  }
   if (terminalAttachmentCommitKey(event, currentTerminalAttachmentCount() > 0, terminalKeyState)) {
     event.preventDefault();
     void sendStagedTerminalAttachments();
