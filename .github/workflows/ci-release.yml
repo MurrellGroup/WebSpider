@@ -39,6 +39,14 @@ jobs:
           node-version: 24.19.0
           package-manager-cache: false
 
+      - name: Install build dependencies
+        run: npm ci
+
+      - name: Verify generated Mol* preview
+        run: |
+          npm run build:molstar
+          git diff --exit-code -- web/vendor/molstar-preview.mjs web/vendor/molstar.LICENSE web/vendor/molstar-THIRD-PARTY-LICENSES.txt
+
       - name: Verify native target
         env:
           WEBSPIDER_TARGET: ${{ matrix.target }}

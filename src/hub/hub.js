@@ -27,6 +27,7 @@ import {
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WEB_DIR = path.resolve(MODULE_DIR, '../../web');
+const BROWSER_COOKIE_MAX_AGE_SECONDS = 34_560_000;
 const MAIN_AGENT_CONTROL_SCOPES = [
   'policy:read',
   'policy:write:project',
@@ -129,7 +130,7 @@ export class Hub {
     this.fleetUpdateTimer = null;
     this.fleetUpdateAdvancing = null;
     const portalHash = createHash('sha256');
-    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js', 'terminal-drafts.js']) {
+    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js', 'terminal-drafts.js', 'vendor/molstar-preview.mjs']) {
       portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
     }
     this.portalBuild = portalHash.digest('hex').slice(0, 16);
@@ -266,8 +267,8 @@ export class Hub {
       const session = this.database.createSession(secret, csrf);
       const secure = this.publicBaseURL?.startsWith('https://') || ctx.request.socket.encrypted;
       ctx.response.setHeader('set-cookie', [
-        cookie('ws_session', secret, { httpOnly: true, secure, maxAge: 43_200 }),
-        cookie('ws_csrf', csrf, { secure, maxAge: 43_200 }),
+        cookie('ws_session', secret, { httpOnly: true, secure, maxAge: BROWSER_COOKIE_MAX_AGE_SECONDS }),
+        cookie('ws_csrf', csrf, { secure, maxAge: BROWSER_COOKIE_MAX_AGE_SECONDS }),
       ]);
       this.database.audit({ actorId: session.principal_id, action: 'auth.login', targetType: 'session', targetId: session.id });
       return { principal_id: session.principal_id, role: session.role, expires_at: session.expires_at };
@@ -1806,6 +1807,14 @@ export class Hub {
       const match = this.router.match(request);
       const options = match.route.options || {};
       const principal = options.auth === false ? null : this.#authenticate(request);
+      if (principal && !principal.viaBearer) {
+        const requestCookies = parseCookies(request.headers.cookie);
+        const secure = this.publicBaseURL?.startsWith('https://') || request.socket.encrypted;
+        response.setHeader('set-cookie', [
+          cookie('ws_session', requestCookies.ws_session, { httpOnly: true, secure, maxAge: BROWSER_COOKIE_MAX_AGE_SECONDS }),
+          cookie('ws_csrf', principal.csrf_token, { secure, maxAge: BROWSER_COOKIE_MAX_AGE_SECONDS }),
+        ]);
+      }
       if (options.agentOnly) invariant(principal?.role === 'agent', 'WS_FORBIDDEN', 'This route requires a scoped main-agent token.', 403);
       if (principal?.role === 'agent') {
         const allowed = options.agentScopes || [];
@@ -1852,7 +1861,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);

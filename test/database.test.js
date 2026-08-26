@@ -27,6 +27,17 @@ function databaseFixture(t) {
   return { database, agent };
 }
 
+test('browser sessions remain valid until explicitly revoked', (t) => {
+  const { database } = databaseFixture(t);
+  const session = database.createSession('browser-secret', 'csrf-secret');
+  assert.equal(session.expires_at, null);
+  database.db.prepare('UPDATE browser_sessions SET expires_at = ? WHERE id = ?')
+    .run('1970-01-01T00:00:00.000Z', session.id);
+  assert.equal(database.getSession('browser-secret').principal_id, 'owner:local');
+  database.revokeSession(session.id);
+  assert.equal(database.getSession('browser-secret'), null);
+});
+
 test('message acceptance is durable and idempotent', (t) => {
   const { database, agent } = databaseFixture(t);
   const input = {

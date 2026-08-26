@@ -24,6 +24,9 @@ test('GitHub Actions builds every supported native target before publishing a ta
   assert.match(workflow, /gh release create "\$GITHUB_REF_NAME"/);
   assert.match(workflow, /release\/SHA256SUMS/);
   assert.match(workflow, /release\/WebSpider_Install\.run/);
+  assert.match(workflow, /npm ci/);
+  assert.match(workflow, /npm run build:molstar/);
+  assert.match(workflow, /git diff --exit-code -- web\/vendor\/molstar-preview\.mjs[\s\S]*molstar-THIRD-PARTY-LICENSES\.txt/);
   assert.match(readme, /i=\$\(mktemp\);curl --http1\.1 -fL --retry 5 -o "\$i"/);
   assert.match(readme, /https:\/\/github\.com\/MurrellGroup\/WebSpider\/releases\/latest\/download\/WebSpider_Install\.run/);
   assert.match(readme, /&&sh "\$i" --workspace "\$PWD"/);

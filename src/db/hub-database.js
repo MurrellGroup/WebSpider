@@ -838,21 +838,23 @@ export class HubDatabase extends EventEmitter {
     return this.getFleetUpdate(id);
   }
 
-  createSession(secret, csrfToken, principalId = 'owner:local', role = 'owner', ttlMs = 43_200_000) {
+  createSession(secret, csrfToken, principalId = 'owner:local', role = 'owner') {
     const now = nowISO();
-    const expires = new Date(Date.now() + ttlMs).toISOString();
+    // Browser sessions remain valid until explicit logout/revocation. The
+    // column is retained for database compatibility with existing installs.
+    const expires = '9999-12-31T23:59:59.999Z';
     const id = makeId('ses');
     this.db.prepare(`INSERT INTO browser_sessions
       (id, secret_hash, principal_id, role, csrf_token, created_at, last_seen_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, sha256(secret), principalId, role, csrfToken, now, now, expires);
-    return { id, principal_id: principalId, role, csrf_token: csrfToken, expires_at: expires };
+    return { id, principal_id: principalId, role, csrf_token: csrfToken, expires_at: null };
   }
 
   getSession(secret) {
     if (!secret) return null;
     const row = this.db.prepare(`SELECT * FROM browser_sessions
-      WHERE secret_hash = ? AND revoked_at IS NULL AND expires_at > ?`).get(sha256(secret), nowISO());
+      WHERE secret_hash = ? AND revoked_at IS NULL`).get(sha256(secret));
     if (!row) return null;
     this.db.prepare('UPDATE browser_sessions SET last_seen_at = ? WHERE id = ?').run(nowISO(), row.id);
     return {
@@ -860,7 +862,7 @@ export class HubDatabase extends EventEmitter {
       principal_id: row.principal_id,
       role: row.role,
       csrf_token: row.csrf_token,
-      expires_at: row.expires_at,
+      expires_at: null,
     };
   }
 

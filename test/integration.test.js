@@ -1097,6 +1097,17 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const terminalStyles = await fetch(`${listening.url}/vendor/xterm.css`);
   assert.equal(terminalStyles.status, 200);
   assert.match(terminalStyles.headers.get('content-type'), /css/);
+  const molstarModule = await fetch(`${listening.url}/vendor/molstar-preview.mjs`);
+  assert.equal(molstarModule.status, 200);
+  assert.match(molstarModule.headers.get('content-type'), /javascript/);
+  assert.equal(molstarModule.headers.get('cache-control'), 'public, max-age=3600');
+  assert.match(await molstarModule.text(), /Mol\* 5\.4\.2/);
+  const molstarLicense = await fetch(`${listening.url}/vendor/molstar.LICENSE`);
+  assert.equal(molstarLicense.status, 200);
+  assert.match(await molstarLicense.text(), /MIT License/);
+  const molstarThirdPartyLicenses = await fetch(`${listening.url}/vendor/molstar-THIRD-PARTY-LICENSES.txt`);
+  assert.equal(molstarThirdPartyLicenses.status, 200);
+  assert.match(await molstarThirdPartyLicenses.text(), /immutable 5\.1\.9[\s\S]*rxjs 7\.8\.2[\s\S]*tslib 2\.8\.1/);
 
   const login = await fetch(`${listening.url}/api/v1/auth/login`, {
     method: 'POST',
@@ -1105,9 +1116,15 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   });
   assert.equal(login.status, 200);
   const setCookies = login.headers.getSetCookie();
+  assert(setCookies.every((value) => /Max-Age=34560000/.test(value)));
   const sessionCookie = setCookies.find((value) => value.startsWith('ws_session=')).split(';')[0];
   const csrfCookie = setCookies.find((value) => value.startsWith('ws_csrf=')).split(';')[0];
   const csrfToken = decodeURIComponent(csrfCookie.slice('ws_csrf='.length));
+  const renewedSession = await fetch(`${listening.url}/api/v1/session`, {
+    headers: { cookie: `${sessionCookie}; ${csrfCookie}` },
+  });
+  assert.equal(renewedSession.status, 200);
+  assert(renewedSession.headers.getSetCookie().every((value) => /Max-Age=34560000/.test(value)));
   const blockedCsrf = await fetch(`${listening.url}/api/v1/projects`, {
     method: 'POST',
     headers: { cookie: `${sessionCookie}; ${csrfCookie}`, 'content-type': 'application/json' },

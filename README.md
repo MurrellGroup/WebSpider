@@ -174,6 +174,7 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 - Pasting a PNG, JPEG, GIF, or WebP into a terminal stages it visibly; pressing Enter stores a private, checksum-verified copy under that agent workspace's `.webspider/uploads/` directory and sends the agent a durable message with the exact local path. Keyboard and context-menu paste use the same flow. Image uploads are capped at 8 MiB.
 - **Attach file** stages up to four browser-selected files for the currently selected Master or Sub-Spider. Nothing uploads until Enter; each private, checksum-verified file is then written under that agent workspace's `.webspider/uploads/` directory and announced with its exact path. Files are capped at 8 MiB each.
 - **Files → Upload files** puts browser-selected files directly into the folder currently open in the workspace browser. It does not create a message, wake an agent, or treat the file as an instruction. Uploads are chunked, resume from the node's confirmed offset after a transient failure, offer stop/keep-both/replace conflict handling, and allow files up to 64 GiB.
+- The Files viewer previews `.pdb`, `.cif`, and `.mmcif` structures with a lazy-loaded local Mol* renderer and WebSpider-native controls: select one chain or all chains, recolor them, restore distinct chain colors, and toggle cartoons, molecular surfaces, or side chains. The full Mol* application UI and external CDN services are not used.
 - Agents transfer large or binary files without SSH using `$WEBSPIDER_CONTROL files targets` and `files send --agent AGENT_ID --file PATH`. The Hub relays bounded checksum-verified chunks between two online nodes; only the completed mode-`0600` file and a short destination message are durable. Chunk bytes are not written to Hub or Node command databases. Small offline-safe text handoffs still use `documents send`.
 - Worker status reports update durable portfolio state without messaging the Master by default. A worker explicitly opts into a Master notification only for delegated results, requested milestones, blockers, material risks, or decisions requiring coordination.
 - Hub notes remain private plaintext files by default. Only notes explicitly marked visible enter the main agent's read-only allowlist; worker agents have no notes scope.
@@ -194,7 +195,7 @@ The hub owns projects, nodes, profiles, agent instances, threads, messages, deli
 ## Security defaults
 
 - Hub listens on `127.0.0.1` by default. Put Tailscale Serve or another trusted HTTPS proxy in front of it; do not expose it directly to the public internet.
-- Browser authentication uses a Secure-capable, HttpOnly, SameSite session cookie; mutations require a separate CSRF token.
+- Browser authentication uses a long-lived sliding, Secure-capable, HttpOnly, SameSite session cookie; it remains valid until explicit sign-out or server-side revocation. Mutations require a separate CSRF token.
 - WebSocket upgrades require an authenticated session and strict same-origin validation.
 - Portal assets use a restrictive CSP and no third-party CDN code.
 - Active project HTML, SVG, and JavaScript are download-only, never rendered as same-origin content.

@@ -2480,7 +2480,7 @@ Requirements:
 - strict WebSocket Origin check;
 - authorization on every WebSocket upgrade;
 - no permissive wildcard CORS;
-- short idle timeout;
+- sessions remain valid until explicit logout or server-side revocation, with a long-lived sliding browser cookie for the single-owner portal;
 - explicit owner reauthentication for security-sensitive changes where feasible.
 
 ## 20.4 Node enrollment
@@ -2895,7 +2895,7 @@ auth:
   mode: tailscale_identity
 
 security:
-  session_idle_timeout: 12h
+  browser_session: explicit-revocation
   csrf: true
   websocket_origin_check: strict
   default_role: none
@@ -3500,7 +3500,7 @@ Assertions:
 - malicious WebSocket Origin;
 - CSRF against message/task mutation;
 - forged Tailscale identity header through bypass path;
-- expired login session;
+- revoked login session;
 - role/project authorization bypass;
 - terminal OSC/title payload;
 - malicious hyperlink terminal sequence;

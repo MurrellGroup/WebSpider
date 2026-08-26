@@ -19,7 +19,7 @@ The current repository is an executable secure vertical slice, not a claim that 
 | Screen-like terminal tabs | Complete | Every agent has one addressable primary Codex terminal plus independently named login-shell tabs for monitoring and ad hoc commands. Auxiliary shells never receive orchestration messages. |
 | SQLite persistence | Complete | WAL, foreign keys, synchronous FULL, busy timeout, hub and node schemas. |
 | Durable event replay | Complete | Global and scope sequences; replay-then-live WebSocket. |
-| Root-safe files | Complete for implemented platform | List, stat, text preview, isolated inline PNG/JPEG/GIF/WebP/SVG/PDF preview, download, search, Git status; no absolute-path API. See security notes. |
+| Root-safe files | Complete for implemented platform | List, stat, text preview, isolated inline PNG/JPEG/GIF/WebP/SVG/PDF preview, lazy local Mol* PDB/CIF preview with per-chain controls, download, search, Git status; no absolute-path API. See security notes. |
 | Tailscale | Deployment integration | Loopback default and documented Tailscale Serve setup; embedded `tsnet` is not included. |
 
 ## Phase B — structured agents and messaging

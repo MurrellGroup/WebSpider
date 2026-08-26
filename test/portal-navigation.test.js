@@ -127,6 +127,25 @@ test('login preserves the useful authentication error returned by the hub', () =
   assert.match(app, /code: value\?\.error\?\.code/);
 });
 
+test('PDB and CIF files use a lazy local Mol* preview with compact chain controls', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  const source = fs.readFileSync(path.join(repository, 'scripts', 'molstar-preview-entry.js'), 'utf8');
+  const vendor = fs.statSync(path.join(repository, 'web', 'vendor', 'molstar-preview.mjs'));
+  assert.match(app, /pdb\|cif\|mmcif/);
+  assert.match(app, /import\('\.\/vendor\/molstar-preview\.mjs'\)/);
+  assert.match(app, /\/download\?path=/);
+  assert.match(app, /closeStructurePreview\(\)/);
+  assert.match(source, /new PluginContext\(\{ actions: \[\], behaviors: \[\], animations: \[\] \}\)/);
+  assert.match(source, /All \(\$\{chains\.length\}\)/);
+  assert.match(source, /Distinct chains/);
+  assert.match(source, /\['cartoon', 'Cartoon'\].*\['surface', 'Surface'\].*\['sidechain', 'Side chains'\]/s);
+  assert.match(source, /label_asym_id/);
+  assert.match(source, /StructureSelectionQueries\.sidechainWithTrace/);
+  assert.match(source, /colorInput\.addEventListener\('change'/);
+  assert.match(styles, /\.structure-controls/);
+  assert(vendor.size > 100_000 && vendor.size < 4_000_000);
+});
+
 test('note editor clicks do not reopen the note and discard the active draft', () => {
   assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
   assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);

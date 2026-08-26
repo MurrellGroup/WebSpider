@@ -9,7 +9,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.17';
+const PORTAL_VERSION = '0.6.18';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -78,6 +78,8 @@ const state = {
   activeRoot: null,
   previewPath: null,
   previewMode: 'source',
+  structurePreview: null,
+  structurePreviewGeneration: 0,
 };
 
 function h(value) {
@@ -273,6 +275,7 @@ function showVersionMismatch(hubVersion) {
 }
 
 function closeTerminal() {
+  closeStructurePreview();
   const composer = $('#terminal-compose');
   if (composer?.dataset.terminalId) {
     saveTerminalDraft(state.terminalDrafts, composer.dataset.terminalId, composer.value);
@@ -311,6 +314,12 @@ function closeTerminal() {
   state.terminalMathsGeneration += 1;
   state.terminalEmulator?.dispose();
   state.terminalEmulator = null;
+}
+
+function closeStructurePreview() {
+  state.structurePreviewGeneration += 1;
+  state.structurePreview?.dispose();
+  state.structurePreview = null;
 }
 
 function consumeAccessToken() {
@@ -1285,7 +1294,7 @@ async function renderFiles(agent) {
     $('#agent-content').innerHTML = '<div class="empty"><div><strong>No exposed root</strong><p>This agent has no project root available to the portal.</p></div></div>';
     return;
   }
-  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, or PDF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
   await loadDirectory();
 }
 
@@ -1336,15 +1345,49 @@ async function uploadWorkspaceFile(entry, conflict, progress) {
 }
 
 async function previewFile(name) {
+  closeStructurePreview();
+  const previewGeneration = state.structurePreviewGeneration;
   const relative = state.filePath ? `${state.filePath}/${name}` : name;
   state.previewPath = relative;
   const markdown = /\.(?:md|markdown|qmd|rmd)$/i.test(relative);
   const image = /\.(?:png|jpe?g|gif|webp|svg)$/i.test(relative);
   const pdf = /\.pdf$/i.test(relative);
+  const structure = /\.(?:pdb|cif|mmcif)$/i.test(relative);
   state.previewMode = markdown ? 'rendered' : 'source';
   $('#preview-header').innerHTML = `<strong>${h(relative)}</strong><div class="preview-actions">${markdown ? '<div class="preview-mode-switch"><button data-preview-mode="rendered" class="selected">Readable</button><button data-preview-mode="source">Source</button></div>' : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
+  if (structure) {
+    const source = `/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}`;
+    content.className = 'preview-content structure-preview-host';
+    try {
+      const [module, response] = await Promise.all([
+        import('./vendor/molstar-preview.mjs'),
+        fetch(source, { credentials: 'same-origin' }),
+      ]);
+      if (response.status === 401) {
+        showLogin();
+        throw Object.assign(new Error('Authentication required'), { code: 'WS_AUTH_REQUIRED', status: 401 });
+      }
+      if (!response.ok) throw new Error(`Structure download failed (${response.status}).`);
+      const length = Number(response.headers.get('content-length') || 0);
+      if (length > 64 * 1024 * 1024) throw new Error('Structure previews are limited to 64 MB. Use Download for this file.');
+      const data = await response.text();
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      const viewer = await module.createStructurePreview(content, {
+        data,
+        format: /\.pdb$/i.test(relative) ? 'pdb' : 'mmcif',
+        name: relative,
+      });
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) viewer.dispose();
+      else state.structurePreview = viewer;
+    } catch (error) {
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      content.className = 'preview-content source-preview';
+      content.textContent = friendlyError(error);
+    }
+    return;
+  }
   if (image || pdf) {
     const source = `/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/media-preview?path=${encodeURIComponent(relative)}`;
     content.className = 'preview-content media-preview';

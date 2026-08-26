@@ -74,6 +74,9 @@ Attach a file
 Upload a workspace file without sending a message
     Open the agent's Files tab, enter the destination folder, and choose Upload files. Select stop, keep both, or replace for name conflicts. The browser streams each file in bounded chunks and resumes from the workstation's last confirmed byte after a transient request failure. This route does not create a message, wake the agent, or treat the file as an instruction. Files may be up to 64 GiB.
 
+Preview a molecular structure
+    In an agent's Files tab, select a `.pdb`, `.cif`, or `.mmcif` file. WebSpider loads its local Mol* renderer only for that preview. Choose one chain or All, set a color or restore Distinct chains, and toggle Cartoon, Surface, or Side chains for the selected chain set. Drag to rotate and scroll to zoom. Structure bytes stay on the authenticated WebSpider path; no external viewer or CDN receives them.
+
 Maths mode
     The same xterm-parsed transcript, spacing, and line wrapping as Terminal mode, with recognized TeX equations typeset by the locally bundled MathJax. It does not reflow prose as Markdown. Standard \(...\), \[...\], $...$, and $$...$$ forms work; WebSpider also recognizes agent output that puts a TeX equation between standalone [ and ] lines.
 

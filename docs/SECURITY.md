@@ -8,7 +8,7 @@ The implementation protects the following boundaries:
 2. The hub checks that the root is active and authorized; the node independently looks up that root ID in local configuration.
 3. Nodes authenticate with Ed25519 signatures. Timestamp/nonce replay checks and monotonically increasing epochs fence stale connections.
 4. Durable commands are persisted at the node before execution and deduplicated by immutable command ID.
-5. Browser mutations require an authenticated HttpOnly session and a matching CSRF token. WebSockets require the session plus an allowed Origin.
+5. Browser mutations require an authenticated HttpOnly session and a matching CSRF token. WebSockets require the session plus an allowed Origin. Owner browser sessions use a long-lived sliding cookie and remain valid until explicit logout or server-side revocation; this deliberate single-owner usability tradeoff makes device security and tailnet confinement important.
 6. Terminal input requires the current principal, lease ID, and lease epoch; another viewer cannot type or resize implicitly.
 7. Actual message actors, requested model-facing roles, targets, and effects are separate fields in events and audit records.
 8. Orchestration and behavior-control authority is issued only to a main-role agent. Its short-lived token is accepted only by dedicated portfolio, visible-note-read, messaging, detached-task, policy, and usage-observation routes; policy writes require a matching scope, expected revision, and recorded user-request reason. Detached tasks require a registered target agent and one of that agent's registered roots.
@@ -50,6 +50,7 @@ Directory listings may show symlink metadata, but a blocked target is not follow
 - Files-tab workspace uploads are owner-only, CSRF-protected, chunked, capped at 64 GiB per file, and confined to the folder selected beneath the registered root. Stop/rename/overwrite conflict behavior is explicit. No message or agent wake is produced. A confirmed-offset metadata record lets the same live browser selection retry transient failures without trusting an unconfirmed partial tail.
 - Inbound agent envelopes use hub-generated ISO UTC timestamps and elapsed durations. Display sources are flattened to one bounded line before delivery; stored user content is not rewritten.
 - Conversation and Markdown-file rendering use the same dependency-free escaping pipeline; arbitrary HTML and image embedding are not supported.
+- PDB/CIF previews fetch bytes through the existing authenticated, root-confined attachment route and parse/render them locally with a pinned, lazy-loaded Mol* library bundle. No structure bytes are sent to a CDN or hosted viewer, and the standard Mol* application UI is not exposed. Preview loading is capped at 64 MiB.
 - Terminal titles, automatic links, clipboard control, and same-origin active file rendering are not implemented.
 
 ## Threat assumptions and limitations

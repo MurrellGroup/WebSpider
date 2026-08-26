@@ -1,6 +1,6 @@
 {
   "name": "webspider-fabric",
-  "version": "0.6.17",
+  "version": "0.6.18",
   "private": true,
   "description": "Distributed, persistent LLM-agent orchestration control plane",
   "type": "module",
@@ -9,12 +9,17 @@
   },
   "scripts": {
     "start": "node ./bin/webspider.js up",
+    "build:molstar": "node ./scripts/build-molstar-preview.mjs",
     "build:installer": "sh ./scripts/build-self-installer.sh",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "doctor": "node ./bin/webspider.js doctor"
   },
   "engines": {
     "node": ">=24"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "esbuild": "0.25.9",
+    "molstar": "5.4.2"
+  }
 }
