@@ -38,6 +38,46 @@ test('browser sessions remain valid until explicitly revoked', (t) => {
   assert.equal(database.getSession('browser-secret'), null);
 });
 
+test('agent control tokens follow the managed process lifecycle and migrate active sessions', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-agent-token-lifecycle-'));
+  const file = path.join(directory, 'hub.db');
+  let database = new HubDatabase(file);
+  t.after(() => {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const identity = generateNodeIdentity();
+  database.createNode({ id: 'nod_token', displayName: 'Token node', publicKey: identity.publicKey });
+  database.createProject({ id: 'prj_token', name: 'Token project' });
+  database.createProfile({ id: 'apf_token', name: 'Token shell', adapterKind: 'pty', executable: '/bin/sh' });
+  const active = database.createAgent({
+    id: 'agt_token_active', profileId: 'apf_token', projectId: 'prj_token', nodeId: 'nod_token',
+  });
+  const stopped = database.createAgent({
+    id: 'agt_token_stopped', profileId: 'apf_token', projectId: 'prj_token', nodeId: 'nod_token',
+  });
+  database.setAgentState(active.id, 'ready');
+  const issued = database.issueAgentControlToken(active.id, 'wsa_lifecycle_active', ['status:write:self']);
+  assert.equal(issued.expires_at, null);
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_active').expires_at, null);
+  database.issueAgentControlToken(stopped.id, 'wsa_lifecycle_stopped', ['status:write:self'], -1);
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_stopped'), null);
+
+  // Recreate the pre-migration state: both records are expired, but only one
+  // still belongs to a live managed process.
+  database.db.prepare('UPDATE agent_control_tokens SET expires_at = ? WHERE agent_instance_id = ?')
+    .run('1970-01-01T00:00:00.000Z', active.id);
+  database.db.prepare('DELETE FROM schema_migrations WHERE version = 1').run();
+  database.close();
+  database = new HubDatabase(file);
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_active').agent_instance_id, active.id);
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_active').expires_at, null);
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_stopped'), null);
+
+  database.setAgentState(active.id, 'stopping');
+  assert.equal(database.getAgentControlToken('wsa_lifecycle_active'), null);
+});
+
 test('message acceptance is durable and idempotent', (t) => {
   const { database, agent } = databaseFixture(t);
   const input = {

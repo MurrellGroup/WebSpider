@@ -1341,7 +1341,7 @@ test('a project invite provisions a persistent remote Codex worker with reports 
     body: JSON.stringify({ message: 'Run the remote analysis and report progress.', wake_policy: 'ensure_running' }),
   });
   assert.equal(delegated.response.status, 200);
-  await waitUntil(() => node.supervisor.snapshot(worker.terminal_id).text.includes('Run the remote analysis'), 20_000);
+  await waitUntil(() => hub.database.getMessage(delegated.body.message.id)?.delivery?.state === 'adapter_accepted', 20_000);
 
   hub.database.issueAgentControlToken(worker.id, 'wsa_worker_report', ['status:write:self']);
   const report = await jsonFetch(`${listening.url}/api/v1/agent-control/report`, 'wsa_worker_report', {

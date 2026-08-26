@@ -53,7 +53,7 @@ Running agents retain their immutable launch snapshot. The portal marks it stale
 
 ## Main-agent control workflow
 
-At launch, the main terminal receives a short-lived, revocable bearer token and the path to a dependency-free helper. A Codex process started inside that shell inherits both. The token is accepted only by allowlisted portfolio, policy, usage-observation, agent-inventory, and cross-agent message endpoints and is rejected by ordinary WebSpider APIs.
+At launch, the main terminal receives a revocable bearer token bound to that managed process lifecycle and the path to a dependency-free helper. A Codex process started inside that shell inherits both. The token remains valid across Hub reconnects while the same agent instance is running, and is accepted only by allowlisted portfolio, policy, usage-observation, agent-inventory, and cross-agent message endpoints; ordinary WebSpider APIs reject it.
 
 Review the complete research portfolio before coordinating work:
 

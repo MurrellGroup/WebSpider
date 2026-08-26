@@ -28,6 +28,10 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'updates:write:self',
 ]);
 
+const NO_EXPIRY_TIMESTAMP = '9999-12-31T23:59:59.999Z';
+const AGENT_CONTROL_LIFECYCLE_MIGRATION = 1;
+const AGENT_CONTROL_ACTIVE_STATES = new Set(['starting', 'ready', 'busy']);
+
 function decode(value, fallback = null) {
   if (value == null || value === '') return fallback;
   try {
@@ -708,6 +712,21 @@ export class HubDatabase extends EventEmitter {
     if (!snapshotColumns.has('agent_instruction_revision')) this.db.exec('ALTER TABLE policy_snapshots ADD COLUMN agent_instruction_revision INTEGER NOT NULL DEFAULT 1');
     this.db.prepare(`INSERT OR IGNORE INTO system_policies (id, policy_json, revision, updated_at)
       VALUES ('default', '{}', 1, ?)`).run(nowISO());
+    if (!this.db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?')
+      .get(AGENT_CONTROL_LIFECYCLE_MIGRATION)) {
+      const appliedAt = nowISO();
+      this.transaction(() => {
+        // Before this migration, a healthy long-running process lost control
+        // after twelve hours. Preserve only tokens belonging to an agent whose
+        // recorded runtime is still active; terminal states remain expired.
+        this.db.prepare(`UPDATE agent_control_tokens SET expires_at = ?
+          WHERE revoked_at IS NULL AND agent_instance_id IN (
+            SELECT id FROM agent_instances WHERE state IN ('starting', 'ready', 'busy')
+          )`).run(NO_EXPIRY_TIMESTAMP);
+        this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+          .run(AGENT_CONTROL_LIFECYCLE_MIGRATION, appliedAt);
+      });
+    }
   }
 
   close() {
@@ -842,12 +861,11 @@ export class HubDatabase extends EventEmitter {
     const now = nowISO();
     // Browser sessions remain valid until explicit logout/revocation. The
     // column is retained for database compatibility with existing installs.
-    const expires = '9999-12-31T23:59:59.999Z';
     const id = makeId('ses');
     this.db.prepare(`INSERT INTO browser_sessions
       (id, secret_hash, principal_id, role, csrf_token, created_at, last_seen_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, sha256(secret), principalId, role, csrfToken, now, now, expires);
+      .run(id, sha256(secret), principalId, role, csrfToken, now, now, NO_EXPIRY_TIMESTAMP);
     return { id, principal_id: principalId, role, csrf_token: csrfToken, expires_at: null };
   }
 
@@ -870,7 +888,7 @@ export class HubDatabase extends EventEmitter {
     this.db.prepare('UPDATE browser_sessions SET revoked_at = ? WHERE id = ?').run(nowISO(), id);
   }
 
-  issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = 43_200_000) {
+  issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = null) {
     const agent = this.getAgent(agentInstanceId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
@@ -892,13 +910,14 @@ export class HubDatabase extends EventEmitter {
         'A worker agent can only report status, manage its own detached tasks, and schedule its own hooks.', 403);
     }
     const now = nowISO();
+    const storedExpiry = ttlMs == null ? NO_EXPIRY_TIMESTAMP : new Date(Date.now() + ttlMs).toISOString();
     const record = {
       id: makeId('act'),
       agent_instance_id: agent.id,
       project_id: agent.project_id,
       scopes: [...new Set(scopes)],
       created_at: now,
-      expires_at: new Date(Date.now() + ttlMs).toISOString(),
+      expires_at: ttlMs == null ? null : storedExpiry,
     };
     this.transaction(() => {
       this.db.prepare('UPDATE agent_control_tokens SET revoked_at = ? WHERE agent_instance_id = ? AND revoked_at IS NULL')
@@ -907,7 +926,7 @@ export class HubDatabase extends EventEmitter {
         (id, token_hash, agent_instance_id, project_id, scopes_json, created_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
         record.id, sha256(token), record.agent_instance_id, record.project_id,
-        encode(record.scopes), record.created_at, record.expires_at,
+        encode(record.scopes), record.created_at, storedExpiry,
       );
     });
     return record;
@@ -927,7 +946,7 @@ export class HubDatabase extends EventEmitter {
       agent_instance_id: row.agent_instance_id,
       project_id: row.project_id,
       scopes: decode(row.scopes_json, []),
-      expires_at: row.expires_at,
+      expires_at: row.expires_at === NO_EXPIRY_TIMESTAMP ? null : row.expires_at,
     };
   }
 
@@ -1571,9 +1590,16 @@ export class HubDatabase extends EventEmitter {
   setAgentState(id, state, actor = 'hub:reconciler', payload = {}) {
     const previous = this.getAgent(id);
     invariant(previous, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
-    const stopped = ['stopped', 'failed'].includes(state) ? nowISO() : null;
-    this.db.prepare(`UPDATE agent_instances SET state = ?, last_activity_at = ?, stopped_at = ? WHERE id = ?`)
-      .run(state, nowISO(), stopped, id);
+    const changedAt = nowISO();
+    const stopped = ['stopped', 'failed'].includes(state) ? changedAt : null;
+    this.transaction(() => {
+      this.db.prepare(`UPDATE agent_instances SET state = ?, last_activity_at = ?, stopped_at = ? WHERE id = ?`)
+        .run(state, changedAt, stopped, id);
+      if (!AGENT_CONTROL_ACTIVE_STATES.has(state)) {
+        this.db.prepare(`UPDATE agent_control_tokens SET revoked_at = ?
+          WHERE agent_instance_id = ? AND revoked_at IS NULL`).run(changedAt, id);
+      }
+    });
     const current = this.getAgent(id);
     this.appendEvent('agent', id, `agent.${state}.v1`, actor, id, { previous_state: previous.state, ...payload });
     return current;

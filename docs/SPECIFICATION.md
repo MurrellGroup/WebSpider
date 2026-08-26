@@ -1669,7 +1669,7 @@ async with Agent.from_environment() as agent:
         )
 ```
 
-Use a short-lived instance token in a mode-0600 file or inherited file descriptor. Do not pass it as a process argument.
+Use a revocable token bound to the managed instance lifecycle in a mode-0600 file or inherited file descriptor. Do not pass it as a process argument.
 
 ## 11.4 PTY adapter
 
