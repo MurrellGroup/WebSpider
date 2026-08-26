@@ -203,7 +203,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .terminal-view-switch { display: flex; margin-left: auto; padding: 2px; border: 1px solid #27303d; border-radius: 7px; background: #0a0d12; }
 .terminal-view-switch button { border: 0; border-radius: 5px; padding: 5px 8px; background: transparent; color: var(--muted-2); font-size: 9px; cursor: pointer; }
 .terminal-view-switch button.selected { color: #07110d; background: var(--mint); }
-.terminal-toolbar > .terminal-refit { margin-left: 0; white-space: nowrap; }
+.terminal-toolbar > .terminal-refresh { margin-left: 0; white-space: nowrap; }
 .terminal-input-switch { display: flex; margin-left: auto; padding: 2px; border: 1px solid #27303d; border-radius: 7px; background: #0a0d12; }
 .terminal-input-switch + .terminal-view-switch { margin-left: 0; }
 .terminal-input-switch button { border: 0; border-radius: 5px; padding: 5px 8px; background: transparent; color: var(--muted-2); font-size: 9px; cursor: pointer; }

@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.21';
+const PORTAL_VERSION = '0.6.22';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1099,8 +1099,8 @@ function drainTerminalOutputBacklog() {
   for (const frame of frames) queueTerminalOutput(frame);
 }
 
-async function resyncTerminalOutput() {
-  if (state.terminalResyncing || !state.selectedTerminalId || !state.terminalEmulator) return;
+async function resyncTerminalOutput({ reportFailure = true } = {}) {
+  if (state.terminalResyncing || !state.selectedTerminalId || !state.terminalEmulator) return false;
   const terminalId = state.selectedTerminalId;
   const generation = state.terminalGeneration;
   state.terminalResyncing = true;
@@ -1114,13 +1114,14 @@ async function resyncTerminalOutput() {
     recovered = applyTerminalSnapshot(snapshot);
     state.terminalSnapshotReady = true;
   } catch (error) {
-    if (generation === state.terminalGeneration) toast(`Terminal display resync failed: ${friendlyError(error)}`, true);
+    if (reportFailure && generation === state.terminalGeneration) toast(`Terminal display resync failed: ${friendlyError(error)}`, true);
   } finally {
     if (generation === state.terminalGeneration && terminalId === state.selectedTerminalId) {
       state.terminalResyncing = false;
       if (recovered) drainTerminalOutputBacklog();
     }
   }
+  return recovered;
 }
 
 function queueTerminalOutput(frame) {
@@ -1181,6 +1182,15 @@ function refreshTerminalLayout({ syncPty = false } = {}) {
   });
 }
 
+async function refreshTerminalDisplay() {
+  if (state.terminalResyncing) return 'busy';
+  fitTerminal({ redraw: true, syncPty: true });
+  const recovered = await resyncTerminalOutput({ reportFailure: false });
+  if (!recovered) return 'failed';
+  refreshTerminalLayout({ syncPty: true });
+  return 'refreshed';
+}
+
 async function renderTerminal(agent) {
   closeTerminal();
   state.terminalText = '';
@@ -1206,7 +1216,7 @@ async function renderTerminal(agent) {
       : item.kind === 'task_shell' && item.label === 'Terminal' ? `Task ${item.id.slice(-4)}` : item.label;
     return `<div class="terminal-tab ${item.id === terminal.id ? 'selected' : ''}"><button class="terminal-select" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i><span>${h(label)}</span></button>${item.kind !== 'primary_agent' ? `<button class="terminal-tab-close" data-action="close-terminal" data-terminal-id="${h(item.id)}" aria-label="Close ${h(label)} terminal tab" title="${item.kind === 'task_shell' ? 'Dismiss task terminal; the task keeps running' : 'Close terminal and stop its shell'}">×</button>` : ''}</div>`;
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
-    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div><button class="secondary terminal-refit" type="button" data-action="refit-terminal" title="Refit and redraw the terminal for this window" aria-label="Refit terminal">Refit</button>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
+    <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div><button class="secondary terminal-refresh" type="button" data-action="refresh-terminal" title="Rebuild, refit, and redraw the terminal display" aria-label="Refresh terminal display">Refresh</button>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
     <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<input id="terminal-file-input" class="hidden" type="file" multiple aria-label="Choose files to attach"><div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged attachment previews"></div><div class="terminal-image-summary"><strong>Attachment ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged attachments" title="Discard staged attachments">×</button></div>' : ''}
     ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" data-terminal-id="${h(terminal.id)}" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}">${h(terminalDraft(state.terminalDrafts, terminal.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}
@@ -1729,7 +1739,23 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
-    if (action === 'refit-terminal') return refreshTerminalLayout({ syncPty: true });
+    if (action === 'refresh-terminal') {
+      const label = actionTarget.textContent;
+      const controlled = Boolean(state.terminalLease);
+      actionTarget.disabled = true;
+      actionTarget.textContent = 'Refreshing…';
+      try {
+        const result = await refreshTerminalDisplay();
+        if (result === 'busy') return toast('Terminal display refresh is already in progress.');
+        if (result === 'refreshed') return toast(controlled
+          ? 'Terminal display rebuilt and PTY size synchronized.'
+          : 'Terminal display rebuilt. Take control if the running program also needs to resize.');
+        return toast('Terminal display could not be rebuilt.', true);
+      } finally {
+        actionTarget.disabled = false;
+        actionTarget.textContent = label;
+      }
+    }
     if (action === 'adopt-codex-session') return showCodexSessionForm();
     if (action === 'close-modal') return closeModal();
     if (action === 'copy-worker-command') {

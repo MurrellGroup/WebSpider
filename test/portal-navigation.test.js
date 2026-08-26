@@ -198,9 +198,12 @@ test('every non-primary terminal tab has an explicit close control', () => {
   assert.match(app, /async function renderTerminal\(agent\) \{\s*closeTerminal\(\)/);
 });
 
-test('terminal layout has an explicit refit control and repairs itself after window changes', () => {
-  assert.match(app, /data-action="refit-terminal"[^>]*aria-label="Refit terminal"/);
-  assert.match(app, /action === 'refit-terminal'[^\n]*refreshTerminalLayout\(\{ syncPty: true \}\)/);
+test('terminal display has an explicit deep refresh and repairs its layout after window changes', () => {
+  assert.match(app, /data-action="refresh-terminal"[^>]*aria-label="Refresh terminal display"/);
+  assert.match(app, /async function refreshTerminalDisplay\(\)/);
+  assert.match(app, /resyncTerminalOutput\(\{ reportFailure: false \}\)/);
+  assert.match(app, /action === 'refresh-terminal'[\s\S]*actionTarget\.textContent = 'Refreshing…'/);
+  assert.match(app, /Terminal display rebuilt/);
   assert.match(app, /function refreshTerminalLayout\(\{ syncPty = false \} = \{\}\)/);
   assert.match(app, /fitTerminal\(\{ redraw: true, syncPty \}\)/);
   assert.match(app, /emulator\.refresh\(0, emulator\.rows - 1\)/);

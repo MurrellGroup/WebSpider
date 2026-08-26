@@ -80,8 +80,8 @@ Preview a molecular structure
 Maths mode
     The same xterm-parsed transcript, spacing, and line wrapping as Terminal mode, with recognized TeX equations typeset by the locally bundled MathJax. It does not reflow prose as Markdown. Standard \(...\), \[...\], $...$, and $$...$$ forms work; WebSpider also recognizes agent output that puts a TeX equation between standalone [ and ] lines.
 
-Refit terminal
-    If text looks misaligned after resizing, restoring, or switching windows, choose Refit in the terminal toolbar. WebSpider recalculates xterm's rows and columns and forces a redraw. Focus, visibility, view-mode, and text-box changes also trigger this repair automatically. Refit does not take terminal control; it synchronizes the PTY size only when this browser already holds the control lease.
+Refresh terminal display
+    If text looks misaligned after resizing, restoring, or switching windows, choose Refresh in the terminal toolbar. WebSpider rebuilds xterm from the authoritative terminal log, recalculates its rows and columns, forces a redraw, and confirms the result. Focus, visibility, view-mode, and text-box changes also trigger a lightweight refit automatically. Refresh does not take terminal control; it synchronizes the PTY size only when this browser already holds the control lease.
 
 Terminal control
     Many browsers may watch, but only one attachment holds the input lease. Choose Take control to type. Another viewer remains read-only until control is released or expires.
