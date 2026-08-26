@@ -2033,7 +2033,11 @@ export class Hub {
         connection.sendJSON({ type: 'ERROR', code: error.code || 'WS_INTERNAL', message: error.message });
       }
     });
-    connection.sendJSON({ type: 'ATTACHED', terminal, mode: 'watch', attachment_id: attachmentId });
+    const terminalAgent = this.database.getAgent(terminal.agent_instance_id);
+    connection.sendJSON({
+      type: 'ATTACHED', terminal, mode: 'watch', attachment_id: attachmentId,
+      keyboard_protocol: terminal.kind === 'primary_agent' && terminalAgent?.codex_capable ? 'kitty' : null,
+    });
     this.broker.request(terminal.node_id, 'terminal.snapshot', { terminal_id: terminalId, max_bytes: 200_000 })
       .then((snapshot) => connection.sendJSON({ type: 'SNAPSHOT', ...snapshot }))
       .catch((error) => connection.sendJSON({ type: 'ERROR', code: error.code, message: error.message }));

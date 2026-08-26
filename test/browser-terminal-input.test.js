@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalAttachmentCommitKey,
+  clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from '../web/terminal-input.js';
 
 test('rapid printable keydowns bypass the hidden terminal textarea without losing characters', () => {
@@ -43,6 +44,26 @@ test('a staged image commits exactly on an unmodified Enter keydown', () => {
   assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter', shiftKey: true }, true), false);
   assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter', isComposing: true }, true), false);
   assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter' }, false), false);
+});
+
+test('Shift+Enter remains a newline for the full physical key press', () => {
+  const keys = createTerminalKeyState();
+  trackTerminalKey({ type: 'keydown', key: 'Shift' }, keys);
+  trackTerminalKey({ type: 'keydown', key: 'Enter', shiftKey: false }, keys);
+  assert.equal(terminalComposeEnterAction({ type: 'keydown', key: 'Enter', shiftKey: false }, keys), 'newline');
+  assert.equal(directKeyInput({ type: 'keydown', key: 'Enter', shiftKey: false }, true, keys), kittySequence(13, 2));
+  assert.equal(terminalAttachmentCommitKey({ type: 'keydown', key: 'Enter', shiftKey: false }, true, keys), false);
+
+  // Releasing Shift before Enter must not turn an OS key-repeat into a send.
+  trackTerminalKey({ type: 'keyup', key: 'Shift' }, keys);
+  assert.equal(terminalComposeEnterAction({ type: 'keydown', key: 'Enter', repeat: true }, keys), 'newline');
+  assert.equal(directKeyInput({ type: 'keydown', key: 'Enter', repeat: true }, true, keys), kittySequence(13, 2));
+  trackTerminalKey({ type: 'keyup', key: 'Enter' }, keys);
+  assert.equal(terminalComposeEnterAction({ type: 'keydown', key: 'Enter' }, keys), 'submit');
+  assert.equal(terminalComposeEnterAction({ type: 'keydown', key: 'Enter', repeat: true }, keys), 'ignore');
+
+  resetTerminalKeyState(keys);
+  assert.deepEqual(keys, { shiftDown: false, shiftedEnterDown: false });
 });
 
 test('terminal data always queues and requests control when no precursor event did so', () => {

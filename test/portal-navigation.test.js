@@ -167,6 +167,9 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(app, /function handleTerminalData\(data\)[\s\S]*enqueueTerminalData/);
   assert.match(terminalInput, /if \(!controlled && !requestPending\) requestControl\?\.\(\);[\s\S]*enqueue\?\.\(data\)/);
   assert.match(app, /const input = directKeyInput\(event,[\s\S]*event\.preventDefault\(\);[\s\S]*handleTerminalData\(input\)/);
+  assert.match(app, /terminal\?\.kind === 'primary_agent' && state\.selectedAgent\?\.codex_capable/);
+  assert.match(app, /frame\.type === 'ATTACHED' && frame\.keyboard_protocol === 'kitty'/);
+  assert.match(hub, /keyboard_protocol: terminal\.kind === 'primary_agent' && terminalAgent\?\.codex_capable \? 'kitty' : null/);
   assert.match(app, /socket\.addEventListener\('open',[\s\S]*terminalPendingInput\.length[\s\S]*requestTerminalLease\(\)/);
   assert.match(app, /addEventListener\('pointerdown', requestTerminalLease\)/);
   assert.match(app, /emulator\.onData\(handleTerminalData\)/);
@@ -209,7 +212,7 @@ test('pasting a clipboard image stages it and Enter uploads it to the agent work
   assert.match(app, /addEventListener\('paste'/);
   assert.match(app, /stagePastedTerminalImages\(images\);\n\}, true\);/);
   assert.match(app, /item\.type\.startsWith\('image\/'\)/);
-  assert.match(app, /terminalAttachmentCommitKey\(event, currentTerminalAttachmentCount\(\) > 0\)/);
+  assert.match(app, /terminalAttachmentCommitKey\(event, currentTerminalAttachmentCount\(\) > 0, terminalKeyState\)/);
   assert.match(app, /void sendStagedTerminalAttachments\(\)/);
   assert.match(app, /Ready · press Enter to upload and send/);
   assert.match(app, /URL\.createObjectURL\(file\)/);
@@ -225,7 +228,7 @@ test('browser file attachments stage for the selected agent and send only on pla
   assert.match(app, /stageAttachedTerminalFiles/);
   assert.match(app, /\/file-uploads/);
   assert.match(app, /File sent to the agent/);
-  assert.match(app, /event\.target\.id === 'terminal-compose' && event\.key === 'Enter' && !event\.shiftKey/);
+  assert.match(app, /terminalComposeEnterAction\(event, terminalKeyState\)/);
   assert.match(app, /if \(hasAttachments && !await sendStagedTerminalAttachments\(\)\) return/);
 });
 

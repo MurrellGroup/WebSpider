@@ -2,19 +2,21 @@ import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import {
-  clipboardPasteShortcut, directKeyInput, enqueueTerminalData, kittySequence, terminalAttachmentCommitKey,
+  clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraft } from './terminal-drafts.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.18';
+const PORTAL_VERSION = '0.6.19';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const terminalKeyState = createTerminalKeyState();
 
 const state = {
   session: null,
@@ -307,6 +309,7 @@ function closeTerminal() {
   state.terminalFitAddon = null;
   state.terminalDimensions = null;
   state.terminalKeyboardProtocol = false;
+  resetTerminalKeyState(terminalKeyState);
   state.terminalBracketedPaste = false;
   state.terminalProtocolTail = '';
   clearTimeout(state.terminalRenderTimer);
@@ -1023,12 +1026,15 @@ function handleTerminalData(data) {
 }
 
 function handleTerminalKey(event) {
-  if (terminalAttachmentCommitKey(event, currentTerminalAttachmentCount() > 0)) {
+  if (terminalAttachmentCommitKey(event, currentTerminalAttachmentCount() > 0, terminalKeyState)) {
     event.preventDefault();
     void sendStagedTerminalAttachments();
     return false;
   }
-  const input = directKeyInput(event, state.terminalKeyboardProtocol);
+  const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId);
+  const enhancedKeyboard = state.terminalKeyboardProtocol
+    || (terminal?.kind === 'primary_agent' && state.selectedAgent?.codex_capable);
+  const input = directKeyInput(event, enhancedKeyboard, terminalKeyState);
   if (input == null) return true;
   event.preventDefault();
   handleTerminalData(input);
@@ -1230,6 +1236,11 @@ async function renderTerminal(agent) {
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
     if (!state.terminalEmulator) return;
+    if (frame.type === 'ATTACHED' && frame.keyboard_protocol === 'kitty') {
+      state.terminalKeyboardProtocol = true;
+      const output = $('#terminal-output');
+      if (output) output.dataset.keyboardProtocol = 'true';
+    }
     if (frame.type === 'SNAPSHOT') {
       applyTerminalSnapshot(frame);
       state.terminalSnapshotReady = true;
@@ -2135,10 +2146,16 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('keydown', (event) => trackTerminalKey(event, terminalKeyState), true);
+document.addEventListener('keyup', (event) => trackTerminalKey(event, terminalKeyState), true);
+window.addEventListener('blur', () => resetTerminalKeyState(terminalKeyState));
+
 document.addEventListener('keydown', (event) => {
-  if (event.target.id === 'terminal-compose' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  if (event.target.id === 'terminal-compose' && event.key === 'Enter') {
+    const action = terminalComposeEnterAction(event, terminalKeyState);
+    if (action === 'newline' || action === 'native') return;
     event.preventDefault();
-    event.target.form?.requestSubmit();
+    if (action === 'submit') event.target.form?.requestSubmit();
     return;
   }
   if (event.target.closest('#terminal-output') && clipboardPasteShortcut(event)) {
