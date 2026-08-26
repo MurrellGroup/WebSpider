@@ -106,9 +106,11 @@ export class NodeBroker extends EventEmitter {
         agent_instance_id: runtime.agent_instance_id ? String(runtime.agent_instance_id).slice(0, 160) : null,
         task_id: runtime.task_id ? String(runtime.task_id).slice(0, 160) : null,
         terminal_id: runtime.terminal_id ? String(runtime.terminal_id).slice(0, 160) : null,
+        root_id: runtime.root_id ? String(runtime.root_id).slice(0, 160) : null,
+        executable: runtime.executable ? String(runtime.executable).slice(0, 160) : null,
         state: ['running', 'stopping', 'exited', 'failed', 'lost'].includes(runtime.state) ? runtime.state : 'lost',
-        created_at: runtime.created_at || null,
-      }))
+        created_at: Number.isFinite(Date.parse(runtime.created_at)) ? new Date(runtime.created_at).toISOString() : null,
+      })).filter((runtime) => runtime.id)
       : [];
     this.database.appendEvent('node', nodeId, 'node.online.v1', `node:${nodeId}`, nodeId, {
       node_id: nodeId,

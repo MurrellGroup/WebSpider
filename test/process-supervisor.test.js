@@ -134,6 +134,91 @@ test('a surviving PTY process is reconciled and controlled after node-daemon res
   });
 });
 
+test('a surviving agent can be claimed under a new Hub identity without starting a duplicate', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-live-claim-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const database = new NodeDatabase(path.join(directory, 'node.db'));
+  const roots = new RootedFileService([
+    { id: 'awr_old_hub', path: workspace },
+    { id: 'awr_new_hub', path: workspace },
+  ]);
+  const supervisor = new ProcessSupervisor({ stateDir: directory, database, rootService: roots, pollMs: 25 });
+  supervisor.on('error', () => {});
+  supervisor.start();
+  t.after(() => {
+    const runtime = database.getProcessByAgent('agt_new_hub') || database.getProcessByAgent('agt_old_hub');
+    if (runtime?.state === 'running') supervisor.stopProcess(runtime.id, 'SIGTERM');
+    supervisor.stop(); roots.close(); database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const oldPolicy = {
+    id: 'pol_old_hub', project_id: 'prj_old_hub', agent_role: 'worker', policy_revision: 1,
+    content_hash: 'old', policy: {}, rendered_instructions: '# Old Hub instructions',
+  };
+  const launched = supervisor.launch({
+    id: 'run_surviving_claim', kind: 'agent', agentInstanceId: 'agt_old_hub', terminalId: 'trm_old_hub',
+    rootId: 'awr_old_hub', argv: ['/bin/sh'], policySnapshot: oldPolicy,
+    agentControl: { url: 'http://old-hub.invalid/api/v1/agent-control', token: 'wsa_old', agent_instance_id: 'agt_old_hub' },
+  });
+  supervisor.input('trm_old_hub', Buffer.from('echo before-claim\n'));
+  await waitUntil(() => supervisor.snapshot('trm_old_hub').text.includes('before-claim'));
+  const oldContextDirectory = path.join(directory, 'agent-context', 'agt_old_hub');
+  const outsidePolicyTarget = path.join(workspace, 'must-not-be-overwritten.txt');
+  fs.writeFileSync(outsidePolicyTarget, 'preserve-me');
+  fs.unlinkSync(path.join(oldContextDirectory, 'PROJECT_RULES.md'));
+  fs.symlinkSync(outsidePolicyTarget, path.join(oldContextDirectory, 'PROJECT_RULES.md'));
+
+  const newPolicy = {
+    id: 'pol_new_hub', project_id: 'prj_new_hub', agent_role: 'worker', policy_revision: 2,
+    content_hash: 'new', policy: {}, rendered_instructions: '# New Hub recovery instructions',
+  };
+  const claimed = supervisor.claimAgentRuntime({
+    runtimeId: launched.id,
+    expectedAgentInstanceId: 'agt_old_hub',
+    agentInstanceId: 'agt_new_hub',
+    terminalId: 'trm_new_hub',
+    rootId: 'awr_new_hub',
+    policySnapshot: newPolicy,
+    agentControl: { url: 'http://new-hub.invalid/api/v1/agent-control', token: 'wsa_new', agent_instance_id: 'agt_new_hub' },
+  });
+  assert.equal(claimed.id, launched.id);
+  assert.equal(claimed.agentInstanceId, 'agt_new_hub');
+  assert.equal(claimed.terminalId, 'trm_new_hub');
+  assert.equal(claimed.rootId, 'awr_new_hub');
+  assert.equal(claimed.contextId, 'agt_old_hub');
+  assert.equal(database.listProcesses().filter((runtime) => runtime.state === 'running').length, 1);
+  assert.equal(database.getProcessByAgent('agt_old_hub'), null);
+  supervisor.input('trm_new_hub', Buffer.from('echo after-claim\n'));
+  await waitUntil(() => supervisor.snapshot('trm_new_hub').text.includes('after-claim'));
+
+  const contextDirectory = path.join(directory, 'agent-context', 'agt_old_hub');
+  assert.equal(fs.readFileSync(outsidePolicyTarget, 'utf8'), 'preserve-me');
+  assert.equal(fs.lstatSync(path.join(contextDirectory, 'PROJECT_RULES.md')).isSymbolicLink(), false);
+  assert.match(fs.readFileSync(path.join(contextDirectory, 'PROJECT_RULES.md'), 'utf8'), /New Hub recovery instructions/);
+  const control = JSON.parse(fs.readFileSync(path.join(contextDirectory, 'webspider-control.json'), 'utf8'));
+  assert.equal(control.url, 'http://new-hub.invalid/api/v1/agent-control');
+  assert.equal(control.token, 'wsa_new');
+  assert.equal(control.agent_instance_id, 'agt_new_hub');
+  assert(Number.isFinite(new Date(control.patched_at).getTime()));
+  const helper = fs.readFileSync(path.join(contextDirectory, 'webspider-control'), 'utf8');
+  assert.match(helper, /webspider-control\.json/);
+  assert.match(helper, /recoveredControl\.token/);
+
+  supervisor.stopProcess(claimed.id, 'SIGTERM');
+  await waitUntil(() => !['running', 'stopping'].includes(database.getProcess(claimed.id).state));
+  const replacementCompletion = waitForCompletion(supervisor);
+  const replacement = supervisor.launch({
+    id: 'run_after_claim', kind: 'agent', agentInstanceId: 'agt_new_hub', terminalId: 'trm_new_hub',
+    rootId: 'awr_new_hub', argv: ['/bin/sh', '-c', 'test -f "$WEBSPIDER_PROJECT_RULES"'],
+    policySnapshot: newPolicy,
+    agentControl: { url: 'http://new-hub.invalid/api/v1/agent-control', token: 'wsa_newer', agent_instance_id: 'agt_new_hub' },
+  });
+  assert.equal(replacement.contextId, 'agt_old_hub');
+  assert.equal((await replacementCompletion).exit_status, 0);
+});
+
 test('reconciliation never attaches a recorded PTY from a different machine boot', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-boot-fence-'));
   const workspace = path.join(directory, 'workspace');

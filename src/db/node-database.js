@@ -30,6 +30,7 @@ export class NodeDatabase {
         id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
         agent_instance_id TEXT,
+        context_id TEXT,
         task_id TEXT,
         terminal_id TEXT,
         root_id TEXT,
@@ -64,6 +65,8 @@ export class NodeDatabase {
     if (!processColumns.includes('host_boot_id')) this.db.exec('ALTER TABLE processes ADD COLUMN host_boot_id TEXT');
     if (!processColumns.includes('process_identity')) this.db.exec('ALTER TABLE processes ADD COLUMN process_identity TEXT');
     if (!processColumns.includes('keeper_process_identity')) this.db.exec('ALTER TABLE processes ADD COLUMN keeper_process_identity TEXT');
+    if (!processColumns.includes('context_id')) this.db.exec('ALTER TABLE processes ADD COLUMN context_id TEXT');
+    this.db.exec('UPDATE processes SET context_id = agent_instance_id WHERE context_id IS NULL AND agent_instance_id IS NOT NULL');
   }
 
   close() { this.db.close(); }
@@ -90,14 +93,15 @@ export class NodeDatabase {
 
   upsertProcess(process) {
     this.db.prepare(`INSERT INTO processes
-      (id, kind, agent_instance_id, task_id, terminal_id, root_id, argv_json, pid, pgid, keeper_pid,
+      (id, kind, agent_instance_id, context_id, task_id, terminal_id, root_id, argv_json, pid, pgid, keeper_pid,
        host_boot_id, process_identity, keeper_process_identity, input_fifo, output_log, exit_file, state, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, pgid=excluded.pgid, state=excluded.state,
         keeper_pid=excluded.keeper_pid, host_boot_id=excluded.host_boot_id,
         process_identity=excluded.process_identity, keeper_process_identity=excluded.keeper_process_identity,
+        context_id=COALESCE(processes.context_id, excluded.context_id),
         updated_at=excluded.updated_at`)
-      .run(process.id, process.kind, process.agentInstanceId || null, process.taskId || null,
+      .run(process.id, process.kind, process.agentInstanceId || null, process.contextId || process.agentInstanceId || null, process.taskId || null,
         process.terminalId || null, process.rootId || null, JSON.stringify(process.argv), process.pid,
         process.pgid, process.keeperPid || null, process.hostBootId || null, process.processIdentity || null,
         process.keeperProcessIdentity || null,
@@ -109,6 +113,7 @@ export class NodeDatabase {
       id: row.id,
       kind: row.kind,
       agentInstanceId: row.agent_instance_id,
+      contextId: row.context_id || row.agent_instance_id || null,
       taskId: row.task_id,
       terminalId: row.terminal_id,
       rootId: row.root_id,
@@ -141,6 +146,14 @@ export class NodeDatabase {
   getProcessByAgent(agentId) {
     const row = this.db.prepare("SELECT id FROM processes WHERE agent_instance_id = ? AND kind = 'agent' ORDER BY created_at DESC LIMIT 1").get(agentId);
     return row ? this.getProcess(row.id) : null;
+  }
+
+  claimProcess(id, { expectedAgentInstanceId, agentInstanceId, terminalId, rootId }) {
+    const result = this.db.prepare(`UPDATE processes
+      SET agent_instance_id = ?, terminal_id = ?, root_id = ?, updated_at = ?
+      WHERE id = ? AND agent_instance_id = ? AND kind = 'agent' AND state = 'running'`)
+      .run(agentInstanceId, terminalId, rootId, nowISO(), id, expectedAgentInstanceId);
+    return Number(result.changes) === 1 ? this.getProcess(id) : null;
   }
 
   updateProcessOffset(id, offset) {

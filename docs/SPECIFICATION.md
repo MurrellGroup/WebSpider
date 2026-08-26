@@ -2731,6 +2731,7 @@ After reconnect/restart:
 3. hub compares with desired state;
 4. known sessions reattach;
 5. unknown WebSpider-owned sessions become `orphaned`;
+   the initial implementation exposes running agent orphans to the owner, holds newly enrolled replacement agents stopped, and requires an explicit same-node process-to-agent claim before remapping the PTY;
 6. missing expected processes become stopped/failed or restart according to policy;
 7. node replays unsent events;
 8. hub resumes pending message/task dispatch.
@@ -3350,7 +3351,7 @@ webspider restore <bundle>
 
 Node-local secrets are not silently included in hub backups.
 
-Nodes can be re-enrolled after hub disaster recovery.
+Nodes can be re-enrolled after hub disaster recovery. A re-enrolled node reports surviving live processes; the owner may explicitly claim one into an inactive replacement agent on the same node. This continuity path preserves the node runtime and managed context but does not synthesize lost Hub history. Stopped-session import and full backup/restore remain separate work.
 
 ---
 

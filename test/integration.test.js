@@ -9,6 +9,9 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Hub } from '../src/hub/hub.js';
 import { formatInboundMessage, NodeDaemon } from '../src/node/node-daemon.js';
+import { NodeDatabase } from '../src/db/node-database.js';
+import { ProcessSupervisor } from '../src/node/process-supervisor.js';
+import { RootedFileService } from '../src/node/root-fs.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
 import { FILE_TRANSFER_CHUNK_BYTES } from '../src/lib/file-transfer.js';
 import { WEBSPIDER_VERSION } from '../src/lib/self-update.js';
@@ -79,6 +82,154 @@ test('an installer attachment re-enrolls a node identity forgotten by a rebuilt 
   assert.equal(config.hubURL, listening.url);
   assert.equal(config.roots[0].path, workspace);
   assert.equal(hub.database.listAgents(project.id).length, 1);
+});
+
+test('a rebuilt Hub holds replacement launch and lets the owner claim a surviving agent', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-hub-live-recovery-'));
+  const workspace = path.join(directory, 'workspace');
+  const nodeState = path.join(directory, 'node');
+  const fakeCodex = path.join(directory, 'codex');
+  fs.mkdirSync(workspace);
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf "surviving-agent-marker\\n"\nwhile IFS= read -r line; do printf "received:%s\\n" "$line"; done\n');
+  fs.chmodSync(fakeCodex, 0o700);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'new-hub'), listenPort: 0 });
+  const project = hub.database.createProject({ name: 'Recovered live project' });
+  const joinToken = 'wsj_live_recovery_test';
+  hub.database.createJoinToken('Recovered live workstation', joinToken, 60_000, { project_id: project.id });
+  const listening = await hub.listen();
+  let node = null;
+  let enrollment = null;
+  t.after(async () => {
+    const runtime = node?.database.getProcessByAgent(enrollment?.agent_id)
+      || node?.database.getProcessByAgent('agt_previous_hub');
+    if (runtime?.state === 'running') node.supervisor.stopProcess(runtime.id, 'SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (node) await node.stop();
+    await hub.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const enrollmentResponse = await fetch(`${listening.url}/api/v1/nodes/enroll`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token: joinToken,
+      name: 'Recovered live workstation',
+      public_key: identity.publicKey,
+      capabilities: {
+        codex: true,
+        rooted_files: true,
+        detached_processes: true,
+        root_ids: ['awr_new_hub'],
+        roots: [{ id: 'awr_new_hub', name: 'workspace' }],
+      },
+    }),
+  });
+  assert.equal(enrollmentResponse.status, 200);
+  enrollment = await enrollmentResponse.json();
+  const replacement = hub.database.getAgent(enrollment.agent_id);
+  assert.equal(replacement.state, 'starting');
+
+  let oldDatabase = new NodeDatabase(path.join(nodeState, 'node.db'));
+  let oldRoots = new RootedFileService([{ id: 'awr_previous_hub', path: workspace }]);
+  let oldSupervisor = new ProcessSupervisor({ stateDir: nodeState, database: oldDatabase, rootService: oldRoots, pollMs: 25 });
+  oldSupervisor.on('error', () => {});
+  oldSupervisor.start();
+  const oldRuntime = oldSupervisor.launch({
+    id: 'run_previous_hub',
+    kind: 'agent',
+    agentInstanceId: 'agt_previous_hub',
+    terminalId: 'trm_previous_hub',
+    rootId: 'awr_previous_hub',
+    argv: [fakeCodex],
+    policySnapshot: {
+      id: 'pol_previous_hub', project_id: 'prj_previous_hub', agent_role: 'worker',
+      system_policy_revision: 1, policy_revision: 1, content_hash: 'previous', policy: {},
+      rendered_instructions: '# Previous Hub agent',
+    },
+    agentControl: {
+      url: 'http://old-hub.invalid/api/v1/agent-control', token: 'wsa_previous_hub',
+      agent_instance_id: 'agt_previous_hub',
+    },
+  });
+  await waitUntil(() => oldSupervisor.snapshot(oldRuntime.terminalId).text.includes('surviving-agent-marker'));
+  oldSupervisor.stop();
+  oldRoots.close();
+  oldDatabase.close();
+  oldSupervisor = null; oldRoots = null; oldDatabase = null;
+
+  node = new NodeDaemon({
+    stateDir: nodeState,
+    hubURL: listening.url,
+    nodeId: enrollment.node_id,
+    displayName: 'Recovered live workstation',
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    roots: [{ id: 'awr_new_hub', path: workspace }],
+    reconnect: false,
+  });
+  node.on('error', () => {});
+  const online = onceWithTimeout(node, 'online');
+  node.start();
+  await online;
+
+  let candidates;
+  await waitUntil(async () => {
+    const response = await jsonFetch(`${listening.url}/api/v1/recovery/candidates`, hub.ownerToken);
+    candidates = response.body.candidates;
+    return candidates.length === 1 && hub.database.getAgent(replacement.id).state === 'stopped';
+  });
+  assert.equal(candidates[0].id, oldRuntime.id);
+  assert.equal(candidates[0].agent_instance_id, 'agt_previous_hub');
+  assert.equal(candidates[0].target_agents[0].id, replacement.id);
+  assert.equal(hub.database.getAgent(replacement.id).recovery_pending, true);
+  assert.equal(node.database.listProcesses().filter((runtime) => runtime.state === 'running').length, 1);
+  const unsafeWake = await jsonFetch(
+    `${listening.url}/api/v1/agent-instances/${encodeURIComponent(replacement.id)}:wake`,
+    hub.ownerToken,
+    { method: 'POST' },
+  );
+  assert.equal(unsafeWake.response.status, 409);
+  assert.equal(unsafeWake.body.error.code, 'WS_RECOVERY_PENDING');
+  assert.equal(node.database.listProcesses().filter((runtime) => runtime.state === 'running').length, 1);
+
+  const claimed = await jsonFetch(
+    `${listening.url}/api/v1/recovery/candidates/${encodeURIComponent(oldRuntime.id)}:claim`,
+    hub.ownerToken,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expected_agent_instance_id: 'agt_previous_hub',
+        target_agent_instance_id: replacement.id,
+      }),
+    },
+  );
+  assert.equal(claimed.response.status, 200);
+  assert.equal(claimed.body.claimed, true);
+  const recoveredRuntime = node.database.getProcessByAgent(replacement.id);
+  assert.equal(recoveredRuntime.id, oldRuntime.id);
+  assert.equal(recoveredRuntime.contextId, 'agt_previous_hub');
+  assert.equal(recoveredRuntime.terminalId, replacement.terminal_id);
+  assert.equal(node.database.listProcesses().filter((runtime) => runtime.state === 'running').length, 1);
+  assert.equal(hub.database.getAgent(replacement.id).state, 'ready');
+  assert.equal(hub.database.getAgent(replacement.id).recovery_pending, false);
+  assert.match(node.supervisor.snapshot(replacement.terminal_id).text, /surviving-agent-marker/);
+  const after = await jsonFetch(`${listening.url}/api/v1/recovery/candidates`, hub.ownerToken);
+  assert.deepEqual(after.body.candidates, []);
+
+  const contextDirectory = path.join(nodeState, 'agent-context', 'agt_previous_hub');
+  const control = JSON.parse(fs.readFileSync(path.join(contextDirectory, 'webspider-control.json'), 'utf8'));
+  assert.equal(control.url, `${listening.url}/api/v1/agent-control`);
+  assert.equal(control.agent_instance_id, replacement.id);
+  const helperResult = await execFileAsync(path.join(contextDirectory, 'webspider-control'), [
+    'report', '--status', 'idle', '--summary', 'Recovered helper works',
+  ]);
+  assert.match(helperResult.stdout, /Recovered helper works/);
+  assert.equal(hub.database.getAgent(replacement.id).work_status, 'idle');
+  await waitUntil(() => hub.database.listMessages(replacement.active_thread_id)
+    .some((message) => message.display_sender === 'WebSpider Hub recovery'));
 });
 
 test('same-machine Hub and worker identities stay online across one shared process store', async (t) => {

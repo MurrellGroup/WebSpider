@@ -36,6 +36,16 @@ test('Nodes exposes a Hub-last coordinated update with persistent owner rescue c
   assert.match(app, /codex sessions in their registered project directories/i);
 });
 
+test('Nodes exposes explicit live-process recovery without automatic duplicate launch', () => {
+  assert.match(app, /api\('\/api\/v1\/recovery\/candidates'\)/);
+  assert.match(app, /<h2>Surviving agents<\/h2>/);
+  assert.match(app, /replacement agents were held stopped to prevent duplicate work/i);
+  assert.match(app, /data-action="claim-recovery-candidate"/);
+  assert.match(app, /id="recovery-claim-form"/);
+  assert.match(app, /The lost Hub's messages, tasks, and schedules are not reconstructed/);
+  assert.match(app, /:claim`/);
+});
+
 test('Master Spider navigation opens its terminal and portfolio is separate', () => {
   assert.match(page, /class="nav-master selected" data-action="master"/);
   assert.match(page, /<strong>Master Spider<\/strong><small>On-demand portfolio manager<\/small>/);

@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.23';
+const PORTAL_VERSION = '0.6.24';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -26,6 +26,7 @@ const state = {
   agents: [],
   archivedAgents: [],
   nodes: [],
+  recoveryCandidates: [],
   fleetUpdate: null,
   tasks: [],
   attention: [],
@@ -170,6 +171,9 @@ function friendlyError(error) {
     WS_PROJECT_PROTECTED: 'The Master Spider project is protected.',
     WS_PROJECT_ARCHIVED: 'Restore this project before using it.',
     WS_CONFIRMATION_REQUIRED: 'The project name did not match.',
+    WS_RECOVERY_STALE: 'That surviving process changed or exited. Refresh the recovery panel.',
+    WS_RECOVERY_CONFLICT: 'The selected recovery target cannot safely claim this process.',
+    WS_RECOVERY_PENDING: 'This replacement is held to prevent duplicate work. Resolve its surviving process from Nodes first.',
   };
   return messages[error?.code] || error?.message || 'WebSpider could not complete that action.';
 }
@@ -252,6 +256,19 @@ function showCodexSessionForm() {
     <label>Session UUID or name<input name="session_id" maxlength="200" placeholder="Optional when latest is selected"></label>
     <p class="muted">The session must already exist for the same user on this workstation. Adopting it restarts this agent; project instructions and workspace confinement still apply.</p>
     <div class="modal-actions">${agent.codex_session ? '<button type="button" class="secondary" data-action="detach-codex-session">Stop adopting external session</button>' : ''}<button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary">Adopt & restart</button></div>
+  </div></form>`);
+}
+
+function showRecoveryClaimForm(runtimeId) {
+  const candidate = state.recoveryCandidates.find((item) => item.id === runtimeId);
+  if (!candidate) return toast('That recovery candidate is no longer available.', true);
+  const targets = candidate.target_agents || [];
+  openModal(`<form id="recovery-claim-form" data-runtime-id="${h(candidate.id)}" data-old-agent-id="${h(candidate.agent_instance_id)}"><div class="modal-header"><div><h2>Claim surviving agent</h2><p>${h(candidate.node_name)} · live process ${h(candidate.id)}</p></div><button type="button" data-action="close-modal" title="Close">×</button></div><div class="modal-body form-grid">
+    <div class="callout warning"><strong>Manual Hub recovery</strong><p>This reconnects the live PTY and node-local WebSpider context. The lost Hub's messages, tasks, and schedules are not reconstructed.</p></div>
+    <dl class="metadata-grid"><dt>Old agent ID</dt><dd class="mono">${h(candidate.agent_instance_id)}</dd><dt>Old root ID</dt><dd class="mono">${h(candidate.root_id || 'unknown')}</dd><dt>Executable</dt><dd>${h(candidate.executable || 'unknown')}</dd><dt>Started</dt><dd>${h(formatTime(candidate.created_at, true))}</dd></dl>
+    <label>New WebSpider agent<select name="target_agent_instance_id" required ${targets.length ? '' : 'disabled'}>${targets.map((agent) => `<option value="${h(agent.id)}">${h(agent.project_name)} — ${h(agent.title)} (${h(agent.state)})</option>`).join('')}</select></label>
+    ${targets.length ? '<p class="muted">WebSpider will not start another process. It will remap this live terminal, preserve its managed Codex context, rotate its control credential, and send one recovery notice.</p>' : '<p class="form-error">No inactive agent on this workstation has a registered project root. Attach the intended project to this node first.</p>'}
+    <div class="modal-actions"><button type="button" class="secondary" data-action="close-modal">Cancel</button><button type="submit" class="primary" ${targets.length ? '' : 'disabled'}>Claim live process</button></div>
   </div></form>`);
 }
 
@@ -358,13 +375,14 @@ async function loadData() {
     showVersionMismatch(health.version);
     throw Object.assign(new Error(`Portal ${PORTAL_VERSION} requires hub ${PORTAL_VERSION}; running hub is ${health.version || 'unknown'}.`), { code: 'WS_VERSION_MISMATCH' });
   }
-  const [summary, projects, archivedProjects, agents, archivedAgents, nodes, tasks, attention, notes, fleetUpdate] = await Promise.all([
+  const [summary, projects, archivedProjects, agents, archivedAgents, nodes, recovery, tasks, attention, notes, fleetUpdate] = await Promise.all([
     api('/api/v1/summary'),
     api('/api/v1/projects'),
     api('/api/v1/projects?archived=only'),
     api('/api/v1/agent-instances'),
     api('/api/v1/agent-instances?archived=only'),
     api('/api/v1/nodes'),
+    api('/api/v1/recovery/candidates'),
     api('/api/v1/tasks'),
     api('/api/v1/attention'),
     api('/api/v1/notes'),
@@ -377,6 +395,7 @@ async function loadData() {
     agents: agents.agents,
     archivedAgents: archivedAgents.agents,
     nodes: nodes.nodes,
+    recoveryCandidates: recovery.candidates,
     tasks: tasks.tasks,
     attention: attention.items,
     notes: notes.notes,
@@ -404,9 +423,12 @@ function renderSidebar() {
 
 function renderAttention() {
   const offline = state.nodes.filter((node) => node.status !== 'online');
-  $('#attention-panel').innerHTML = `<div class="attention-head"><strong>Attention</strong><span class="attention-count">${state.attention.length}</span></div>
+  const recoveryCount = state.recoveryCandidates.length;
+  $('#attention-panel').innerHTML = `<div class="attention-head"><strong>Attention</strong><span class="attention-count">${state.attention.length + recoveryCount}</span></div>
     <div class="attention-body">
-      ${state.attention.length ? state.attention.map((item) => `<article class="attention-item"><span class="severity">${h(item.severity)} · ${h(item.type)}</span><p>${h(item.summary)}</p></article>`).join('') : '<div class="attention-empty">Nothing needs a decision.<br>WebSpider will keep watch.</div>'}
+      ${state.attention.length ? state.attention.map((item) => `<article class="attention-item"><span class="severity">${h(item.severity)} · ${h(item.type)}</span><p>${h(item.summary)}</p></article>`).join('') : ''}
+      ${recoveryCount ? `<article class="attention-item"><span class="severity">Hub recovery</span><p>${recoveryCount} live agent process${recoveryCount === 1 ? '' : 'es'} need owner mapping. Replacement launch is held.</p><button class="secondary" data-action="show-nodes">Review surviving agents</button></article>` : ''}
+      ${!state.attention.length && !recoveryCount ? '<div class="attention-empty">Nothing needs a decision.<br>WebSpider will keep watch.</div>' : ''}
       <section class="node-mini"><h3>Node fabric</h3>${state.nodes.map((node) => `<div class="node-mini-row"><i class="state-dot ${h(node.status)}"></i><span>${h(node.display_name)}</span><small>${h(node.status)}</small></div>`).join('')}</section>
       ${offline.length ? `<div class="attention-item"><span class="severity">Node status</span><p>${offline.length} node${offline.length === 1 ? ' is' : 's are'} offline. Durable work remains queued.</p></div>` : ''}
     </div>`;
@@ -1592,7 +1614,8 @@ async function renderNodes() {
       ${update.allowed_task_ids?.length ? `<p class="muted">${h(update.allowed_task_ids.length)} detached task${update.allowed_task_ids.length === 1 ? '' : 's'} allowed to remain running through this update.</p>` : ''}
       ${update.agents?.length ? `<h3>Session checkpoints</h3><table class="data-table"><thead><tr><th>Spider</th><th>Project</th><th>Readiness</th></tr></thead><tbody>${update.agents.map((agent) => `<tr><td>${h(agent.title)}</td><td>${h(agent.project_name)}</td><td>${agent.ready ? `<span class="status-pill succeeded">${agent.ready.override ? 'owner override' : 'acknowledged'}</span><br><small>${h(formatTime(agent.ready.ready_at, true))}</small>` : '<span class="status-pill running">waiting</span>'}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No running spiders need a session checkpoint.</p>'}
       ${update.nodes?.length ? `<h3>Package rollout</h3><table class="data-table"><thead><tr><th>Node</th><th>Connection</th><th>Version</th><th>Update</th></tr></thead><tbody>${update.nodes.map((node) => `<tr><td><strong>${h(node.display_name)}</strong><br><span class="mono muted">${h(node.id)}</span></td><td><span class="status-pill ${node.online ? 'online' : 'offline'}">${node.online ? 'online' : 'offline'}</span></td><td class="mono">${h(node.version || 'pre-0.6.13')}</td><td>${h(node.update_status?.phase || 'pending')}</td></tr>`).join('')}</tbody></table>` : ''}` : `<div class="fleet-update-summary"><div><strong>Coordinated update all</strong><p class="muted">Requests safe checkpoints from every running spider, updates remote nodes first and the Hub last, then resumes Codex sessions in their registered project directories.</p></div><div>${updateActions}</div></div>`;
-  $('#main-view').innerHTML = `<div class="page">${pageHeader('Nodes', 'Outbound authenticated worker connections')}<div class="page-content"><section class="panel"><div class="panel-header"><h2>Coordinated update</h2><span>Hub and every active node</span></div><div class="panel-body fleet-update">${updateBody}</div></section><section class="panel"><div class="panel-header"><h2>Node fabric</h2><span>${state.nodes.length} enrolled</span></div><div class="panel-body"><table class="data-table"><thead><tr><th>Node</th><th>Status</th><th>Version</th><th>Epoch</th><th>Last seen</th></tr></thead><tbody>${state.nodes.map((node) => `<tr><td><strong>${h(node.display_name)}</strong><br><span class="mono muted">${h(node.id)}</span></td><td><span class="status-pill ${h(node.status)}">${h(node.status)}</span></td><td class="mono">${h(node.capabilities?.webspider_version || 'pre-0.6.13')}</td><td>${h(node.connection_epoch)}</td><td>${h(formatTime(node.last_seen_at, true))}</td></tr>`).join('')}</tbody></table></div></section></div></div>`;
+  const recoveryBody = state.recoveryCandidates.length ? `<section class="panel recovery-panel"><div class="panel-header"><h2>Surviving agents</h2><span>${state.recoveryCandidates.length} awaiting owner mapping</span></div><div class="panel-body"><div class="callout warning"><strong>A rebuilt Hub found live WebSpider processes it does not recognize.</strong><p>They remain running and replacement agents were held stopped to prevent duplicate work. Claim each process only after matching it to the intended new project agent.</p></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Workstation</th><th>Old process</th><th>Executable</th><th>Started</th><th>Targets</th><th></th></tr></thead><tbody>${state.recoveryCandidates.map((candidate) => `<tr><td><strong>${h(candidate.node_name)}</strong><br><span class="mono muted">${h(candidate.node_id)}</span></td><td class="mono">${h(candidate.id)}<br><span class="muted">${h(candidate.agent_instance_id)}</span></td><td>${h(candidate.executable || 'unknown')}</td><td>${h(formatTime(candidate.created_at, true))}</td><td>${h(candidate.target_agents?.length || 0)}</td><td><button class="primary" data-action="claim-recovery-candidate" data-runtime-id="${h(candidate.id)}" ${candidate.target_agents?.length ? '' : 'disabled'}>Claim…</button></td></tr>`).join('')}</tbody></table></div></div></section>` : '';
+  $('#main-view').innerHTML = `<div class="page">${pageHeader('Nodes', 'Outbound authenticated worker connections')}<div class="page-content">${recoveryBody}<section class="panel"><div class="panel-header"><h2>Coordinated update</h2><span>Hub and every active node</span></div><div class="panel-body fleet-update">${updateBody}</div></section><section class="panel"><div class="panel-header"><h2>Node fabric</h2><span>${state.nodes.length} enrolled</span></div><div class="panel-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Node</th><th>Status</th><th>Version</th><th>Epoch</th><th>Last seen</th></tr></thead><tbody>${state.nodes.map((node) => `<tr><td><strong>${h(node.display_name)}</strong><br><span class="mono muted">${h(node.id)}</span></td><td><span class="status-pill ${h(node.status)}">${h(node.status)}</span></td><td class="mono">${h(node.capabilities?.webspider_version || 'pre-0.6.13')}</td><td>${h(node.connection_epoch)}</td><td>${h(formatTime(node.last_seen_at, true))}</td></tr>`).join('')}</tbody></table></div></div></section></div></div>`;
 }
 
 async function renderAudit() {
@@ -1806,6 +1829,7 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
     if (action === 'show-nodes') { closeMobileSidebar(); return renderNodes(); }
+    if (action === 'claim-recovery-candidate') return showRecoveryClaimForm(actionTarget.dataset.runtimeId);
     if (action === 'prepare-fleet-update') {
       if (!confirm('Prepare a coordinated update of every active WebSpider node and the Hub? Running spiders will be asked to checkpoint first; installation begins only after each acknowledges readiness.')) return;
       actionTarget.disabled = true;
@@ -1968,6 +1992,29 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'recovery-claim-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const targetAgentId = String(form.get('target_agent_instance_id') || '');
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!targetAgentId || !button) return;
+    button.disabled = true;
+    try {
+      await api(`/api/v1/recovery/candidates/${encodeURIComponent(event.target.dataset.runtimeId)}:claim`, {
+        method: 'POST',
+        body: {
+          expected_agent_instance_id: event.target.dataset.oldAgentId,
+          target_agent_instance_id: targetAgentId,
+        },
+      });
+      closeModal();
+      await loadData();
+      toast('Live agent reclaimed without starting a duplicate process.');
+      return renderAgent(targetAgentId, 'terminal');
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
+    return;
+  }
   if (event.target.id === 'workspace-upload-form') {
     event.preventDefault();
     if (state.workspaceUploadBusy) return;

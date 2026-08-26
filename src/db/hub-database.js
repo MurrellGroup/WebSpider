@@ -147,6 +147,7 @@ function agentRow(row) {
     instruction_revision: Number(row.instruction_revision || 1),
     codex_session: decode(row.codex_session_json),
     resume_managed_once: bool(row.resume_managed_once),
+    recovery_pending: bool(row.recovery_pending),
     codex_capable: path.basename(String(row.profile_executable || '')).toLowerCase().includes('codex'),
   };
 }
@@ -385,7 +386,8 @@ export class HubDatabase extends EventEmitter {
         custom_instructions TEXT NOT NULL DEFAULT '',
         instruction_revision INTEGER NOT NULL DEFAULT 1,
         codex_session_json TEXT,
-        resume_managed_once INTEGER NOT NULL DEFAULT 0
+        resume_managed_once INTEGER NOT NULL DEFAULT 0,
+        recovery_pending INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS agent_control_tokens (
@@ -695,6 +697,7 @@ export class HubDatabase extends EventEmitter {
     if (!agentColumns.has('instruction_revision')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN instruction_revision INTEGER NOT NULL DEFAULT 1');
     if (!agentColumns.has('codex_session_json')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN codex_session_json TEXT');
     if (!agentColumns.has('resume_managed_once')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN resume_managed_once INTEGER NOT NULL DEFAULT 0');
+    if (!agentColumns.has('recovery_pending')) this.db.exec('ALTER TABLE agent_instances ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 0');
     const fleetColumns = new Set(this.db.prepare('PRAGMA table_info(fleet_updates)').all().map((column) => column.name));
     if (!fleetColumns.has('allowed_task_ids_json')) this.db.exec("ALTER TABLE fleet_updates ADD COLUMN allowed_task_ids_json TEXT NOT NULL DEFAULT '[]'");
     const joinColumns = new Set(this.db.prepare('PRAGMA table_info(join_tokens)').all().map((column) => column.name));
@@ -1603,6 +1606,17 @@ export class HubDatabase extends EventEmitter {
     const current = this.getAgent(id);
     this.appendEvent('agent', id, `agent.${state}.v1`, actor, id, { previous_state: previous.state, ...payload });
     return current;
+  }
+
+  setAgentRecoveryPending(id, pending, actor = 'hub:recovery-reconciler', payload = {}) {
+    const previous = this.getAgent(id);
+    invariant(previous, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    const normalized = Boolean(pending);
+    if (previous.recovery_pending === normalized) return previous;
+    this.db.prepare('UPDATE agent_instances SET recovery_pending = ?, last_activity_at = ? WHERE id = ?')
+      .run(Number(normalized), nowISO(), id);
+    this.appendEvent('agent', id, normalized ? 'agent.recovery.pending.v1' : 'agent.recovery.cleared.v1', actor, id, payload);
+    return this.getAgent(id);
   }
 
   updateAgentWorkStatus(id, status, summary, actor = `agent:${id}`) {

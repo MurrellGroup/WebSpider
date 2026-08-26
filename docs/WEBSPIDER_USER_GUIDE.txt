@@ -207,8 +207,21 @@ Update every WebSpider machine, including the Hub and Master
 Adopting a pre-existing Codex session
     Open the agent's Agent actions menu and choose Adopt Codex session. Select the latest session for that project or enter its UUID/name. WebSpider uses that workstation user's normal Codex session store while keeping WebSpider's compact instructions in an isolated Codex home. It always supplies the registered project directory to `codex resume -C`; the browser never accepts an arbitrary host path. The chosen external session remains associated with that agent until detached from the same dialog.
 
+Hub database lost while remote agents are still running
+    A fresh Hub can semi-manually reclaim live WebSpider-managed processes from surviving nodes. This is an emergency continuity path, not restoration of the old Hub database.
+
+    1. Start the fresh Hub and recreate or add the intended projects.
+    2. For each project, run its normal Sub-Spider connection command inside that project's existing directory on the surviving workstation. If the old node identity is unknown, the installer re-enrolls it without stopping detached agent processes.
+    3. Open Nodes -> Surviving agents. WebSpider holds newly created replacement agents stopped whenever it sees unknown live processes, preventing an automatic duplicate launch.
+    4. Match each old process to the intended inactive project agent and choose Claim. Confirm the old agent ID shown in the panel.
+    5. Inspect the reclaimed terminal and workspace before issuing more work.
+
+    Claim preserves the live PTY, terminal log, workspace, and node-local managed Codex context. It remaps the process to the new Hub agent/terminal, rotates its scoped control credential, re-patches the existing $WEBSPIDER_CONTROL helper, applies the new project policy files, and sends one recovery notice. A later node-level restart continues to use the preserved managed context.
+
+    The old Hub's threads, messages, tasks, reminders, notes, schedules, audit records, and Master portfolio memory are not reconstructed. Only currently running agent processes are offered; an exited/lost process and its otherwise intact node-local Codex session cannot yet be imported into a blank Hub. There is no direct node browser portal while the Hub is unavailable, no automatic standby Hub, and no split-brain failover. Do not run two Hubs against one recovered node.
+
 Disk loss or corrupted state
-    Not covered by restart recovery. Hub state, every node's WebSpider state, and project workspaces require independent backups on other storage. The current package does not yet provide a built-in webspider backup/restore command.
+    Historical restoration is not covered by restart or live-process reclaim. Hub state, every node's WebSpider state, and project workspaces require independent backups on other storage. The current package does not yet provide a built-in webspider backup/restore command.
 
 Direct terminal history
     Node-local terminal logs retain it while the node state survives, but direct keystrokes are not canonical WebSpider thread messages. Use durable messages for instructions you cannot afford to lose.

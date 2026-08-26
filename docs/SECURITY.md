@@ -98,4 +98,5 @@ The built-in tests cover:
 - disk-backed note CRUD, private-by-default visibility, and main-only reads of explicitly visible notes;
 - terminal text-box composition across terminals with and without bracketed-paste mode;
 - persistent worker connection diagnostics and authenticated-online installer verification.
+- owner-authenticated live-process recovery with exact old-agent confirmation, same-node target confinement, no automatic duplicate launch, scoped-token rotation, and audited identity remapping.
 - protected project archive/restore, inactive-work guards, archived-project authority revocation, exact-name permanent metadata deletion, and preservation of workspace files.

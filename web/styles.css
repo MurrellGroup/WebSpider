@@ -353,6 +353,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .data-table th { color: var(--muted-2); text-align: left; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; padding: 9px 10px; border-bottom: 1px solid var(--line); }
 .data-table td { padding: 11px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
 .data-table tr:hover td { background: rgb(255 255 255 / 1.5%); }
+.table-scroll { width: 100%; overflow-x: auto; }
+.recovery-panel { margin-bottom: 18px; }
+.recovery-panel .callout { margin-bottom: 14px; }
+.recovery-panel .callout p, .modal-body .callout p { margin: 7px 0 0; line-height: 1.5; }
 .notes-page { width: 100%; max-width: 1180px; display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 1px; padding: 0; background: var(--line-soft); }
 .notes-list { min-width: 0; background: var(--surface); overflow: auto; }
 .note-row { width: 100%; min-height: 64px; display: grid; gap: 5px; align-content: center; padding: 10px 14px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; cursor: pointer; }

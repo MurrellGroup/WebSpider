@@ -176,6 +176,21 @@ function materializeCodexHome(contextDirectory, renderedInstructions, environmen
   return managedHome;
 }
 
+function writePrivateContextFile(directory, filename, contents, mode) {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = fs.lstatSync(directory);
+  invariant(directoryStat.isDirectory() && !directoryStat.isSymbolicLink(),
+    'WS_RUNTIME_UNAVAILABLE', 'Agent context directory is unsafe.', 409);
+  const temporary = path.join(directory, `.${filename}.${makeId('tmp')}`);
+  try {
+    fs.writeFileSync(temporary, contents, { mode, flag: 'wx' });
+    fs.renameSync(temporary, path.join(directory, filename));
+    fs.chmodSync(path.join(directory, filename), mode);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 function codexExecutable(argv) {
   return Array.isArray(argv) && path.basename(String(argv[0] || '')).toLowerCase().includes('codex');
 }
@@ -204,8 +219,13 @@ export function codexResumeArgv(argv, rootPath, session) {
 }
 
 const CONTROL_SCRIPT = `#!/usr/bin/env node
-const endpoint = process.env.WEBSPIDER_CONTROL_URL;
-const token = process.env.WEBSPIDER_AGENT_TOKEN;
+const fs = require('node:fs');
+const path = require('node:path');
+let recoveredControl = {};
+try { recoveredControl = JSON.parse(fs.readFileSync(path.join(__dirname, 'webspider-control.json'), 'utf8')); } catch {}
+const endpoint = recoveredControl.url || process.env.WEBSPIDER_CONTROL_URL;
+const token = recoveredControl.token || process.env.WEBSPIDER_AGENT_TOKEN;
+const configuredAgent = recoveredControl.agent_instance_id || process.env.WEBSPIDER_AGENT_INSTANCE_ID;
 if (!endpoint || !token) {
   console.error('WebSpider behavior control is not available to this agent.');
   process.exit(2);
@@ -268,7 +288,7 @@ async function main() {
       console.log(JSON.stringify(await request('tasks'), null, 2));
       return;
     }
-    const agent = option('--agent') || process.env.WEBSPIDER_AGENT_INSTANCE_ID;
+    const agent = option('--agent') || configuredAgent;
     const argvJSON = option('--argv-json');
     const title = option('--title');
     const notify = option('--notify');
@@ -527,8 +547,14 @@ main().catch((error) => { console.error(error.message || String(error)); process
 function materializeControl(directory, control) {
   if (!control?.url || !control?.token) return {};
   const scriptPath = path.join(directory, 'webspider-control');
-  fs.writeFileSync(scriptPath, CONTROL_SCRIPT, { mode: 0o700 });
-  fs.chmodSync(scriptPath, 0o700);
+  const configurationPath = path.join(directory, 'webspider-control.json');
+  writePrivateContextFile(directory, 'webspider-control', CONTROL_SCRIPT, 0o700);
+  writePrivateContextFile(directory, 'webspider-control.json', JSON.stringify({
+    url: control.url,
+    token: control.token,
+    agent_instance_id: control.agent_instance_id || null,
+    patched_at: nowISO(),
+  }, null, 2), 0o600);
   return {
     WEBSPIDER_CONTROL: scriptPath,
     WEBSPIDER_CONTROL_URL: control.url,
@@ -536,16 +562,12 @@ function materializeControl(directory, control) {
   };
 }
 
-function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
-  argv = [], environment = {}, agentControl = null, recoveryContext = null, codexSession = null,
-} = {}) {
-  if (!agentInstanceId || !snapshot?.rendered_instructions) return {};
-  const directory = path.join(stateDir, 'agent-context', agentInstanceId);
+function materializePolicyFiles(directory, snapshot) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const rulesPath = path.join(directory, 'PROJECT_RULES.md');
   const policyPath = path.join(directory, 'policy.json');
-  fs.writeFileSync(rulesPath, snapshot.rendered_instructions, { mode: 0o600 });
-  fs.writeFileSync(policyPath, JSON.stringify({
+  writePrivateContextFile(directory, 'PROJECT_RULES.md', snapshot.rendered_instructions, 0o600);
+  writePrivateContextFile(directory, 'policy.json', JSON.stringify({
     id: snapshot.id,
     project_id: snapshot.project_id,
     agent_role: snapshot.agent_role || 'worker',
@@ -553,7 +575,22 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
     policy_revision: snapshot.policy_revision,
     content_hash: snapshot.content_hash,
     policy: snapshot.policy,
-  }, null, 2), { mode: 0o600 });
+  }, null, 2), 0o600);
+  return { rulesPath, policyPath };
+}
+
+function agentContextDirectory(stateDir, agentInstanceId) {
+  invariant(typeof agentInstanceId === 'string' && /^agt_[A-Za-z0-9_-]{1,156}$/.test(agentInstanceId),
+    'WS_VALIDATION', 'Agent context identity is invalid.');
+  return path.join(stateDir, 'agent-context', agentInstanceId);
+}
+
+function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
+  argv = [], environment = {}, agentControl = null, recoveryContext = null, codexSession = null,
+} = {}) {
+  if (!agentInstanceId || !snapshot?.rendered_instructions) return {};
+  const directory = agentContextDirectory(stateDir, agentInstanceId);
+  const { rulesPath, policyPath } = materializePolicyFiles(directory, snapshot);
   const output = {
     WEBSPIDER_PROJECT_RULES: rulesPath,
     WEBSPIDER_PROJECT_POLICY: policyPath,
@@ -565,7 +602,7 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
   };
   if (recoveryContext) {
     const recoveryPath = path.join(directory, 'RECOVERY_CONTEXT.txt');
-    fs.writeFileSync(recoveryPath, recoveryContext, { mode: 0o600 });
+    writePrivateContextFile(directory, 'RECOVERY_CONTEXT.txt', recoveryContext, 0o600);
     output.WEBSPIDER_RECOVERY_CONTEXT = recoveryPath;
   }
   output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment, {
@@ -654,6 +691,7 @@ export class ProcessSupervisor extends EventEmitter {
     const inputFd = fs.openSync(inputFifo, fs.constants.O_RDONLY);
     const outputFd = fs.openSync(outputLog, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
     const previousRuntime = kind === 'agent' ? this.database.getProcessByAgent(agentInstanceId) : null;
+    const agentContextId = previousRuntime?.contextId || agentInstanceId;
     let recoveryContext = null;
     if (previousRuntime && previousRuntime.id !== id && fs.existsSync(previousRuntime.outputLog)) {
       const stat = fs.statSync(previousRuntime.outputLog);
@@ -684,7 +722,7 @@ export class ProcessSupervisor extends EventEmitter {
       : null;
     const requestedCodexSession = codexSession || automaticCodexRecovery;
     const policyEnvironment = kind === 'agent'
-      ? materializePolicyContext(this.stateDir, agentInstanceId, policySnapshot, {
+      ? materializePolicyContext(this.stateDir, agentContextId, policySnapshot, {
         argv, environment, agentControl, recoveryContext, codexSession: requestedCodexSession,
       })
       : {};
@@ -723,6 +761,7 @@ export class ProcessSupervisor extends EventEmitter {
       id,
       kind,
       agentInstanceId,
+      contextId: agentContextId,
       taskId,
       terminalId,
       rootId,
@@ -743,6 +782,34 @@ export class ProcessSupervisor extends EventEmitter {
     this.database.upsertProcess(runtime);
     this.emit('state', { type: 'process.started', runtime });
     return runtime;
+  }
+
+  claimAgentRuntime({
+    runtimeId, expectedAgentInstanceId, agentInstanceId, terminalId, rootId,
+    policySnapshot, agentControl,
+  }) {
+    const runtime = this.database.getProcess(runtimeId);
+    invariant(runtime?.kind === 'agent' && runtime.state === 'running',
+      'WS_RECOVERY_STALE', 'The surviving agent process is no longer running.', 409);
+    invariant(runtime.agentInstanceId === expectedAgentInstanceId,
+      'WS_RECOVERY_STALE', 'The surviving agent identity changed before it could be claimed.', 409);
+    invariant(this.rootService.getRoot(rootId), 'WS_ROOT_NOT_FOUND', 'The recovery target root is unavailable.', 404);
+    const existing = this.database.getProcessByAgent(agentInstanceId);
+    invariant(!existing || existing.id === runtime.id,
+      'WS_RECOVERY_CONFLICT', 'The selected replacement agent already has node-local process history; choose the fresh replacement created for this recovery.', 409);
+    const contextId = runtime.contextId || runtime.agentInstanceId;
+    const contextDirectory = agentContextDirectory(this.stateDir, contextId);
+    materializePolicyFiles(contextDirectory, policySnapshot);
+    materializeControl(contextDirectory, agentControl);
+    const claimed = this.database.claimProcess(runtime.id, {
+      expectedAgentInstanceId,
+      agentInstanceId,
+      terminalId,
+      rootId,
+    });
+    invariant(claimed, 'WS_RECOVERY_STALE', 'The surviving process changed before it could be claimed.', 409);
+    this.emit('state', { type: 'process.claimed', runtime: claimed, previous_agent_instance_id: expectedAgentInstanceId });
+    return claimed;
   }
 
   input(terminalId, bytes) {

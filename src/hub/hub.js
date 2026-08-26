@@ -144,6 +144,7 @@ export class Hub {
     this.database = new HubDatabase(path.join(stateDir, 'webspider.db'));
     this.broker = new NodeBroker(this.database);
     this.agentRuntimes = new Map();
+    this.recoveryCandidates = new Map();
     this.reminderTimers = new Map();
     this.router = new Router();
     this.portalConnections = new Set();
@@ -161,6 +162,8 @@ export class Hub {
             await this.#scheduleFleetUpdateAdvance();
           })
           .catch((error) => this.#logError(error));
+      } else if (event.type === 'node.offline.v1') {
+        this.recoveryCandidates.delete(event.scope_id);
       }
     });
   }
@@ -1171,6 +1174,16 @@ export class Hub {
     }, { agentOnly: true, agentScopes: ['files:transfer'] });
 
     route('GET', '/api/v1/nodes', async () => ({ nodes: this.database.listNodes() }));
+    route('GET', '/api/v1/recovery/candidates', async () => ({ candidates: this.#listRecoveryCandidates() }));
+    route('POST', '/api/v1/recovery/candidates/:id:claim', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      return this.#claimRecoveryCandidate({
+        runtimeId: ctx.params.id,
+        expectedAgentInstanceId: body.expected_agent_instance_id,
+        targetAgentInstanceId: body.target_agent_instance_id,
+        actor: ctx.principal.principal_id,
+      });
+    });
     route('POST', '/api/v1/nodes/join-tokens', async (ctx) => {
       const body = await readJSON(ctx.request);
       const token = randomToken('wsj');
@@ -2088,6 +2101,144 @@ export class Hub {
     return agent;
   }
 
+  #listRecoveryCandidates() {
+    const output = [];
+    for (const [nodeId, runtimes] of this.recoveryCandidates) {
+      const node = this.database.getNode(nodeId);
+      const targets = this.database.listAgents()
+        .filter((agent) => agent.node_id === nodeId && !agent.project_archived_at
+          && agent.recovery_pending && ['stopped', 'failed', 'hibernated', 'starting'].includes(agent.state))
+        .filter((agent) => this.database.listAgentRoots(agent.id).length > 0)
+        .map((agent) => ({
+          id: agent.id,
+          title: agent.title || agent.profile_name,
+          project_id: agent.project_id,
+          project_name: agent.project_name,
+          state: agent.state,
+        }));
+      for (const runtime of runtimes) output.push({
+        ...runtime,
+        node_id: nodeId,
+        node_name: node?.display_name || nodeId,
+        target_agents: targets,
+      });
+    }
+    return output.sort((left, right) => String(right.created_at || '').localeCompare(String(left.created_at || '')));
+  }
+
+  #issueAgentControl(agent) {
+    const token = randomToken('wsa');
+    const scopes = agent.orchestration_role === 'main' ? MAIN_AGENT_CONTROL_SCOPES : WORKER_AGENT_CONTROL_SCOPES;
+    const record = this.database.issueAgentControlToken(agent.id, token, scopes);
+    return {
+      token,
+      control: {
+        url: new URL('/api/v1/agent-control', this.url).href,
+        token,
+        agent_instance_id: agent.id,
+        scopes: record.scopes,
+        expires_at: record.expires_at,
+      },
+    };
+  }
+
+  async #claimRecoveryCandidate({ runtimeId, expectedAgentInstanceId, targetAgentInstanceId, actor }) {
+    const candidate = [...this.recoveryCandidates.values()].flat()
+      .find((runtime) => runtime.id === runtimeId);
+    invariant(candidate, 'WS_RECOVERY_STALE', 'This surviving process is no longer available to claim.', 409);
+    invariant(expectedAgentInstanceId && candidate.agent_instance_id === expectedAgentInstanceId,
+      'WS_CONFIRMATION_REQUIRED', 'Confirm the old agent identity shown in the recovery panel.', 400);
+    let agent = this.database.getAgent(targetAgentInstanceId);
+    invariant(agent, 'WS_NOT_FOUND', 'Recovery target agent not found.', 404);
+    invariant(agent.node_id === candidate.node_id, 'WS_RECOVERY_CONFLICT',
+      'A surviving process can only be claimed by an agent on the same workstation.', 409);
+    invariant(!agent.project_archived_at && agent.recovery_pending
+      && ['stopped', 'failed', 'hibernated', 'starting'].includes(agent.state),
+      'WS_RECOVERY_CONFLICT', 'The selected recovery target is not the inactive replacement held for this recovery.', 409);
+    invariant(this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'The recovery workstation is offline.', 503);
+    const root = this.database.listAgentRoots(agent.id)[0];
+    invariant(root, 'WS_ROOT_NOT_FOUND', 'The selected recovery target has no registered workspace root.', 404);
+    const project = this.database.getProject(agent.project_id);
+    const renderedInstructions = renderProjectInstructions(project, {
+      role: agent.orchestration_role,
+      customInstructions: agent.custom_instructions,
+    });
+    const policySnapshot = this.database.createPolicySnapshot({
+      projectId: project.id,
+      agentInstanceId: agent.id,
+      agentRole: agent.orchestration_role,
+      systemPolicyRevision: project.system_policy_revision,
+      policyRevision: project.policy_revision,
+      policy: project.policy,
+      agentInstructions: agent.custom_instructions,
+      agentInstructionRevision: agent.instruction_revision,
+      renderedInstructions,
+    });
+    const issued = this.#issueAgentControl(agent);
+    let nodeClaimed = false;
+    try {
+      const result = await this.broker.requestTransient(agent.node_id, 'process.claim-agent', {
+        runtime_id: candidate.id,
+        expected_agent_instance_id: candidate.agent_instance_id,
+        agent_instance_id: agent.id,
+        terminal_id: agent.terminal_id,
+        root_id: root.node_root_id,
+        policy_snapshot: policySnapshot,
+        agent_control: issued.control,
+      }, { timeoutMs: 30_000 });
+      nodeClaimed = true;
+      const runtime = result?.runtime;
+      invariant(runtime?.id === candidate.id && runtime.agentInstanceId === agent.id,
+        'WS_RECOVERY_STALE', 'The workstation did not return the expected claimed process.', 409);
+      const remaining = (this.recoveryCandidates.get(agent.node_id) || [])
+        .filter((item) => item.id !== candidate.id);
+      if (remaining.length) this.recoveryCandidates.set(agent.node_id, remaining);
+      else this.recoveryCandidates.delete(agent.node_id);
+      this.agentRuntimes.delete(candidate.agent_instance_id);
+      this.agentRuntimes.set(agent.id, runtime.id);
+      this.database.setTerminalState(agent.terminal_id, 'attached');
+      this.database.setAgentRecoveryPending(agent.id, false, actor, {
+        runtime_id: candidate.id,
+        previous_agent_instance_id: candidate.agent_instance_id,
+      });
+      agent = this.database.setAgentState(agent.id, 'ready', `node:${agent.node_id}`, {
+        recovered: true,
+        recovery_mode: 'claimed_live_process',
+        previous_agent_instance_id: candidate.agent_instance_id,
+        runtime_id: candidate.id,
+      });
+      this.database.audit({
+        actorId: actor,
+        action: 'agent.recovery.claim',
+        targetType: 'agent_instance',
+        targetId: agent.id,
+        projectId: agent.project_id,
+        decision: 'owner_confirmed_live_process_claim',
+        previousState: { agent_instance_id: candidate.agent_instance_id, terminal_id: candidate.terminal_id },
+        newState: { agent_instance_id: agent.id, terminal_id: agent.terminal_id, runtime_id: candidate.id },
+      });
+      const recovery = this.database.createMessage({
+        threadId: agent.active_thread_id,
+        actorId: `trigger:hub-recovery:${candidate.id}`,
+        deliveryRole: 'user',
+        displaySender: 'WebSpider Hub recovery',
+        contentParts: [{
+          type: 'text',
+          text: `The owner reclaimed this still-running process after its prior Hub state became unavailable. Your new WebSpider agent identity is ${agent.id}. The live terminal, node-local WebSpider context, and workspace were preserved, but prior Hub messages and tasks were not recovered. Use the existing $WEBSPIDER_CONTROL helper for new-Hub controls; WebSpider re-patched that helper. Reconcile current work before starting anything twice, then continue from the present terminal state.`,
+        }],
+        wakePolicy: 'ensure_running',
+        idempotencyKey: `hub-recovery:${candidate.id}:${agent.id}`,
+        traceId: makeId('trc'),
+        hopCount: 1,
+      });
+      if (!recovery.duplicate) queueMicrotask(() => this.#dispatchMessage(recovery.message.id).catch((error) => this.#logError(error)));
+      return { claimed: true, candidate, agent };
+    } catch (error) {
+      if (!nodeClaimed && error.code !== 'WS_NODE_OFFLINE') this.database.revokeAgentControlTokens(agent.id);
+      throw error;
+    }
+  }
+
   async #startShellTab(agentId, label, actor) {
     const agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
@@ -2120,6 +2271,8 @@ export class Hub {
   async #wakeAgent(agentId, actor, { resumeManaged = false } = {}) {
     let agent = this.database.getAgent(agentId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(!agent.recovery_pending, 'WS_RECOVERY_PENDING',
+      'This replacement agent is held to prevent duplicate work. Claim or resolve its surviving process from Nodes first.', 409);
     invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
     if (['ready', 'busy'].includes(agent.state)) return agent;
     const node = this.database.getNode(agent.node_id);
@@ -2147,27 +2300,10 @@ export class Hub {
         agentInstructionRevision: agent.instruction_revision,
         renderedInstructions,
       });
-      let agentControl = null;
-      if (agent.orchestration_role === 'main') {
-        controlToken = randomToken('wsa');
-        const record = this.database.issueAgentControlToken(agent.id, controlToken, MAIN_AGENT_CONTROL_SCOPES);
-        agentControl = {
-          url: new URL('/api/v1/agent-control', this.url).href,
-          token: controlToken,
-          scopes: record.scopes,
-          expires_at: record.expires_at,
-        };
-      } else {
-        this.database.revokeAgentControlTokens(agent.id);
-        controlToken = randomToken('wsa');
-        const record = this.database.issueAgentControlToken(agent.id, controlToken, WORKER_AGENT_CONTROL_SCOPES);
-        agentControl = {
-          url: new URL('/api/v1/agent-control', this.url).href,
-          token: controlToken,
-          scopes: record.scopes,
-          expires_at: record.expires_at,
-        };
-      }
+      if (agent.orchestration_role !== 'main') this.database.revokeAgentControlTokens(agent.id);
+      const issued = this.#issueAgentControl(agent);
+      controlToken = issued.token;
+      const agentControl = issued.control;
       const started = await this.broker.request(agent.node_id, 'process.start-agent', {
         agent_instance_id: agent.id,
         terminal_id: agent.terminal_id,
@@ -2214,11 +2350,26 @@ export class Hub {
 
   async #reconcileNode(nodeId, runtimeInventory, connectionEpoch) {
     const agents = this.database.listAgents().filter((agent) => agent.node_id === nodeId);
+    const knownAgentIds = new Set(agents.map((agent) => agent.id));
     for (const agent of agents) this.agentRuntimes.delete(agent.id);
     const runningAgentRuntimes = runtimeInventory
       .filter((runtime) => runtime.kind === 'agent' && runtime.state === 'running' && runtime.agent_instance_id);
+    const orphanedRuntimes = runningAgentRuntimes
+      .filter((runtime) => !knownAgentIds.has(runtime.agent_instance_id))
+      .map((runtime) => ({ ...runtime, node_id: nodeId }));
+    if (orphanedRuntimes.length) this.recoveryCandidates.set(nodeId, orphanedRuntimes);
+    else {
+      this.recoveryCandidates.delete(nodeId);
+      for (const agent of agents.filter((candidate) => candidate.recovery_pending)) {
+        this.database.setAgentRecoveryPending(agent.id, false, 'hub:recovery-reconciler', {
+          reason: 'no_surviving_unknown_runtime', connection_epoch: connectionEpoch,
+        });
+      }
+    }
     const runningAgents = new Set(runningAgentRuntimes.map((runtime) => runtime.agent_instance_id));
-    for (const runtime of runningAgentRuntimes) this.agentRuntimes.set(runtime.agent_instance_id, runtime.id);
+    for (const runtime of runningAgentRuntimes) {
+      if (knownAgentIds.has(runtime.agent_instance_id)) this.agentRuntimes.set(runtime.agent_instance_id, runtime.id);
+    }
     for (let agent of agents) {
       if (agent.project_archived_at) {
         if (runningAgents.has(agent.id)) {
@@ -2245,6 +2396,17 @@ export class Hub {
       if (!['ready', 'busy', 'starting'].includes(agent.state)) continue;
       const previousState = agent.state;
       if (previousState === 'starting') {
+        if (orphanedRuntimes.length) {
+          this.database.setTerminalState(agent.terminal_id, 'detached');
+          this.database.setAgentRecoveryPending(agent.id, true, 'hub:recovery-reconciler', {
+            recovery_candidate_count: orphanedRuntimes.length,
+          });
+          this.database.setAgentState(agent.id, 'stopped', 'hub:recovery-reconciler', {
+            reason: 'surviving_unknown_runtime_requires_owner_claim',
+            recovery_candidate_count: orphanedRuntimes.length,
+          });
+          continue;
+        }
         try {
           await this.#wakeAgent(agent.id, 'hub:initial-worker-start');
         } catch (error) {
@@ -2403,6 +2565,32 @@ export class Hub {
     if (!event?.type) return;
     const data = event.payload || {};
     const runtime = data.runtime || {};
+    const runtimeAgent = runtime.kind === 'agent' && runtime.agentInstanceId
+      ? this.database.getAgent(runtime.agentInstanceId)
+      : null;
+    if (runtime.kind === 'agent' && runtime.agentInstanceId && !runtimeAgent) {
+      if (['process.completed', 'process.lost'].includes(event.type)) {
+        const remaining = (this.recoveryCandidates.get(nodeId) || []).filter((item) => item.id !== runtime.id);
+        if (remaining.length) this.recoveryCandidates.set(nodeId, remaining);
+        else {
+          this.recoveryCandidates.delete(nodeId);
+          for (const agent of this.database.listAgents().filter((candidate) => candidate.node_id === nodeId && candidate.recovery_pending)) {
+            this.database.setAgentRecoveryPending(agent.id, false, 'hub:recovery-reconciler', {
+              reason: 'last_surviving_unknown_runtime_ended', runtime_id: runtime.id,
+            });
+          }
+        }
+      }
+      this.database.appendEvent('node', nodeId, `runtime.orphan.${event.type.replace('process.', '')}.v1`,
+        `node:${nodeId}`, runtime.id || nodeId, {
+          node_id: nodeId,
+          connection_epoch: epoch,
+          old_agent_instance_id: runtime.agentInstanceId,
+          runtime_id: runtime.id,
+          exit_status: data.exit_status,
+        });
+      return;
+    }
     if (event.type === 'process.started') {
       if (runtime.terminalId) this.database.setTerminalState(runtime.terminalId, 'attached');
       if (runtime.agentInstanceId && runtime.kind === 'agent') {

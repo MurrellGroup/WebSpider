@@ -169,6 +169,8 @@ export class NodeDaemon extends EventEmitter {
           agent_instance_id: runtime.agentInstanceId,
           task_id: runtime.taskId,
           terminal_id: runtime.terminalId,
+          root_id: runtime.rootId,
+          executable: path.basename(String(runtime.argv?.[0] || '')),
           state: runtime.state,
           created_at: runtime.createdAt,
         })),
@@ -382,6 +384,18 @@ export class NodeDaemon extends EventEmitter {
           codexSession: payload.codex_session,
         });
         return { runtime };
+      }
+      case 'process.claim-agent': {
+        const runtime = this.supervisor.claimAgentRuntime({
+          runtimeId: payload.runtime_id,
+          expectedAgentInstanceId: payload.expected_agent_instance_id,
+          agentInstanceId: payload.agent_instance_id,
+          terminalId: payload.terminal_id,
+          rootId: payload.root_id,
+          policySnapshot: payload.policy_snapshot,
+          agentControl: payload.agent_control,
+        });
+        return { runtime, claimed: true };
       }
       case 'process.stop-agent': {
         const runtime = this.database.getProcessByAgent(payload.agent_instance_id);
