@@ -100,8 +100,14 @@ test('mobile navigation keeps project actions available and More opens the navig
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
   assert.doesNotMatch(styles, /header-actions button:not\(\.mobile-primary\).*display: none/);
   assert.doesNotMatch(styles, /header-actions \.action-menu.*display: none/);
-  assert.match(app, /if \(action === 'show-more'\).*mobile-open/s);
+  assert.match(app, /if \(action === 'show-more'\).*openMobileSidebar/s);
   assert.match(app, /function closeMobileSidebar\(\)/);
+  assert.match(app, /function openMobileSidebar\(/);
+  assert.match(page, /data-action="close-mobile-agents"/);
+  assert.match(page, /data-action="mobile-agents" aria-controls="agent-navigation" aria-expanded="false"/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.sidebar \{[^}]*position: fixed;[^}]*inset: 0;[^}]*height: 100dvh;/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.sidebar \.project-tree \{[^}]*overflow-y: auto;/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.main-view \{[^}]*height: calc\(100dvh[^}]*overflow-y: auto;/);
 });
 
 test('archived projects have a dedicated restore and guarded-delete view', () => {

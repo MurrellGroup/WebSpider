@@ -62,6 +62,7 @@ input, textarea, select { background: #0d1119; color: var(--text); border: 1px s
 .brand span { color: var(--muted-2); font-size: 10px; margin-top: 4px; letter-spacing: .08em; text-transform: uppercase; }
 .connection-dot { width: 8px; height: 8px; background: var(--muted-2); border-radius: 50%; margin-left: auto; box-shadow: 0 0 0 4px rgb(255 255 255 / 3%); }
 .connection-dot.live { background: var(--mint); box-shadow: 0 0 0 4px rgb(142 240 199 / 9%); }
+.mobile-sidebar-close { display: none; }
 .nav-master { margin: 13px 10px 5px; padding: 10px 11px; display: flex; gap: 10px; text-align: left; border: 0; border-radius: 9px; background: transparent; cursor: pointer; }
 .nav-master:hover, .nav-master.selected { background: var(--surface-2); }
 .nav-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: rgb(142 240 199 / 8%); color: var(--mint); }
@@ -428,15 +429,20 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 
 @media (max-width: 760px) {
-  body { overflow: auto; }
-  .login-view { grid-template-columns: 1fr; }
+  body { overflow: hidden; }
+  .login-view { grid-template-columns: 1fr; overflow-y: auto; }
   .login-mark { display: none; }
   .login-panel { width: calc(100% - 40px); }
-  .app-shell { display: block; height: auto; min-height: 100vh; }
-  .sidebar { display: none; position: fixed; inset: 0 18% 58px 0; z-index: 25; box-shadow: var(--shadow); }
+  .app-shell { display: block; height: 100vh; height: 100dvh; min-height: 0; }
+  .sidebar { display: none; position: fixed; inset: 0; z-index: 40; width: 100%; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; box-shadow: var(--shadow); }
   .sidebar.mobile-open { display: flex; }
-  .main-view { min-height: 100vh; padding-bottom: 58px; }
-  .mobile-nav { display: grid; position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; grid-template-columns: repeat(5, 1fr); height: 58px; padding-bottom: env(safe-area-inset-bottom); background: rgb(13 17 24 / 96%); border-top: 1px solid var(--line); backdrop-filter: blur(16px); }
+  .sidebar .brand { flex: 0 0 68px; padding-top: env(safe-area-inset-top); height: calc(68px + env(safe-area-inset-top)); }
+  .sidebar .project-tree { min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .sidebar .sidebar-footer { flex: 0 0 auto; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+  .mobile-sidebar-close { display: grid; place-items: center; flex: 0 0 40px; width: 40px; height: 40px; margin-left: 4px; border: 0; border-radius: 8px; background: var(--surface-2); color: var(--text); font-size: 25px; line-height: 1; cursor: pointer; }
+  .sidebar .connection-dot { margin-left: auto; }
+  .main-view { height: calc(100vh - 58px - env(safe-area-inset-bottom)); height: calc(100dvh - 58px - env(safe-area-inset-bottom)); min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; padding-bottom: 0; }
+  .mobile-nav { display: grid; position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; grid-template-columns: repeat(5, 1fr); height: calc(58px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); background: rgb(13 17 24 / 96%); border-top: 1px solid var(--line); backdrop-filter: blur(16px); }
   .mobile-nav button { border: 0; background: transparent; color: var(--muted); display: grid; place-items: center; align-content: center; gap: 2px; font-size: 8px; }
   .mobile-nav button span { color: #c7d0d8; font-size: 15px; }
   .page-header { min-height: 68px; padding: 12px 14px 10px; align-items: flex-start; flex-wrap: wrap; }
@@ -462,7 +468,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .structure-mode-group .structure-toggle { flex: 1; }
   .structure-viewport { min-height: 420px; }
   .metadata-grid { grid-template-columns: 120px 1fr; }
-  .terminal-shell { min-height: calc(100vh - 180px); }
+  .terminal-shell { min-height: calc(100dvh - 180px); }
   .terminal-layout[data-view="split"] { grid-template-columns: 1fr; grid-template-rows: minmax(280px, 1fr) minmax(280px, 1fr); }
   .terminal-layout[data-view="split"] .terminal-output { border-right: 0; border-bottom: 1px solid #202733; }
   .terminal-toolbar > span { display: none; }

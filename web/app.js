@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.22';
+const PORTAL_VERSION = '0.6.23';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -267,7 +267,21 @@ function showApp() {
 }
 
 function closeMobileSidebar() {
-  $('.sidebar')?.classList.remove('mobile-open');
+  const sidebar = $('.sidebar');
+  sidebar?.classList.remove('mobile-open');
+  const button = $('[data-action="mobile-agents"]');
+  button?.setAttribute('aria-expanded', 'false');
+}
+
+function openMobileSidebar({ focusFooter = false } = {}) {
+  const sidebar = $('.sidebar');
+  if (!sidebar) return;
+  sidebar.classList.add('mobile-open');
+  $('[data-action="mobile-agents"]')?.setAttribute('aria-expanded', 'true');
+  requestAnimationFrame(() => {
+    const target = focusFooter ? $('.sidebar-footer button', sidebar) : $('.agent-link, .project-heading, .nav-master', sidebar);
+    target?.focus({ preventScroll: !focusFooter });
+  });
 }
 
 function showVersionMismatch(hubVersion) {
@@ -1866,12 +1880,15 @@ document.addEventListener('click', async (event) => {
       state.fileShowHidden = !state.fileShowHidden;
       return loadDirectory();
     }
-    if (action === 'mobile-agents') return $('.sidebar').classList.toggle('mobile-open');
+    if (action === 'mobile-agents') {
+      if ($('.sidebar')?.classList.contains('mobile-open')) closeMobileSidebar();
+      else openMobileSidebar();
+      return;
+    }
+    if (action === 'close-mobile-agents') return closeMobileSidebar();
     if (action === 'show-attention') return $('#attention-panel').classList.toggle('mobile-open');
     if (action === 'show-more') {
-      $('.sidebar').classList.add('mobile-open');
-      $('.sidebar-footer')?.scrollIntoView({ block: 'end' });
-      return;
+      return openMobileSidebar({ focusFooter: true });
     }
     if (action === 'archive-project') {
       const projectId = actionTarget.dataset.projectId;
@@ -2206,6 +2223,12 @@ document.addEventListener('visibilitychange', () => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && $('.sidebar')?.classList.contains('mobile-open')) {
+    event.preventDefault();
+    closeMobileSidebar();
+    $('[data-action="mobile-agents"]')?.focus();
+    return;
+  }
   if (event.target.id === 'terminal-compose' && event.key === 'Enter') {
     const action = terminalComposeEnterAction(event, terminalKeyState);
     if (action === 'newline' || action === 'native') return;

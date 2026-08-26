@@ -34,11 +34,12 @@
     </section>
 
     <div id="app-shell" class="app-shell hidden">
-      <aside class="sidebar">
+      <aside id="agent-navigation" class="sidebar">
         <header class="brand">
           <img src="/icon.svg" alt="">
           <div><strong>WebSpider</strong><span>fabric console</span></div>
           <span class="connection-dot" id="connection-dot" title="Live event stream"></span>
+          <button class="mobile-sidebar-close" data-action="close-mobile-agents" type="button" aria-label="Close agent navigation">×</button>
         </header>
         <button class="nav-master selected" data-action="master">
           <span class="nav-icon">⌁</span>
@@ -62,7 +63,7 @@
 
       <nav class="mobile-nav" aria-label="Main navigation">
         <button data-action="master"><span>⌁</span>Master</button>
-        <button data-action="mobile-agents"><span>◉</span>Agents</button>
+        <button data-action="mobile-agents" aria-controls="agent-navigation" aria-expanded="false"><span>◉</span>Agents</button>
         <button data-action="show-tasks"><span>◇</span>Tasks</button>
         <button data-action="show-attention"><span>!</span>Attention</button>
         <button data-action="show-more"><span>•••</span>More</button>
