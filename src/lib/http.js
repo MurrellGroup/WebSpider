@@ -49,7 +49,7 @@ export function parsePositiveInt(value, fallback, maximum = Number.MAX_SAFE_INTE
   return Math.min(parsed, maximum);
 }
 
-export function contentDisposition(filename) {
+export function contentDisposition(filename, disposition = 'attachment') {
   const safe = String(filename).replace(/[\r\n"\\]/g, '_').slice(0, 240) || 'download';
-  return `attachment; filename="${safe}"`;
+  return `${disposition === 'inline' ? 'inline' : 'attachment'}; filename="${safe}"`;
 }

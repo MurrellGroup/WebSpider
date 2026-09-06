@@ -91,6 +91,21 @@ test('one browser editor manages Sub-Spider-only instructions without changing t
   assert.match(app, /if \(parts\[0\] === 'sub-spider-instructions'\) return renderWorkerInstructions\(\)/);
 });
 
+test('team chat is first-class for owners, guests, files, federation, and explicit agent mentions', () => {
+  const guest = fs.readFileSync(path.join(repository, 'web', 'chat.html'), 'utf8');
+  const guestApp = fs.readFileSync(path.join(repository, 'web', 'chat.js'), 'utf8');
+  assert.match(page, /data-action="show-chat"/);
+  assert.match(app, /async function renderChat/);
+  assert.match(app, /All connected chats/);
+  assert.match(app, /use @AgentName to invite an agent/);
+  assert.match(app, /webspider_chat_draft/);
+  assert.match(app, /clipboardData\?\.files/);
+  assert.match(guest, /class="chat-shell"/);
+  assert.match(guestApp, /clipboardData\?\.files/);
+  assert.match(guestApp, /Attachments are limited to 20 MiB/);
+  assert.match(guestApp, /setInterval\(\(\)=>poll\(\),2000\)/);
+});
+
 test('project onboarding uses the current hub route', () => {
   assert.match(page, /data-action="onboard-project" title="Add project"/);
   assert.match(app, /if \(action === 'onboard-project'\) return showProjectOnboarding\(\)/);

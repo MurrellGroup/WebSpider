@@ -45,6 +45,8 @@ const MAIN_AGENT_CONTROL_SCOPES = [
   'reminders:write:self',
   'portfolio:read',
   'notes:read:visible',
+  'chats:read',
+  'chats:write',
   'updates:write:self',
 ];
 const WORKER_AGENT_CONTROL_SCOPES = [
@@ -55,6 +57,8 @@ const WORKER_AGENT_CONTROL_SCOPES = [
   'reminders:write:self',
   'documents:write',
   'files:transfer',
+  'chats:read',
+  'chats:write',
   'updates:write:self',
 ];
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
@@ -130,7 +134,7 @@ export class Hub {
     this.fleetUpdateTimer = null;
     this.fleetUpdateAdvancing = null;
     const portalHash = createHash('sha256');
-    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js', 'terminal-drafts.js', 'vendor/molstar-preview.mjs']) {
+    for (const asset of ['index.html', 'app.js', 'styles.css', 'markdown.js', 'random.js', 'terminal-output.js', 'terminal-drafts.js', 'chat.html', 'chat.js', 'chat.css', 'vendor/molstar-preview.mjs']) {
       portalHash.update(fs.readFileSync(path.join(this.webDir, asset)));
     }
     this.portalBuild = portalHash.digest('hex').slice(0, 16);
@@ -138,6 +142,10 @@ export class Hub {
     fs.mkdirSync(path.join(stateDir, 'artifacts'), { recursive: true, mode: 0o700 });
     this.notesDir = path.join(stateDir, 'notes');
     fs.mkdirSync(this.notesDir, { recursive: true, mode: 0o700 });
+    this.chatFilesDir = path.join(stateDir, 'team-chat-files');
+    this.chatLogsDir = path.join(stateDir, 'team-chat-logs');
+    fs.mkdirSync(this.chatFilesDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(this.chatLogsDir, { recursive: true, mode: 0o700 });
     this.ownerTokenPath = path.join(stateDir, 'owner.token');
     ensurePrivateFile(this.ownerTokenPath, ownerToken || randomToken('wso'));
     this.ownerToken = fs.readFileSync(this.ownerTokenPath, 'utf8').trim();
@@ -146,6 +154,11 @@ export class Hub {
     this.agentRuntimes = new Map();
     this.recoveryCandidates = new Map();
     this.reminderTimers = new Map();
+    this.chatMentionDeliveries = new Set();
+    this.chatRateLimits = new Map();
+    this.chatRemoteCursors = new Map();
+    this.chatRemoteTimer = null;
+    this.chatClosing = false;
     this.router = new Router();
     this.portalConnections = new Set();
     this.server = http.createServer((request, response) => this.#handleRequest(request, response));
@@ -181,13 +194,16 @@ export class Hub {
     this.url = this.publicBaseURL || `http://${host}:${address.port}`;
     this.#restoreReminders();
     this.#restoreFleetUpdate();
+    this.#scheduleRemoteChatSync();
     return { url: this.url, ownerToken: this.ownerToken, address };
   }
 
   async close() {
+    this.chatClosing = true;
     for (const timer of this.reminderTimers.values()) clearTimeout(timer);
     this.reminderTimers.clear();
     if (this.fleetUpdateTimer) clearTimeout(this.fleetUpdateTimer);
+    if (this.chatRemoteTimer) clearTimeout(this.chatRemoteTimer);
     this.fleetUpdateTimer = null;
     const closed = new Promise((resolve) => this.server.close(() => resolve()));
     for (const connection of this.portalConnections) connection.close(1001, 'Hub stopping');
@@ -262,6 +278,10 @@ export class Hub {
     route('GET', '/healthz', async () => ({
       status: 'ok', version: this.version, portal_build: this.portalBuild, time: nowISO(),
     }), { auth: false, csrf: false });
+    route('GET', '/chat/:token', async (ctx) => {
+      invariant(this.database.getChatInviteByToken(ctx.params.token), 'WS_NOT_FOUND', 'Chat link is invalid or expired.', 404);
+      this.#serveStatic('/chat.html', ctx.response);
+    }, { auth: false, csrf: false });
     route('POST', '/api/v1/auth/login', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       invariant(typeof body.token === 'string' && secureEqual(body.token, this.ownerToken), 'WS_AUTH_REQUIRED', 'Owner token is invalid.', 401);
@@ -429,6 +449,176 @@ export class Hub {
       this.database.audit({ actorId: ctx.principal.principal_id, action: 'note.delete', targetType: 'note', targetId: note.id, previousState: { title: note.title, visibility: note.visibility } });
       return { deleted: true, id: note.id };
     });
+
+    route('GET', '/api/v1/team-chat/topics', async () => ({ topics: this.database.listChatTopics() }));
+    route('POST', '/api/v1/team-chat/topics', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      return this.database.createChatTopic(body, ctx.principal.principal_id);
+    });
+    route('GET', '/api/v1/team-chat/topics/:id/messages', async (ctx) => {
+      const topic = this.database.getChatTopic(ctx.params.id);
+      invariant(topic, 'WS_NOT_FOUND', 'Chat topic not found.', 404);
+      return {
+        topic,
+        messages: this.database.listChatMessages(topic.id, parsePositiveInt(ctx.url.searchParams.get('after'), 0), 500),
+      };
+    });
+    route('POST', '/api/v1/team-chat/topics/:id/messages', async (ctx) => {
+      const body = await readJSON(ctx.request, 28 * 1024 * 1024);
+      return this.#createChatMessage(ctx.params.id, {
+        actorKind: 'owner', actorId: ctx.principal.principal_id,
+        displayName: body.display_name || 'Owner', body: body.body, uploads: body.attachments,
+      });
+    });
+    route('GET', '/api/v1/team-chat/attachments/:id', async (ctx) => {
+      this.#sendChatAttachment(ctx.response, this.database.getChatAttachment(ctx.params.id));
+    });
+    route('GET', '/api/v1/team-chat/invites', async () => ({ invites: this.database.listChatInvites() }));
+    route('POST', '/api/v1/team-chat/invites', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const topicIds = this.#chatTopicIds(body.topic_ids);
+      const label = this.#chatLabel(body.label, 'Team chat guest');
+      const token = randomToken('wsc');
+      const expiresAt = body.expires_in_days == null ? null
+        : new Date(Date.now() + Math.min(Math.max(Number(body.expires_in_days), 1), 3650) * 86_400_000).toISOString();
+      const invite = this.database.createChatInvite({ token, label, topicIds, canPost: body.can_post !== false, expiresAt });
+      return { ...invite, url: `${this.url}/chat/${encodeURIComponent(token)}` };
+    });
+    route('DELETE', '/api/v1/team-chat/invites/:id', async (ctx) => ({ revoked: this.database.revokeChatInvite(ctx.params.id) }));
+
+    route('GET', '/api/v1/team-chat/federation-tokens', async () => ({ tokens: this.database.listChatFederationTokens() }));
+    route('POST', '/api/v1/team-chat/federation-tokens', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const token = randomToken('wsf');
+      const record = this.database.createChatFederationToken({
+        token, label: this.#chatLabel(body.label, 'Linked WebSpider'), topicIds: this.#chatTopicIds(body.topic_ids),
+      });
+      return { ...record, token, hub_url: this.url };
+    });
+    route('DELETE', '/api/v1/team-chat/federation-tokens/:id', async (ctx) => ({
+      revoked: this.database.revokeChatFederationToken(ctx.params.id),
+    }));
+    route('GET', '/api/v1/team-chat/agent-links', async () => ({ links: this.database.listChatAgentLinks() }));
+    route('POST', '/api/v1/team-chat/agent-links', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(typeof body.agent_instance_id === 'string', 'WS_VALIDATION', 'agent_instance_id is required.');
+      invariant(typeof body.source_id === 'string' || body.source_id == null, 'WS_VALIDATION', 'source_id must identify a chat source.');
+      return { link: this.database.setChatAgentLink({
+        agentInstanceId: body.agent_instance_id, sourceId: body.source_id || 'local', topicId: body.topic_id || null,
+        canPost: body.can_post !== false, enabled: body.enabled !== false,
+      }) };
+    });
+
+    route('GET', '/api/v1/team-chat/remotes', async () => ({ remotes: this.database.listChatRemotes() }));
+    route('POST', '/api/v1/team-chat/remotes', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const baseUrl = this.#chatRemoteURL(body.base_url);
+      const name = this.#chatLabel(body.name, 'Team chat');
+      invariant(typeof body.token === 'string' && /^wsf_[A-Za-z0-9_-]{20,}$/.test(body.token), 'WS_VALIDATION', 'A WebSpider chat federation token is required.');
+      await this.#chatRemoteFetch({ base_url: baseUrl, token: body.token }, 'topics');
+      return this.database.createChatRemote({ name, baseUrl, token: body.token });
+    });
+    route('DELETE', '/api/v1/team-chat/remotes/:id', async (ctx) => ({ deleted: this.database.deleteChatRemote(ctx.params.id) }));
+    route('GET', '/api/v1/team-chat/remotes/:id/topics', async (ctx) => ({
+      ...(await this.#chatRemoteFetch(this.#chatRemote(ctx.params.id), 'topics')),
+      source_id: ctx.params.id,
+    }));
+    route('GET', '/api/v1/team-chat/remotes/:id/topics/:topic/messages', async (ctx) => {
+      const result = await this.#chatRemoteFetch(this.#chatRemote(ctx.params.id),
+        `topics/${encodeURIComponent(ctx.params.topic)}/messages?after=${parsePositiveInt(ctx.url.searchParams.get('after'), 0)}`);
+      this.#cacheRemoteChatMessages(ctx.params.id, ctx.params.topic, result.messages || []);
+      return result;
+    });
+    route('POST', '/api/v1/team-chat/remotes/:id/topics/:topic/messages', async (ctx) => {
+      const body = await readJSON(ctx.request, 28 * 1024 * 1024);
+      const message = await this.#chatRemoteFetch(this.#chatRemote(ctx.params.id),
+        `topics/${encodeURIComponent(ctx.params.topic)}/messages`, {
+          method: 'POST', body: { display_name: body.display_name || 'Owner', body: body.body, attachments: body.attachments || [] },
+        });
+      this.#cacheRemoteChatMessages(ctx.params.id, ctx.params.topic, [message]);
+      return message;
+    });
+    route('GET', '/api/v1/team-chat/remotes/:id/attachments/:attachment', async (ctx) => {
+      const remote = this.#chatRemote(ctx.params.id);
+      this.#sendRemoteChatAttachment(ctx.response, await this.#fetchRemoteChatAttachment(remote, ctx.params.attachment));
+    });
+
+    route('GET', '/api/v1/team-chat/guest/topics', async (ctx) => {
+      const invite = this.#authenticateChatInvite(ctx.request);
+      return {
+        label: invite.label, can_post: invite.can_post, topics: this.#chatTopicsForScope(invite.topic_ids),
+        agents: this.#chatAvailableAgents(invite.topic_ids),
+      };
+    }, { auth: false, csrf: false });
+    route('GET', '/api/v1/team-chat/guest/topics/:id/messages', async (ctx) => {
+      const invite = this.#authenticateChatInvite(ctx.request);
+      this.#assertChatTopicScope(invite.topic_ids, ctx.params.id);
+      return { messages: this.database.listChatMessages(ctx.params.id, parsePositiveInt(ctx.url.searchParams.get('after'), 0), 500) };
+    }, { auth: false, csrf: false });
+    route('POST', '/api/v1/team-chat/guest/topics/:id/messages', async (ctx) => {
+      const invite = this.#authenticateChatInvite(ctx.request);
+      this.#checkChatRate(`guest:${invite.id}`);
+      invariant(invite.can_post, 'WS_FORBIDDEN', 'This chat link is read-only.', 403);
+      this.#assertChatTopicScope(invite.topic_ids, ctx.params.id);
+      const body = await readJSON(ctx.request, 28 * 1024 * 1024);
+      return this.#createChatMessage(ctx.params.id, {
+        actorKind: 'guest', actorId: `chat-guest:${invite.id}`,
+        displayName: body.display_name, body: body.body, uploads: body.attachments,
+      });
+    }, { auth: false, csrf: false });
+    route('GET', '/api/v1/team-chat/guest/attachments/:id', async (ctx) => {
+      const invite = this.#authenticateChatInvite(ctx.request);
+      const attachment = this.database.getChatAttachment(ctx.params.id);
+      invariant(attachment, 'WS_NOT_FOUND', 'Attachment not found.', 404);
+      this.#assertChatTopicScope(invite.topic_ids, attachment.topic_id);
+      this.#sendChatAttachment(ctx.response, attachment);
+    }, { auth: false, csrf: false });
+
+    route('GET', '/api/v1/team-chat/federation/topics', async (ctx) => {
+      const federation = this.#authenticateChatFederation(ctx.request);
+      return { hub_name: 'WebSpider team chat', client_name: federation.label, topics: this.#chatTopicsForScope(federation.topic_ids) };
+    }, { auth: false, csrf: false });
+    route('POST', '/api/v1/team-chat/federation/agents', async (ctx) => {
+      const federation = this.#authenticateChatFederation(ctx.request);
+      const body = await readJSON(ctx.request, 65_536);
+      invariant(Array.isArray(body.agents) && body.agents.length <= 200, 'WS_VALIDATION', 'agents must be a bounded array.');
+      const agents = body.agents.map((agent) => {
+        invariant(agent && typeof agent.id === 'string' && agent.id.length <= 160,
+          'WS_VALIDATION', 'Federated agent ID is invalid.');
+        const displayName = this.#chatLabel(agent.display_name, 'Agent').slice(0, 80);
+        const topicIds = Array.isArray(agent.topic_ids) ? [...new Set(agent.topic_ids)] : [];
+        invariant(topicIds.every((id) => typeof id === 'string'
+          && (federation.topic_ids.length === 0 || federation.topic_ids.includes(id))),
+        'WS_FORBIDDEN', 'Federated agent registration exceeds the credential topic scope.', 403);
+        return { id: agent.id, display_name: displayName, topic_ids: topicIds };
+      });
+      this.database.replaceChatFederatedAgents(federation.id, federation.label, agents);
+      return { registered: agents.length, hub_name: federation.label };
+    }, { auth: false, csrf: false });
+    route('GET', '/api/v1/team-chat/federation/topics/:id/messages', async (ctx) => {
+      const federation = this.#authenticateChatFederation(ctx.request);
+      this.#assertChatTopicScope(federation.topic_ids, ctx.params.id);
+      return { messages: this.database.listChatMessages(ctx.params.id, parsePositiveInt(ctx.url.searchParams.get('after'), 0), 500) };
+    }, { auth: false, csrf: false });
+    route('POST', '/api/v1/team-chat/federation/topics/:id/messages', async (ctx) => {
+      const federation = this.#authenticateChatFederation(ctx.request);
+      this.#checkChatRate(`federation:${federation.id}`);
+      this.#assertChatTopicScope(federation.topic_ids, ctx.params.id);
+      const body = await readJSON(ctx.request, 28 * 1024 * 1024);
+      return this.#createChatMessage(ctx.params.id, {
+        actorKind: body.actor_kind === 'agent' ? 'agent' : 'federation',
+        actorId: `federation:${federation.id}:${String(body.actor_id || 'user').slice(0, 120)}`,
+        displayName: body.actor_kind === 'agent' ? body.display_name : `${body.display_name || 'Owner'} · ${federation.label}`.slice(0, 80),
+        body: body.body, uploads: body.attachments,
+      });
+    }, { auth: false, csrf: false });
+    route('GET', '/api/v1/team-chat/federation/attachments/:id', async (ctx) => {
+      const federation = this.#authenticateChatFederation(ctx.request);
+      const attachment = this.database.getChatAttachment(ctx.params.id);
+      invariant(attachment, 'WS_NOT_FOUND', 'Attachment not found.', 404);
+      this.#assertChatTopicScope(federation.topic_ids, attachment.topic_id);
+      this.#sendChatAttachment(ctx.response, attachment);
+    }, { auth: false, csrf: false });
     route('POST', '/api/v1/projects/onboard', async (ctx) => {
       const body = await readJSON(ctx.request);
       const project = this.database.createProject({
@@ -867,6 +1057,51 @@ export class Hub {
         status: 'cancelled', summary: 'Reminder cancelled before its next delivery.',
       }, ctx.principal.principal_id);
     }, { agentOnly: true, agentScopes: ['reminders:write:self'] });
+
+    route('GET', '/api/v1/agent-control/chats', async (ctx) => ({
+      chats: await this.#agentChatTopics(ctx.principal.agent_instance_id),
+    }), { agentOnly: true, agentScopes: ['chats:read'] });
+    route('GET', '/api/v1/agent-control/chats/:source/:topic/messages', async (ctx) => {
+      const access = this.database.chatAgentAccess(ctx.principal.agent_instance_id, ctx.params.source, ctx.params.topic);
+      invariant(access, 'WS_FORBIDDEN', 'This agent is not linked to that chat topic.', 403);
+      const after = parsePositiveInt(ctx.url.searchParams.get('after'), 0);
+      if (ctx.params.source === 'local') return {
+        messages: this.database.listChatMessages(ctx.params.topic, after, 500),
+      };
+      return this.#chatRemoteFetch(this.#chatRemote(ctx.params.source),
+        `topics/${encodeURIComponent(ctx.params.topic)}/messages?after=${after}`);
+    }, { agentOnly: true, agentScopes: ['chats:read'] });
+    route('POST', '/api/v1/agent-control/chats/:source/:topic/messages', async (ctx) => {
+      const access = this.database.chatAgentAccess(ctx.principal.agent_instance_id, ctx.params.source, ctx.params.topic);
+      invariant(access?.can_post, 'WS_FORBIDDEN', 'This agent cannot post to that chat topic.', 403);
+      const agent = this.database.getAgent(ctx.principal.agent_instance_id);
+      const body = await readJSON(ctx.request, 65_536);
+      if (ctx.params.source === 'local') return this.#createChatMessage(ctx.params.topic, {
+        actorKind: 'agent', actorId: ctx.principal.principal_id, displayName: String(agent.title).slice(0, 80),
+        body: body.body, uploads: [],
+      });
+      const message = await this.#chatRemoteFetch(this.#chatRemote(ctx.params.source),
+        `topics/${encodeURIComponent(ctx.params.topic)}/messages`, {
+          method: 'POST', body: { actor_kind: 'agent', actor_id: agent.id, display_name: String(agent.title).slice(0, 80), body: body.body },
+        });
+      this.#cacheRemoteChatMessages(ctx.params.source, ctx.params.topic, [message]);
+      return message;
+    }, { agentOnly: true, agentScopes: ['chats:write'] });
+    route('GET', '/api/v1/agent-control/chats/:source/attachments/:attachment', async (ctx) => {
+      if (ctx.params.source === 'local') {
+        const attachment = this.database.getChatAttachment(ctx.params.attachment);
+        invariant(attachment, 'WS_NOT_FOUND', 'Chat attachment not found.', 404);
+        invariant(this.database.chatAgentAccess(ctx.principal.agent_instance_id, 'local', attachment.topic_id),
+          'WS_FORBIDDEN', 'This agent cannot access that attachment topic.', 403);
+        this.#sendChatAttachment(ctx.response, attachment);
+        return;
+      }
+      const attachment = await this.#fetchRemoteChatAttachment(this.#chatRemote(ctx.params.source), ctx.params.attachment);
+      invariant(attachment.topic_id && this.database.chatAgentAccess(
+        ctx.principal.agent_instance_id, ctx.params.source, attachment.topic_id,
+      ), 'WS_FORBIDDEN', 'This agent cannot access that attachment topic.', 403);
+      this.#sendRemoteChatAttachment(ctx.response, attachment);
+    }, { agentOnly: true, agentScopes: ['chats:read'] });
 
     route('GET', '/api/v1/agent-control/notes', async () => ({
       notes: this.database.listNotes({ visibility: 'master' }).map((note) => ({
@@ -1845,7 +2080,7 @@ export class Hub {
     this.#securityHeaders(response, requestId);
     try {
       const pathname = new URL(request.url, 'http://webspider.invalid').pathname;
-      if (!pathname.startsWith('/api/') && pathname !== '/healthz') {
+      if (!pathname.startsWith('/api/') && pathname !== '/healthz' && !pathname.startsWith('/chat/')) {
         this.#serveStatic(pathname, response);
         return;
       }
@@ -1906,7 +2141,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'chat.html', 'chat.js', 'chat.css', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
@@ -3213,6 +3448,330 @@ export class Hub {
       destination_path: begun.destination_path,
       sha256: expectedSha256 || digest.digest('hex'),
     }, { timeoutMs: 1_800_000 });
+  }
+
+  #chatLabel(value, fallback) {
+    const label = String(value || fallback).trim();
+    invariant(label.length > 0 && label.length <= 120 && !/[\x00-\x1f\x7f]/u.test(label),
+      'WS_VALIDATION', 'A label of at most 120 printable characters is required.');
+    return label;
+  }
+
+  #chatTopicIds(value) {
+    const ids = value == null ? [] : value;
+    invariant(Array.isArray(ids) && ids.length <= 200 && ids.every((id) => typeof id === 'string'),
+      'WS_VALIDATION', 'topic_ids must be a bounded array.');
+    const unique = [...new Set(ids)];
+    for (const id of unique) invariant(this.database.getChatTopic(id), 'WS_NOT_FOUND', 'Chat topic not found.', 404);
+    return unique;
+  }
+
+  #chatBearer(request) {
+    const authorization = request.headers.authorization || '';
+    return authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  }
+
+  #checkChatRate(key) {
+    const now = Date.now();
+    const recent = (this.chatRateLimits.get(key) || []).filter((time) => now - time < 60_000);
+    invariant(recent.length < 60, 'WS_RATE_LIMITED', 'Too many chat messages; wait a moment and retry.', 429);
+    recent.push(now);
+    this.chatRateLimits.set(key, recent);
+  }
+
+  #authenticateChatInvite(request) {
+    const invite = this.database.getChatInviteByToken(this.#chatBearer(request));
+    invariant(invite, 'WS_AUTH_REQUIRED', 'Chat link is invalid or expired.', 401);
+    return invite;
+  }
+
+  #authenticateChatFederation(request) {
+    const record = this.database.getChatFederationByToken(this.#chatBearer(request));
+    invariant(record, 'WS_AUTH_REQUIRED', 'Chat federation credential is invalid or revoked.', 401);
+    return record;
+  }
+
+  #assertChatTopicScope(topicIds, topicId) {
+    invariant(topicIds.length === 0 || topicIds.includes(topicId), 'WS_FORBIDDEN', 'This credential cannot access that topic.', 403);
+    invariant(this.database.getChatTopic(topicId), 'WS_NOT_FOUND', 'Chat topic not found.', 404);
+  }
+
+  #chatTopicsForScope(topicIds) {
+    const allowed = new Set(topicIds);
+    return this.database.listChatTopics().filter((topic) => !allowed.size || allowed.has(topic.id));
+  }
+
+  #chatAvailableAgents(topicIds) {
+    const allowed = new Set(topicIds);
+    const local = this.database.listChatAgentLinks().filter((link) => ['local', '*'].includes(link.source_id)
+      && (!allowed.size || link.topic_id == null || allowed.has(link.topic_id))).map((link) => {
+        const agent = this.database.getAgent(link.agent_instance_id);
+        return agent ? { id: agent.id, display_name: agent.title, hub_name: null, mention: `@${agent.title}`, topic_ids: link.topic_id ? [link.topic_id] : [] } : null;
+      }).filter(Boolean);
+    const remote = this.database.listChatFederatedAgents().filter((agent) => !allowed.size
+      || !agent.topic_ids.length || agent.topic_ids.some((id) => allowed.has(id)));
+    return [...new Map([...local, ...remote].map((agent) => [`${agent.mention}:${agent.topic_ids.join(',')}`, agent])).values()];
+  }
+
+  #storeChatUploads(topicId, uploads = []) {
+    invariant(Array.isArray(uploads) && uploads.length <= 8, 'WS_VALIDATION', 'A chat message can contain at most 8 files.');
+    let total = 0;
+    const created = [];
+    try {
+      for (const upload of uploads) {
+        invariant(upload && typeof upload === 'object', 'WS_VALIDATION', 'Invalid chat attachment.');
+        const filename = String(upload.filename || 'attachment').normalize('NFC').replace(/[\\/\x00-\x1f\x7f]/gu, '_').slice(0, 180);
+        invariant(filename && typeof upload.data_base64 === 'string' && /^[A-Za-z0-9+/]*={0,2}$/.test(upload.data_base64),
+          'WS_VALIDATION', 'Attachment name and canonical base64 data are required.');
+        const bytes = Buffer.from(upload.data_base64, 'base64');
+        invariant(bytes.length > 0 && bytes.toString('base64') === upload.data_base64,
+          'WS_VALIDATION', 'Attachment data is empty or invalid.');
+        total += bytes.length;
+        invariant(total <= 20 * 1024 * 1024, 'WS_PAYLOAD_TOO_LARGE', 'Chat attachments are limited to 20 MiB per message.', 413);
+        const id = makeId('cha');
+        const storedName = `${id}-${filename}`;
+        const storedPath = path.join(this.chatFilesDir, storedName);
+        fs.writeFileSync(storedPath, bytes, { mode: 0o600, flag: 'wx' });
+        const attachment = this.database.createChatAttachment({
+          id, topicId, filename, storedPath,
+          mimeType: String(upload.mime_type || fileMime(filename)).slice(0, 160),
+          sizeBytes: bytes.length, digest: sha256(bytes),
+        });
+        created.push({
+          id: attachment.id, filename: attachment.filename, mime_type: attachment.mime_type,
+          size_bytes: attachment.size_bytes, sha256: attachment.sha256,
+          path: `team-chat-files/${storedName}`,
+        });
+      }
+      return created;
+    } catch (error) {
+      for (const attachment of created) {
+        fs.rmSync(path.join(this.stateDir, attachment.path), { force: true });
+        this.database.deleteUnattachedChatAttachment(attachment.id);
+      }
+      throw error;
+    }
+  }
+
+  async #createChatMessage(topicId, { actorKind, actorId, displayName, body, uploads = [] }) {
+    const attachments = this.#storeChatUploads(topicId, uploads || []);
+    let message;
+    try {
+      message = this.database.createChatMessage({ topicId, actorKind, actorId, displayName, body, attachments });
+    } catch (error) {
+      for (const attachment of attachments) {
+        fs.rmSync(path.join(this.stateDir, attachment.path), { force: true });
+        this.database.deleteUnattachedChatAttachment(attachment.id);
+      }
+      throw error;
+    }
+    const logPath = path.join(this.chatLogsDir, `${topicId}.jsonl`);
+    fs.appendFileSync(logPath, `${JSON.stringify(message)}\n`, { encoding: 'utf8', mode: 0o600 });
+    queueMicrotask(() => this.#deliverChatMentions('local', topicId, message).catch((error) => this.#logError(error)));
+    return message;
+  }
+
+  #sendChatAttachment(response, attachment) {
+    invariant(attachment && fs.existsSync(attachment.stored_path), 'WS_NOT_FOUND', 'Attachment not found.', 404);
+    const bytes = fs.readFileSync(attachment.stored_path);
+    const inline = /^(image\/(png|jpeg|gif|webp)|application\/pdf)$/i.test(attachment.mime_type);
+    response.writeHead(200, {
+      'content-type': attachment.mime_type,
+      'content-length': bytes.length,
+      'content-disposition': contentDisposition(attachment.filename, inline ? 'inline' : 'attachment'),
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, no-store',
+      'x-webspider-chat-topic': attachment.topic_id,
+    });
+    response.end(bytes);
+  }
+
+  #chatRemoteURL(value) {
+    let parsed;
+    try { parsed = new URL(String(value || '')); } catch { throw new WebSpiderError('WS_VALIDATION', 'A valid remote WebSpider URL is required.'); }
+    invariant(['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password,
+      'WS_VALIDATION', 'Remote WebSpider URL must use HTTP or HTTPS without embedded credentials.');
+    invariant(!parsed.search && !parsed.hash, 'WS_VALIDATION', 'Remote WebSpider URL cannot contain a query or fragment.');
+    return parsed.href.replace(/\/+$/, '');
+  }
+
+  #chatRemote(id) {
+    const remote = this.database.getChatRemote(id, true);
+    invariant(remote, 'WS_NOT_FOUND', 'Linked WebSpider chat not found.', 404);
+    return remote;
+  }
+
+  async #chatRemoteFetch(remote, resource, { method = 'GET', body = null } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(`${remote.base_url}/api/v1/team-chat/federation/${resource}`, {
+        method, signal: controller.signal,
+        headers: { authorization: `Bearer ${remote.token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body || []) {
+        size += chunk.length;
+        invariant(size <= 30 * 1024 * 1024, 'WS_PAYLOAD_TOO_LARGE', 'Linked WebSpider response exceeds 30 MiB.', 413);
+        chunks.push(chunk);
+      }
+      let value = null;
+      try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+      invariant(response.ok, 'WS_CHAT_REMOTE', value?.error?.message || `Linked WebSpider returned HTTP ${response.status}.`, 502);
+      this.database.touchChatRemote(remote.id);
+      return value;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async #fetchRemoteChatAttachment(remote, attachmentId) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(`${remote.base_url}/api/v1/team-chat/federation/attachments/${encodeURIComponent(attachmentId)}`, {
+        headers: { authorization: `Bearer ${remote.token}` }, signal: controller.signal,
+      });
+      invariant(response.ok, 'WS_CHAT_REMOTE', `Linked WebSpider returned HTTP ${response.status}.`, 502);
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body || []) {
+        size += chunk.length;
+        invariant(size <= 20 * 1024 * 1024, 'WS_PAYLOAD_TOO_LARGE', 'Remote chat attachment exceeds 20 MiB.', 413);
+        chunks.push(chunk);
+      }
+      const bytes = Buffer.concat(chunks);
+      return {
+        bytes, topic_id: response.headers.get('x-webspider-chat-topic'),
+        mime_type: response.headers.get('content-type') || 'application/octet-stream',
+        disposition: response.headers.get('content-disposition') || 'attachment',
+      };
+    } finally { clearTimeout(timeout); }
+  }
+
+  #sendRemoteChatAttachment(response, attachment) {
+    response.writeHead(200, {
+      'content-type': attachment.mime_type, 'content-length': attachment.bytes.length,
+      'content-disposition': attachment.disposition, 'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox", 'cache-control': 'private, no-store',
+    });
+    response.end(attachment.bytes);
+  }
+
+  async #agentChatTopics(agentId) {
+    const links = this.database.listChatAgentLinks().filter((link) => link.agent_instance_id === agentId);
+    const output = [];
+    const sourceIds = links.some((link) => link.source_id === '*')
+      ? ['local', ...this.database.listChatRemotes().map((remote) => remote.id)]
+      : [...new Set(links.map((link) => link.source_id))];
+    for (const sourceId of sourceIds) {
+      let topics;
+      let sourceName = 'Local team chat';
+      if (sourceId === 'local') topics = this.database.listChatTopics();
+      else {
+        const remote = this.#chatRemote(sourceId);
+        sourceName = remote.name;
+        try { topics = (await this.#chatRemoteFetch(remote, 'topics')).topics; } catch { continue; }
+      }
+      for (const topic of topics) {
+        const access = this.database.chatAgentAccess(agentId, sourceId, topic.id);
+        if (access) output.push({ source_id: sourceId, source_name: sourceName, ...topic, can_post: access.can_post });
+      }
+    }
+    return output;
+  }
+
+  #cacheRemoteChatMessages(remoteId, topicId, messages) {
+    for (const message of messages) {
+      if (!this.database.cacheChatRemoteMessage(remoteId, topicId, message)) continue;
+      const logPath = path.join(this.chatLogsDir, `remote-${sha256(`${remoteId}:${topicId}`).slice(0, 24)}.jsonl`);
+      fs.appendFileSync(logPath, `${JSON.stringify(message)}\n`, { encoding: 'utf8', mode: 0o600 });
+    }
+  }
+
+  #mentionedAgent(message, agent, sourceName = null) {
+    const escaped = String(agent.title || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!escaped) return false;
+    const suffix = sourceName ? `(?:@${String(sourceName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})?` : '';
+    return new RegExp(`(^|\\s)@${escaped}${suffix}(?=$|\\s|[.,!?;:])`, 'iu').test(message.body || '');
+  }
+
+  async #deliverChatMentions(sourceId, topicId, message, sourceName = null) {
+    const links = this.database.listChatAgentLinks().filter((link) => (link.source_id === sourceId || link.source_id === '*')
+      && (link.topic_id == null || link.topic_id === topicId));
+    for (const link of links) {
+      const key = `${sourceId}:${message.id}:${link.agent_instance_id}`;
+      if (this.chatMentionDeliveries.has(key)) continue;
+      const agent = this.database.getAgent(link.agent_instance_id);
+      if (!agent || message.actor_id === `agent:${agent.id}` || !this.#mentionedAgent(message, agent, sourceName)) continue;
+      const created = this.database.createMessage({
+        threadId: agent.active_thread_id,
+        actorId: `team-chat:${sourceId}:${message.actor_id}`,
+        deliveryRole: 'user', displaySender: `${message.display_name} in team chat`,
+        contentParts: [{ type: 'text', text: `[WebSpider team-chat mention]\nTopic: ${topicId}\nMessage ID: ${message.id}\n${message.body}\n\nReply in the same chat with: "$WEBSPIDER_CONTROL chats send --source ${sourceId} --topic ${topicId} --message '…'". Your reply will appear under your agent name.` }],
+        wakePolicy: 'ensure_running', idempotencyKey: `chat-mention:${sourceId}:${message.id}`,
+      });
+      this.chatMentionDeliveries.add(key);
+      if (!created.duplicate) queueMicrotask(() => this.#dispatchMessage(created.message.id).catch((error) => this.#logError(error)));
+    }
+  }
+
+  #scheduleRemoteChatSync() {
+    if (this.chatClosing) return;
+    if (this.chatRemoteTimer) clearTimeout(this.chatRemoteTimer);
+    this.chatRemoteTimer = setTimeout(async () => {
+      try { await this.#syncRemoteChats(); } catch (error) { this.#logError(error); }
+      this.#scheduleRemoteChatSync();
+    }, 4_000);
+    this.chatRemoteTimer.unref?.();
+  }
+
+  async #syncRemoteChats() {
+    const allLinks = this.database.listChatAgentLinks();
+    const remoteIds = this.database.listChatRemotes().map((remote) => remote.id);
+    const links = allLinks.flatMap((link) => link.source_id === '*'
+      ? remoteIds.map((sourceId) => ({ ...link, source_id: sourceId }))
+      : link.source_id === 'local' ? [] : [link]);
+    for (const sourceId of [...new Set(links.map((link) => link.source_id))]) {
+      const remote = this.database.getChatRemote(sourceId, true);
+      if (!remote) continue;
+      let index;
+      try { index = await this.#chatRemoteFetch(remote, 'topics'); } catch { continue; }
+      const topics = index.topics || [];
+      const registrations = [];
+      for (const agentId of [...new Set(links.filter((link) => link.source_id === sourceId).map((link) => link.agent_instance_id))]) {
+        const agent = this.database.getAgent(agentId);
+        if (!agent) continue;
+        const agentLinks = links.filter((link) => link.source_id === sourceId && link.agent_instance_id === agentId);
+        registrations.push({
+          id: agent.id, display_name: agent.title,
+          topic_ids: agentLinks.some((link) => link.topic_id == null) ? [] : [...new Set(agentLinks.map((link) => link.topic_id))],
+        });
+      }
+      try { await this.#chatRemoteFetch(remote, 'agents', { method: 'POST', body: { agents: registrations } }); } catch { continue; }
+      for (const topic of topics) {
+        if (!links.some((link) => link.source_id === sourceId && (link.topic_id == null || link.topic_id === topic.id))) continue;
+        const cursorKey = `${sourceId}:${topic.id}`;
+        let persistedCursor = this.database.getChatRemoteCursor(sourceId, topic.id);
+        if (persistedCursor == null) {
+          persistedCursor = Number(topic.last_sequence || 0);
+          this.database.setChatRemoteCursor(sourceId, topic.id, persistedCursor);
+          this.chatRemoteCursors.set(cursorKey, persistedCursor);
+          continue;
+        }
+        const after = Math.max(persistedCursor, this.chatRemoteCursors.get(cursorKey) || 0);
+        const result = await this.#chatRemoteFetch(remote, `topics/${encodeURIComponent(topic.id)}/messages?after=${after}`);
+        this.#cacheRemoteChatMessages(sourceId, topic.id, result.messages || []);
+        for (const message of result.messages || []) {
+          await this.#deliverChatMentions(sourceId, topic.id, message, index.client_name || null);
+          this.chatRemoteCursors.set(cursorKey, Math.max(this.chatRemoteCursors.get(cursorKey) || after, Number(message.sequence)));
+          this.database.setChatRemoteCursor(sourceId, topic.id, Number(message.sequence));
+        }
+      }
+    }
   }
 
   #noteTitle(value) {

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111827">
+    <title>Team chat</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/chat.css">
+    <script type="module" src="/chat.js"></script>
+  </head>
+  <body>
+    <div class="chat-shell">
+      <aside class="chat-sidebar">
+        <header><img src="/icon.svg" alt=""><div><strong>Team chat</strong><small id="invite-label">WebSpider</small></div></header>
+        <nav id="topics" aria-label="Chat topics"></nav>
+        <footer><div id="available-agents" class="available-agents"></div><label>Your name<input id="display-name" maxlength="80" autocomplete="name"></label></footer>
+      </aside>
+      <main class="chat-main">
+        <header class="chat-head"><button id="topics-toggle" aria-label="Show topics">☰</button><div><h1 id="topic-name">Team chat</h1><p id="topic-description"></p></div></header>
+        <section id="messages" class="messages" aria-live="polite"><div class="empty">Opening chat…</div></section>
+        <div id="attachment-drafts" class="attachment-drafts hidden"></div>
+        <form id="composer" class="composer">
+          <input id="file-input" type="file" multiple hidden>
+          <button type="button" id="attach" title="Attach files">＋</button>
+          <textarea id="message" rows="1" maxlength="20000" placeholder="Message the team" aria-label="Message"></textarea>
+          <button type="submit" class="send">Send</button>
+        </form>
+      </main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+  </body>
+</html>

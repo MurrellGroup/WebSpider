@@ -245,6 +245,16 @@ async function request(resource, method = 'GET', body) {
   }
   return value;
 }
+async function download(resource, output) {
+  const response = await fetch(base + '/' + resource, { headers: { authorization: 'Bearer ' + token } });
+  if (!response.ok) {
+    let value = {}; try { value = await response.json(); } catch {}
+    console.error(value.error?.message || 'WebSpider chat download failed.'); process.exit(1);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  fs.writeFileSync(output, bytes, { mode: 0o600, flag: 'wx' });
+  return { path: output, size_bytes: bytes.length };
+}
 function option(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
@@ -260,10 +270,11 @@ async function main() {
     || (resource === 'reminders' && ['list', 'add', 'cancel'].includes(action))
     || (resource === 'portfolio' && action === 'list')
     || (resource === 'notes' && ['list', 'show'].includes(action))
+    || (resource === 'chats' && ['list', 'read', 'send', 'download'].includes(action))
     || (resource === 'updates' && action === 'ready')
     || resource === 'report';
   if (!valid) {
-    console.error('Usage: webspider-control portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | agents choose --agent ID --option 1..9 | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | updates ready --rollout ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
+    console.error('Usage: webspider-control chats list | chats read --source ID --topic ID [--after N] | chats send --source ID --topic ID (--message TEXT | --file PATH) | chats download --source ID --attachment ID --output PATH | portfolio list | notes list | notes show --note ID | agents list | agents send --agent ID (--message TEXT | --file PATH) [--wake ensure_running|queue_only|interrupt] | agents choose --agent ID --option 1..9 | files targets | files send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] [--transfer-id ID] | documents send (--agent ID | --master) --file PATH [--name FILENAME] [--instruction TEXT] [--wake ensure_running|queue_only|interrupt] | tasks list | tasks run [--agent ID] --argv-json JSON [--title TEXT] [--delay-seconds N] [--notify self|master|none] [--completion-message TEXT] | reminders list | reminders add (--message TEXT | --file PATH) [--title TEXT] [--delay-seconds N] [--every-seconds N] [--max-runs N] [--target self|master] | reminders cancel --reminder ID | updates ready --rollout ID | report --status idle|working|blocked|completed (--summary TEXT | --file PATH) [--notify-master] | policy show | policy patch --scope project|system --json JSON --reason TEXT | usage show | usage report --weekly-remaining PERCENT [--resets-at ISO] [--weekly-tokens COUNT] [--source codex-status]');
     process.exit(2);
   }
   if (resource === 'portfolio') {
@@ -281,6 +292,52 @@ async function main() {
       process.exit(2);
     }
     console.log(JSON.stringify(await request('notes/' + encodeURIComponent(note)), null, 2));
+    return;
+  }
+  if (resource === 'chats') {
+    if (action === 'list') {
+      console.log(JSON.stringify(await request('chats'), null, 2));
+      return;
+    }
+    const source = option('--source');
+    const topic = option('--topic');
+    if (action === 'download') {
+      const attachment = option('--attachment');
+      const outputOption = option('--output');
+      if (!source || !attachment || !outputOption) {
+        console.error('chats download requires --source ID, --attachment ID, and --output PATH'); process.exit(2);
+      }
+      const absolute = path.resolve(outputOption);
+      const workspace = path.resolve(process.env.WEBSPIDER_WORKSPACE_ROOT || process.cwd());
+      const relative = path.relative(workspace, absolute);
+      if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) {
+        console.error('--output must be a new file inside this agent workspace'); process.exit(2);
+      }
+      fs.mkdirSync(path.dirname(absolute), { recursive: true, mode: 0o700 });
+      console.log(JSON.stringify(await download('chats/' + encodeURIComponent(source) + '/attachments/' + encodeURIComponent(attachment), absolute), null, 2));
+      return;
+    }
+    if (!source || !topic) {
+      console.error('chats read/send requires --source ID and --topic ID');
+      process.exit(2);
+    }
+    if (action === 'read') {
+      const after = Number(option('--after') || 0);
+      if (!Number.isInteger(after) || after < 0) {
+        console.error('--after must be a non-negative message sequence');
+        process.exit(2);
+      }
+      console.log(JSON.stringify(await request('chats/' + encodeURIComponent(source) + '/' + encodeURIComponent(topic) + '/messages?after=' + after), null, 2));
+      return;
+    }
+    const messageOption = option('--message');
+    const file = option('--file');
+    if ((!messageOption && !file) || (messageOption && file)) {
+      console.error('chats send requires exactly one of --message TEXT or --file PATH');
+      process.exit(2);
+    }
+    const message = file ? fs.readFileSync(file, 'utf8') : messageOption;
+    console.log(JSON.stringify(await request('chats/' + encodeURIComponent(source) + '/' + encodeURIComponent(topic) + '/messages', 'POST', { body: message }), null, 2));
     return;
   }
   if (resource === 'tasks') {

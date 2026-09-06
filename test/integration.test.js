@@ -18,6 +18,94 @@ import { WEBSPIDER_VERSION } from '../src/lib/self-update.js';
 
 const execFileAsync = promisify(execFile);
 
+test('shareable team chat logs messages and files and routes explicit agent mentions', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-team-chat-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_chat', publicKey: identity.publicKey, workspace });
+  const listening = await hub.listen();
+  t.after(async () => { await hub.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+
+  const topicResult = await jsonFetch(`${listening.url}/api/v1/team-chat/topics`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Protein team' }),
+  });
+  assert.equal(topicResult.response.status, 200);
+  const topic = topicResult.body;
+  hub.database.setChatAgentLink({ agentInstanceId: bootstrap.agent.id, topicId: topic.id });
+  const inviteResult = await jsonFetch(`${listening.url}/api/v1/team-chat/invites`, listening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'Lab', topic_ids: [topic.id] }),
+  });
+  const inviteToken = decodeURIComponent(inviteResult.body.url.split('/').at(-1));
+  const chatPage = await fetch(inviteResult.body.url);
+  assert.equal(chatPage.status, 200);
+  assert.match(await chatPage.text(), /Team chat/);
+  const posted = await fetch(`${listening.url}/api/v1/team-chat/guest/topics/${topic.id}/messages`, {
+    method: 'POST', headers: { authorization: `Bearer ${inviteToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      display_name: 'Researcher', body: `@${bootstrap.agent.title} inspect this image`,
+      attachments: [{ filename: 'plot.png', mime_type: 'image/png', data_base64: Buffer.from('png-test').toString('base64') }],
+    }),
+  });
+  assert.equal(posted.status, 200);
+  const message = await posted.json();
+  assert.equal(message.attachments[0].path.startsWith('team-chat-files/'), true);
+  assert.equal(fs.existsSync(path.join(directory, 'hub', message.attachments[0].path)), true);
+  assert.equal(fs.readFileSync(path.join(directory, 'hub', 'team-chat-logs', `${topic.id}.jsonl`), 'utf8').includes(message.id), true);
+  const chatAgentToken = 'wsa_chat_attachment_reader';
+  hub.database.issueAgentControlToken(bootstrap.agent.id, chatAgentToken, ['chats:read', 'chats:write']);
+  const attachment = await fetch(`${listening.url}/api/v1/agent-control/chats/local/attachments/${message.attachments[0].id}`, {
+    headers: { authorization: `Bearer ${chatAgentToken}` },
+  });
+  assert.equal(attachment.status, 200);
+  assert.equal(Buffer.from(await attachment.arrayBuffer()).toString(), 'png-test');
+  await waitUntil(() => hub.database.listMessages(bootstrap.agent.active_thread_id)
+    .some((item) => item.idempotency_key === `chat-mention:local:${message.id}`));
+});
+
+test('linked WebSpiders route scoped mentions and agent replies without owner or SSH credentials', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-chat-federation-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const host = new Hub({ stateDir: path.join(directory, 'host'), listenPort: 0 });
+  const receiver = new Hub({ stateDir: path.join(directory, 'receiver'), listenPort: 0 });
+  const receiverAgent = receiver.bootstrapLocal({
+    nodeId: 'nod_receiver_chat', publicKey: generateNodeIdentity().publicKey, workspace,
+  }).agent;
+  const hostListening = await host.listen();
+  const receiverListening = await receiver.listen();
+  t.after(async () => {
+    await receiver.close(); await host.close(); fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const topic = host.database.createChatTopic({ name: 'Federated work' });
+  const federationToken = 'wsf_federated_integration_credential';
+  host.database.createChatFederationToken({ token: federationToken, label: 'RemoteLab', topicIds: [topic.id] });
+  const remote = receiver.database.createChatRemote({ name: 'Central Lab', baseUrl: hostListening.url, token: federationToken });
+  receiver.database.setChatAgentLink({ agentInstanceId: receiverAgent.id, sourceId: remote.id, topicId: topic.id });
+  await waitUntil(() => receiver.database.getChatRemoteCursor(remote.id, topic.id) != null, 7_000);
+
+  const posted = await jsonFetch(`${hostListening.url}/api/v1/team-chat/topics/${topic.id}/messages`, hostListening.ownerToken, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: `@${receiverAgent.title}@RemoteLab please inspect this` }),
+  });
+  assert.equal(posted.response.status, 200);
+  await waitUntil(() => receiver.database.listMessages(receiverAgent.active_thread_id)
+    .some((message) => message.idempotency_key === `chat-mention:${remote.id}:${posted.body.id}`), 7_000);
+
+  const agentToken = 'wsa_federated_chat_reply';
+  receiver.database.issueAgentControlToken(receiverAgent.id, agentToken, ['chats:read', 'chats:write']);
+  const reply = await fetch(`${receiverListening.url}/api/v1/agent-control/chats/${remote.id}/${topic.id}/messages`, {
+    method: 'POST', headers: { authorization: `Bearer ${agentToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'Inspection complete.' }),
+  });
+  assert.equal(reply.status, 200);
+  const hosted = host.database.listChatMessages(topic.id);
+  assert.equal(hosted.at(-1).actor_kind, 'agent');
+  assert.equal(hosted.at(-1).display_name, receiverAgent.title);
+});
+
 function onceWithTimeout(emitter, event, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${event}`)), timeoutMs);

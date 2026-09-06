@@ -153,8 +153,19 @@ Common Master operations:
     $WEBSPIDER_CONTROL tasks list
     $WEBSPIDER_CONTROL reminders list
     $WEBSPIDER_CONTROL policy show
+    $WEBSPIDER_CONTROL chats list
+    $WEBSPIDER_CONTROL chats read --source local --topic TOPIC_ID
+    $WEBSPIDER_CONTROL chats send --source local --topic TOPIC_ID --message TEXT
+    $WEBSPIDER_CONTROL chats download --source local --attachment ATTACHMENT_ID --output inputs/file.pdf
 
 Use the helper's own usage output for the exact options supported by the installed version. Workers receive a narrower helper and cannot inspect the whole portfolio, message or command peer workers, or edit policy. They can list only valid file-transfer destinations and send an explicit root-confined file to one of them.
+
+Team chat
+    Open Chat in the browser to create topics. A human chat link is separate from owner login and can be limited to one or more topics. A federation credential is separate again and lets another WebSpider expose the shared topics in its own Chat tab. Revoke either credential from the hosting Hub.
+
+    Chat messages are stored in Hub SQLite and appended to <hub-state-dir>/team-chat-logs/<topic>.jsonl. Uploaded files share the private <hub-state-dir>/team-chat-files/ directory; each message log contains its immutable attachment ID, relative path, checksum, MIME type, and size. PNG/JPEG/GIF/WebP images preview inline. Other files download normally; active SVG/HTML is never rendered inline.
+
+    Link the Master or a Sub-Spider to all topics in one chat source, or to one topic. Linking grants read access and optional posting but does not feed routine chat into the agent. An exact @AgentName mention creates one durable inbound agent message. The agent replies in the topic with `chats send`, under its agent identity. For duplicate names across connected WebSpiders, use @AgentName@WebSpiderName. Connected Hubs poll linked topics for mentions; they do not exchange owner tokens or require SSH.
 
 `agents choose` is a Master-only answer to a visibly waiting numbered Codex prompt. It sends the bare digit to the live Sub-Spider terminal without a message header or Enter. Browser and Master input are lease-fenced; inspect before choosing and do not retry an uncertain PTY acknowledgement blindly.
 

@@ -68,6 +68,17 @@ $WEBSPIDER_CONTROL agents list
 $WEBSPIDER_CONTROL agents send --agent AGENT_ID --message 'Check the benchmark and report the result.'
 ```
 
+Read or answer an explicitly linked team-chat topic:
+
+```bash
+$WEBSPIDER_CONTROL chats list
+$WEBSPIDER_CONTROL chats read --source local --topic TOPIC_ID --after 0
+$WEBSPIDER_CONTROL chats send --source local --topic TOPIC_ID --message 'Reply from the agent'
+$WEBSPIDER_CONTROL chats download --source local --attachment ATTACHMENT_ID --output inputs/file.pdf
+```
+
+Chat visibility is owner-configured independently for each agent and source, either globally or by topic. It does not grant portfolio, general filesystem, or peer-control access; attachment downloads must name a new path inside the agent workspace. Routine messages are not injected into agent threads. An exact `@AgentName` mention creates one idempotent durable inbound message; linked remote WebSpiders poll authorized topics and perform the same local delivery. Replies retain the authenticated agent identity and appear directly in chat.
+
 If that Sub-Spider is visibly waiting at a numbered Codex option prompt, answer the prompt itself rather than sending a wrapped message:
 
 ```bash
@@ -198,6 +209,7 @@ Main-agent tokens can access only:
 - `GET` and `POST /api/v1/agent-control/reminders`, plus `POST /api/v1/agent-control/reminders/{id}:cancel`, with self-reminder scopes; ownership comes from the authenticated token and destinations are only `self` or `master`.
 - `POST /api/v1/agent-control/agents/{id}/documents` with `documents:write`; main agents may target registered agents, while worker targets are forced to the Master role.
 - `GET /api/v1/agent-control/files/targets` and `POST /api/v1/agent-control/agents/{id}/files` with `files:transfer`; destination discovery is bounded and the source is forced to the authenticated agent's registered root.
+- `GET /api/v1/agent-control/chats`, topic messages, and scoped attachment downloads with `chats:read`; `POST` topic messages with `chats:write`. Every operation also requires an owner-created all-chat, source, or topic link for that exact agent.
 
 The patch body requires:
 

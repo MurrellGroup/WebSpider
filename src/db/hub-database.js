@@ -24,6 +24,8 @@ const AGENT_CONTROL_ALLOWED_SCOPES = new Set([
   'reminders:write:self',
   'portfolio:read',
   'notes:read:visible',
+  'chats:read',
+  'chats:write',
   'status:write:self',
   'updates:write:self',
 ]);
@@ -242,6 +244,41 @@ function noteRow(row) {
     visibility: row.visibility,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function chatTopicRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id, name: row.name, description: row.description || '',
+    archived_at: row.archived_at || null, last_sequence: Number(row.last_sequence || 0),
+    created_at: row.created_at, updated_at: row.updated_at,
+  };
+}
+
+function chatMessageRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id, topic_id: row.topic_id, sequence: Number(row.sequence), actor_kind: row.actor_kind,
+    actor_id: row.actor_id, display_name: row.display_name, body: row.body,
+    attachments: decode(row.attachments_json, []), created_at: row.created_at,
+  };
+}
+
+function chatInviteRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id, label: row.label, topic_ids: decode(row.topic_ids_json, []), can_post: bool(row.can_post),
+    expires_at: row.expires_at || null, revoked_at: row.revoked_at || null,
+    created_at: row.created_at, last_used_at: row.last_used_at || null,
+  };
+}
+
+function chatRemoteRow(row, includeToken = false) {
+  if (!row) return null;
+  return {
+    id: row.id, name: row.name, base_url: row.base_url, created_at: row.created_at,
+    last_connected_at: row.last_connected_at || null, ...(includeToken ? { token: row.token } : {}),
   };
 }
 
@@ -631,6 +668,110 @@ export class HubDatabase extends EventEmitter {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS chat_topics (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        archived_at TEXT,
+        last_sequence INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL REFERENCES chat_topics(id),
+        sequence INTEGER NOT NULL,
+        actor_kind TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        UNIQUE(topic_id, sequence)
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_attachments (
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL REFERENCES chat_topics(id),
+        message_id TEXT REFERENCES chat_messages(id),
+        filename TEXT NOT NULL,
+        stored_path TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_invites (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        topic_ids_json TEXT NOT NULL DEFAULT '[]',
+        can_post INTEGER NOT NULL DEFAULT 1,
+        expires_at TEXT,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_federation_tokens (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        topic_ids_json TEXT NOT NULL DEFAULT '[]',
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_federated_agents (
+        federation_id TEXT NOT NULL,
+        external_agent_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        hub_name TEXT NOT NULL,
+        topic_ids_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(federation_id, external_agent_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_agent_links (
+        id TEXT PRIMARY KEY,
+        agent_instance_id TEXT NOT NULL REFERENCES agent_instances(id),
+        source_id TEXT NOT NULL DEFAULT 'local',
+        topic_id TEXT,
+        can_post INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        UNIQUE(agent_instance_id, source_id, topic_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_remotes (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        token TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_connected_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_remote_messages (
+        remote_id TEXT NOT NULL REFERENCES chat_remotes(id) ON DELETE CASCADE,
+        topic_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        PRIMARY KEY(remote_id, topic_id, message_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_remote_cursors (
+        remote_id TEXT NOT NULL REFERENCES chat_remotes(id) ON DELETE CASCADE,
+        topic_id TEXT NOT NULL,
+        last_sequence INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(remote_id, topic_id)
+      );
+
       CREATE TABLE IF NOT EXISTS fleet_updates (
         id TEXT PRIMARY KEY,
         target_version TEXT NOT NULL,
@@ -667,6 +808,8 @@ export class HubDatabase extends EventEmitter {
       CREATE INDEX IF NOT EXISTS idx_agent_control_tokens_agent ON agent_control_tokens(agent_instance_id, expires_at);
       CREATE INDEX IF NOT EXISTS idx_account_usage_observed ON account_usage_snapshots(observed_at DESC);
       CREATE INDEX IF NOT EXISTS idx_fleet_updates_created ON fleet_updates(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_topic ON chat_messages(topic_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_chat_agent_links_agent ON chat_agent_links(agent_instance_id);
     `);
     const projectColumns = new Set(this.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
     if (!projectColumns.has('policy_json')) this.db.exec("ALTER TABLE projects ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'");
@@ -908,6 +1051,8 @@ export class HubDatabase extends EventEmitter {
         'documents:write',
         'files:transfer',
         'updates:write:self',
+        'chats:read',
+        'chats:write',
       ]);
       invariant(scopes.every((scope) => workerScopes.has(scope)), 'WS_FORBIDDEN',
         'A worker agent can only report status, manage its own detached tasks, and schedule its own hooks.', 403);
@@ -957,6 +1102,250 @@ export class HubDatabase extends EventEmitter {
     const result = this.db.prepare('UPDATE agent_control_tokens SET revoked_at = ? WHERE agent_instance_id = ? AND revoked_at IS NULL')
       .run(nowISO(), agentInstanceId);
     return Number(result.changes) > 0;
+  }
+
+  createChatTopic({ name, description = '' }, actor = 'owner:local') {
+    const normalizedName = String(name || '').trim();
+    const normalizedDescription = String(description || '').trim();
+    invariant(normalizedName.length > 0 && normalizedName.length <= 120, 'WS_VALIDATION', 'Topic name must contain 1-120 characters.');
+    invariant(normalizedDescription.length <= 1_000, 'WS_VALIDATION', 'Topic description must be at most 1000 characters.');
+    const id = makeId('cht');
+    const now = nowISO();
+    this.db.prepare('INSERT INTO chat_topics (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, normalizedName, normalizedDescription, now, now);
+    this.appendEvent('chat_topic', id, 'chat.topic.created.v1', actor, id, { name: normalizedName });
+    return this.getChatTopic(id);
+  }
+
+  getChatTopic(id) {
+    return chatTopicRow(this.db.prepare('SELECT * FROM chat_topics WHERE id = ?').get(id));
+  }
+
+  listChatTopics({ includeArchived = false } = {}) {
+    return this.db.prepare(`SELECT * FROM chat_topics ${includeArchived ? '' : 'WHERE archived_at IS NULL'} ORDER BY updated_at DESC`)
+      .all().map(chatTopicRow);
+  }
+
+  createChatMessage({ topicId, actorKind, actorId, displayName, body = '', attachments = [] }) {
+    const topic = this.getChatTopic(topicId);
+    invariant(topic && !topic.archived_at, 'WS_NOT_FOUND', 'Chat topic not found.', 404);
+    const normalizedBody = String(body || '').replace(/\r\n?/g, '\n').trim();
+    invariant(normalizedBody.length <= 20_000, 'WS_VALIDATION', 'Chat message must be at most 20,000 characters.');
+    invariant(normalizedBody || attachments.length, 'WS_VALIDATION', 'A message or attachment is required.');
+    invariant(['owner', 'guest', 'agent', 'federation'].includes(actorKind), 'WS_VALIDATION', 'Invalid chat actor.');
+    const normalizedName = String(displayName || '').trim();
+    invariant(normalizedName.length > 0 && normalizedName.length <= 80, 'WS_VALIDATION', 'Display name must contain 1-80 characters.');
+    const id = makeId('chm');
+    const created = nowISO();
+    let sequence;
+    this.transaction(() => {
+      sequence = Number(this.db.prepare('SELECT last_sequence FROM chat_topics WHERE id = ?').get(topicId).last_sequence) + 1;
+      this.db.prepare(`INSERT INTO chat_messages
+        (id, topic_id, sequence, actor_kind, actor_id, display_name, body, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        id, topicId, sequence, actorKind, actorId, normalizedName, normalizedBody, encode(attachments), created,
+      );
+      this.db.prepare('UPDATE chat_topics SET last_sequence = ?, updated_at = ? WHERE id = ?')
+        .run(sequence, created, topicId);
+      for (const attachment of attachments) {
+        this.db.prepare('UPDATE chat_attachments SET message_id = ? WHERE id = ? AND topic_id = ?')
+          .run(id, attachment.id, topicId);
+      }
+    });
+    const message = this.getChatMessage(id);
+    this.appendEvent('chat_topic', topicId, 'chat.message.created.v1', actorId, id, {
+      sequence, actor_kind: actorKind, attachment_count: attachments.length,
+    });
+    return message;
+  }
+
+  getChatMessage(id) {
+    return chatMessageRow(this.db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(id));
+  }
+
+  listChatMessages(topicId, after = 0, limit = 200) {
+    return this.db.prepare(`SELECT * FROM chat_messages WHERE topic_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`)
+      .all(topicId, after, limit).map(chatMessageRow);
+  }
+
+  createChatAttachment({ id = makeId('cha'), topicId, filename, storedPath, mimeType, sizeBytes, digest }) {
+    const created = nowISO();
+    this.db.prepare(`INSERT INTO chat_attachments
+      (id, topic_id, filename, stored_path, mime_type, size_bytes, sha256, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, topicId, filename, storedPath, mimeType, sizeBytes, digest, created);
+    return this.getChatAttachment(id);
+  }
+
+  getChatAttachment(id) {
+    const row = this.db.prepare('SELECT * FROM chat_attachments WHERE id = ?').get(id);
+    return row ? {
+      id: row.id, topic_id: row.topic_id, message_id: row.message_id, filename: row.filename,
+      stored_path: row.stored_path, mime_type: row.mime_type, size_bytes: Number(row.size_bytes),
+      sha256: row.sha256, created_at: row.created_at,
+    } : null;
+  }
+
+  deleteUnattachedChatAttachment(id) {
+    return Number(this.db.prepare('DELETE FROM chat_attachments WHERE id = ? AND message_id IS NULL').run(id).changes) > 0;
+  }
+
+  createChatInvite({ token, label, topicIds = [], canPost = true, expiresAt = null }) {
+    const id = makeId('chi');
+    const created = nowISO();
+    this.db.prepare(`INSERT INTO chat_invites
+      (id, token_hash, label, topic_ids_json, can_post, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, sha256(token), label, encode([...new Set(topicIds)]), Number(canPost), expiresAt, created);
+    return chatInviteRow(this.db.prepare('SELECT * FROM chat_invites WHERE id = ?').get(id));
+  }
+
+  listChatInvites() {
+    return this.db.prepare('SELECT * FROM chat_invites ORDER BY created_at DESC').all().map(chatInviteRow);
+  }
+
+  getChatInviteByToken(token) {
+    if (!token) return null;
+    const row = this.db.prepare(`SELECT * FROM chat_invites WHERE token_hash = ? AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > ?)`).get(sha256(token), nowISO());
+    if (!row) return null;
+    this.db.prepare('UPDATE chat_invites SET last_used_at = ? WHERE id = ?').run(nowISO(), row.id);
+    return chatInviteRow(row);
+  }
+
+  revokeChatInvite(id) {
+    return Number(this.db.prepare('UPDATE chat_invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(nowISO(), id).changes) > 0;
+  }
+
+  createChatFederationToken({ token, label, topicIds = [] }) {
+    const id = makeId('chf');
+    const created = nowISO();
+    const topics = [...new Set(topicIds)];
+    this.db.prepare(`INSERT INTO chat_federation_tokens
+      (id, token_hash, label, topic_ids_json, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, sha256(token), label, encode(topics), created);
+    return { id, label, topic_ids: topics, created_at: created, revoked_at: null };
+  }
+
+  listChatFederationTokens() {
+    return this.db.prepare('SELECT * FROM chat_federation_tokens ORDER BY created_at DESC').all().map((row) => ({
+      id: row.id, label: row.label, topic_ids: decode(row.topic_ids_json, []), created_at: row.created_at,
+      revoked_at: row.revoked_at || null, last_used_at: row.last_used_at || null,
+    }));
+  }
+
+  getChatFederationByToken(token) {
+    if (!token) return null;
+    const row = this.db.prepare('SELECT * FROM chat_federation_tokens WHERE token_hash = ? AND revoked_at IS NULL').get(sha256(token));
+    if (!row) return null;
+    this.db.prepare('UPDATE chat_federation_tokens SET last_used_at = ? WHERE id = ?').run(nowISO(), row.id);
+    return { id: row.id, label: row.label, topic_ids: decode(row.topic_ids_json, []) };
+  }
+
+  revokeChatFederationToken(id) {
+    return Number(this.db.prepare('UPDATE chat_federation_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(nowISO(), id).changes) > 0;
+  }
+
+  replaceChatFederatedAgents(federationId, hubName, agents) {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM chat_federated_agents WHERE federation_id = ?').run(federationId);
+      const insert = this.db.prepare(`INSERT INTO chat_federated_agents
+        (federation_id, external_agent_id, display_name, hub_name, topic_ids_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)`);
+      for (const agent of agents) insert.run(federationId, agent.id, agent.display_name, hubName, encode(agent.topic_ids), nowISO());
+    });
+    return this.listChatFederatedAgents();
+  }
+
+  listChatFederatedAgents(topicId = null) {
+    return this.db.prepare(`SELECT a.* FROM chat_federated_agents a JOIN chat_federation_tokens f
+      ON f.id = a.federation_id AND f.revoked_at IS NULL ORDER BY a.display_name`).all()
+      .filter((row) => {
+        const ids = decode(row.topic_ids_json, []);
+        return !topicId || ids.length === 0 || ids.includes(topicId);
+      }).map((row) => ({
+        id: row.external_agent_id, display_name: row.display_name, hub_name: row.hub_name,
+        mention: `@${row.display_name}@${row.hub_name}`, topic_ids: decode(row.topic_ids_json, []),
+      }));
+  }
+
+  listChatAgentLinks() {
+    return this.db.prepare('SELECT * FROM chat_agent_links ORDER BY created_at').all().map((row) => ({
+      id: row.id, agent_instance_id: row.agent_instance_id, source_id: row.source_id,
+      topic_id: row.topic_id || null, can_post: bool(row.can_post), created_at: row.created_at,
+    }));
+  }
+
+  setChatAgentLink({ agentInstanceId, sourceId = 'local', topicId = null, canPost = true, enabled = true }) {
+    invariant(this.getAgent(agentInstanceId), 'WS_NOT_FOUND', 'Agent not found.', 404);
+    if (sourceId === 'local' && topicId) invariant(this.getChatTopic(topicId), 'WS_NOT_FOUND', 'Chat topic not found.', 404);
+    if (!enabled) {
+      this.db.prepare('DELETE FROM chat_agent_links WHERE agent_instance_id = ? AND source_id = ? AND topic_id IS ?')
+        .run(agentInstanceId, sourceId, topicId);
+      return null;
+    }
+    const existing = this.db.prepare(`SELECT id FROM chat_agent_links
+      WHERE agent_instance_id = ? AND source_id = ? AND topic_id IS ?`).get(agentInstanceId, sourceId, topicId);
+    if (existing) this.db.prepare('UPDATE chat_agent_links SET can_post = ? WHERE id = ?').run(Number(canPost), existing.id);
+    else this.db.prepare(`INSERT INTO chat_agent_links
+      (id, agent_instance_id, source_id, topic_id, can_post, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(makeId('chl'), agentInstanceId, sourceId, topicId, Number(canPost), nowISO());
+    return this.listChatAgentLinks().find((link) => link.agent_instance_id === agentInstanceId
+      && link.source_id === sourceId && link.topic_id === topicId);
+  }
+
+  chatAgentAccess(agentInstanceId, sourceId, topicId) {
+    const row = this.db.prepare(`SELECT * FROM chat_agent_links WHERE agent_instance_id = ?
+      AND (source_id = ? OR source_id = '*') AND (topic_id IS NULL OR topic_id = ?)
+      ORDER BY source_id = ? DESC, topic_id = ? DESC LIMIT 1`).get(agentInstanceId, sourceId, topicId, sourceId, topicId);
+    return row ? { can_post: bool(row.can_post) } : null;
+  }
+
+  createChatRemote({ name, baseUrl, token }) {
+    const id = makeId('chr');
+    const now = nowISO();
+    this.db.prepare(`INSERT INTO chat_remotes (id, name, base_url, token, created_at, last_connected_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(id, name, baseUrl, token, now, now);
+    return chatRemoteRow(this.db.prepare('SELECT * FROM chat_remotes WHERE id = ?').get(id));
+  }
+
+  listChatRemotes() {
+    return this.db.prepare('SELECT * FROM chat_remotes ORDER BY name').all().map((row) => chatRemoteRow(row));
+  }
+
+  getChatRemote(id, includeToken = false) {
+    return chatRemoteRow(this.db.prepare('SELECT * FROM chat_remotes WHERE id = ?').get(id), includeToken);
+  }
+
+  touchChatRemote(id) {
+    this.db.prepare('UPDATE chat_remotes SET last_connected_at = ? WHERE id = ?').run(nowISO(), id);
+  }
+
+  deleteChatRemote(id) {
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM chat_agent_links WHERE source_id = ?').run(id);
+      return Number(this.db.prepare('DELETE FROM chat_remotes WHERE id = ?').run(id).changes) > 0;
+    });
+  }
+
+  cacheChatRemoteMessage(remoteId, topicId, message) {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO chat_remote_messages
+      (remote_id, topic_id, message_id, sequence, payload_json, observed_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(remoteId, topicId, message.id, Number(message.sequence), encode(message), nowISO());
+    return Number(result.changes) > 0;
+  }
+
+  getChatRemoteCursor(remoteId, topicId) {
+    const row = this.db.prepare('SELECT last_sequence FROM chat_remote_cursors WHERE remote_id = ? AND topic_id = ?')
+      .get(remoteId, topicId);
+    return row ? Number(row.last_sequence) : null;
+  }
+
+  setChatRemoteCursor(remoteId, topicId, sequence) {
+    this.db.prepare(`INSERT INTO chat_remote_cursors (remote_id, topic_id, last_sequence, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(remote_id, topic_id) DO UPDATE SET
+      last_sequence = MAX(last_sequence, excluded.last_sequence), updated_at = excluded.updated_at`)
+      .run(remoteId, topicId, Number(sequence), nowISO());
   }
 
   createAccountUsageSnapshot({

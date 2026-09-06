@@ -98,6 +98,23 @@ test('message acceptance is durable and idempotent', (t) => {
   assert(database.listEvents(0).some((event) => event.type === 'message.accepted.v1'));
 });
 
+test('team chat scopes people and agents by topic while keeping durable message order', (t) => {
+  const { database, agent } = databaseFixture(t);
+  const alpha = database.createChatTopic({ name: 'Alpha' });
+  const beta = database.createChatTopic({ name: 'Beta' });
+  const invite = database.createChatInvite({ token: 'wsc_database_test', label: 'Researchers', topicIds: [alpha.id] });
+  assert.deepEqual(database.getChatInviteByToken('wsc_database_test').topic_ids, [alpha.id]);
+  assert.equal(invite.can_post, true);
+  database.setChatAgentLink({ agentInstanceId: agent.id, topicId: alpha.id });
+  assert.equal(database.chatAgentAccess(agent.id, 'local', alpha.id).can_post, true);
+  assert.equal(database.chatAgentAccess(agent.id, 'local', beta.id), null);
+  const first = database.createChatMessage({ topicId: alpha.id, actorKind: 'guest', actorId: 'guest:1', displayName: 'Ada', body: 'one' });
+  const second = database.createChatMessage({ topicId: alpha.id, actorKind: 'agent', actorId: `agent:${agent.id}`, displayName: 'Test agent', body: 'two' });
+  assert.deepEqual(database.listChatMessages(alpha.id).map((message) => message.sequence), [1, 2]);
+  assert.equal(first.sequence, 1);
+  assert.equal(second.sequence, 2);
+});
+
 test('projects can be safely archived, restored, and permanently removed without touching a workspace', (t) => {
   const { database } = databaseFixture(t);
   database.setAgentRole('agt_test', 'main');

@@ -138,6 +138,14 @@ Terminal tabs open in **Direct** mode, where the browser keyboard talks straight
 
 **Notes** are small plaintext editors stored on the hub machine. Each note body is an actual mode-`0600` `.txt` file under `<hub-state-dir>/notes`; SQLite stores only its title, filename, timestamps, and visibility. New notes default to **Just for me**. A note is readable by the main agent only after the owner checks **Visible to Master**; workers cannot read either class of note, and the main agent has no note-write scope.
 
+## Team chat
+
+The Chat tab hosts topic-based team conversation independently of the owner portal. Human links are revocable and may expose all topics or a selected topic. Separate chat-only federation credentials let another WebSpider display those topics in its own Chat tab without sharing owner or node credentials. The receiving Hub keeps a local cache/log of observed messages.
+
+Messages are durable in Hub SQLite and append-only JSONL under `<hub-state-dir>/team-chat-logs/`. Attachments live together under the private `<hub-state-dir>/team-chat-files/` directory; logs reference immutable IDs, relative paths, size, MIME type, and SHA-256. Human chat supports file selection and direct clipboard-image paste.
+
+The owner explicitly links an agent to all topics in a source or to one topic. Routine chat does not wake or narrate to agents. An exact `@AgentName` mention becomes one durable message to that agent; the agent can read and reply in the same topic using `$WEBSPIDER_CONTROL chats ...`. Remote linked WebSpiders poll only topics exposed to their agents, so mentioned agents can participate across machines without SSH.
+
 ## Architecture
 
 ```mermaid

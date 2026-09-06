@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.24';
+const PORTAL_VERSION = '0.6.25';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -83,6 +83,9 @@ const state = {
   previewMode: 'source',
   structurePreview: null,
   structurePreviewGeneration: 0,
+  chatSourceId: 'local',
+  chatTopicId: null,
+  chatPendingFiles: [],
 };
 
 function h(value) {
@@ -499,6 +502,78 @@ async function renderHome() {
   const events = await api('/api/v1/events?limit=20');
   const target = $('#home-events');
   if (target) target.innerHTML = renderEventRows(events.events.slice().reverse());
+}
+
+async function renderChat(sourceId = state.chatSourceId, topicId = state.chatTopicId) {
+  const activeComposer = document.activeElement?.matches?.('#chat-message-form textarea[name="body"]') ? document.activeElement : null;
+  const composerSelection = activeComposer ? [activeComposer.selectionStart, activeComposer.selectionEnd] : null;
+  state.selectedProject = null;
+  state.selectedAgent = null;
+  closeTerminal();
+  renderSidebar();
+  const [localTopics, remotes, invites, federation, links] = await Promise.all([
+    api('/api/v1/team-chat/topics'), api('/api/v1/team-chat/remotes'), api('/api/v1/team-chat/invites'),
+    api('/api/v1/team-chat/federation-tokens'), api('/api/v1/team-chat/agent-links'),
+  ]);
+  const sources = [{ id: 'local', name: 'This WebSpider', topics: localTopics.topics }];
+  for (const remote of remotes.remotes) {
+    try {
+      const result = await api(`/api/v1/team-chat/remotes/${encodeURIComponent(remote.id)}/topics`);
+      sources.push({ id: remote.id, name: remote.name, topics: result.topics || [] });
+    } catch { sources.push({ id: remote.id, name: `${remote.name} (offline)`, topics: [] }); }
+  }
+  let source = sources.find((item) => item.id === sourceId) || sources[0];
+  let topic = source.topics.find((item) => item.id === topicId) || source.topics[0] || null;
+  state.chatSourceId = source.id;
+  state.chatTopicId = topic?.id || null;
+  let messages = [];
+  if (topic) {
+    const resource = source.id === 'local'
+      ? `/api/v1/team-chat/topics/${encodeURIComponent(topic.id)}/messages`
+      : `/api/v1/team-chat/remotes/${encodeURIComponent(source.id)}/topics/${encodeURIComponent(topic.id)}/messages`;
+    messages = (await api(resource)).messages || [];
+  }
+  const sourceOptions = sources.map((item) => `<option value="${h(item.id)}" ${item.id === source.id ? 'selected' : ''}>${h(item.name)}</option>`).join('');
+  const topicRows = source.topics.map((item) => `<button class="chat-topic ${item.id === topic?.id ? 'selected' : ''}" data-action="chat-topic" data-topic-id="${h(item.id)}"># ${h(item.name)}</button>`).join('');
+  const messageRows = messages.map((message) => `<article class="chat-message ${h(message.actor_kind)}"><div class="chat-avatar">${h(message.display_name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase())}</div><div><header><strong>${h(message.display_name)}</strong>${message.actor_kind === 'agent' ? '<span>agent</span>' : ''}<time>${h(formatTime(message.created_at, true))}</time></header><p>${h(message.body)}</p><div class="chat-attachments">${message.attachments.map((attachment) => {
+    const href = source.id === 'local' ? `/api/v1/team-chat/attachments/${encodeURIComponent(attachment.id)}`
+      : `/api/v1/team-chat/remotes/${encodeURIComponent(source.id)}/attachments/${encodeURIComponent(attachment.id)}`;
+    return `<a href="${h(href)}" ${attachment.mime_type === 'application/pdf' ? 'target="_blank" rel="noopener"' : `download="${h(attachment.filename)}"`}>${/^image\/(png|jpeg|gif|webp)$/i.test(attachment.mime_type) ? `<img src="${h(href)}" alt="${h(attachment.filename)}">` : ''}${h(attachment.filename)} · ${h(formatBytes(attachment.size_bytes))}</a>`;
+  }).join('')}</div></div></article>`).join('');
+  const agentOptions = state.agents.filter((agent) => !agent.project_archived_at).map((agent) => `<option value="${h(agent.id)}">${h(agent.title)} · ${h(agent.project_name)}</option>`).join('');
+  const topicOptions = source.topics.map((item) => `<option value="${h(item.id)}"># ${h(item.name)}</option>`).join('');
+  $('#main-view').innerHTML = `<div class="page chat-owner-page">
+    ${pageHeader('Team chat', 'Human collaboration with explicit, mention-driven agent participation', '<button data-action="refresh-chat">Refresh</button>')}
+    <div class="chat-owner-layout">
+      <aside class="chat-owner-sidebar"><label>Chat source<select id="chat-source">${sourceOptions}</select></label><div class="chat-topic-list">${topicRows || '<div class="muted">No topics</div>'}</div>${source.id === 'local' ? '<button class="secondary" data-action="new-chat-topic">New topic</button>' : ''}</aside>
+      <section class="chat-owner-conversation"><header><div><h2>${h(topic?.name || 'Choose a topic')}</h2><p>${h(topic?.description || '')}</p></div></header><div class="chat-owner-messages">${messageRows || '<div class="empty"><div><strong>No messages yet</strong></div></div>'}</div>
+      ${topic ? `<div id="chat-file-drafts" class="chat-file-drafts"></div><form id="chat-message-form"><input id="chat-files" type="file" multiple hidden><button type="button" data-action="chat-files">＋</button><textarea name="body" maxlength="20000" placeholder="Message the team · use @AgentName to invite an agent">${h(chatDraftValue(source.id, topic.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}</section>
+      <aside class="chat-owner-settings"><details open><summary>Share with people</summary><form id="chat-invite-form" class="compact-form"><input name="label" maxlength="120" placeholder="Link label"><select name="scope"><option value="topic">This topic</option><option value="all">All topics</option></select><button type="submit">Create chat link</button></form>${invites.invites.filter((item) => !item.revoked_at).map((item) => `<div class="chat-setting-row"><span>${h(item.label)}</span><button data-action="revoke-chat-invite" data-id="${h(item.id)}">Revoke</button></div>`).join('')}</details>
+      <details><summary>Link an agent</summary><form id="chat-agent-link-form" class="compact-form"><select name="agent">${agentOptions}</select><select name="scope"><option value="topic">This topic</option><option value="source">All topics here</option><option value="all">All connected chats</option></select><label><input type="checkbox" name="can_post" checked> Can reply</label><button type="submit">Link agent</button></form>${links.links.filter((item) => item.source_id === source.id || item.source_id === '*').map((item) => `<div class="chat-setting-row"><span>${h(state.agents.find((a) => a.id === item.agent_instance_id)?.title || item.agent_instance_id)} · ${h(item.source_id === '*' ? 'all chats' : item.topic_id ? source.topics.find((t) => t.id === item.topic_id)?.name || item.topic_id : 'all topics here')}</span><button data-action="unlink-chat-agent" data-link-agent-id="${h(item.agent_instance_id)}" data-source-id="${h(item.source_id)}" data-topic-id="${h(item.topic_id || '')}">Remove</button></div>`).join('')}</details>
+      <details><summary>Connect another WebSpider</summary><form id="chat-remote-form" class="compact-form"><textarea name="details" placeholder="Paste WebSpider chat connection JSON" required></textarea><button type="submit">Connect</button></form>${remotes.remotes.map((item) => `<div class="chat-setting-row"><span>${h(item.name)}</span><button data-action="delete-chat-remote" data-id="${h(item.id)}">Disconnect</button></div>`).join('')}<form id="chat-federation-form" class="compact-form"><input name="label" maxlength="120" placeholder="WebSpider name"><select name="scope"><option value="all">All topics</option><option value="topic">This topic</option></select><button type="submit">Create connection credential</button></form>${federation.tokens.filter((item) => !item.revoked_at).map((item) => `<div class="chat-setting-row"><span>${h(item.label)}</span><button data-action="revoke-chat-federation" data-id="${h(item.id)}">Revoke</button></div>`).join('')}</details></aside>
+    </div></div>`;
+  history.replaceState(null, '', `#/chat/${encodeURIComponent(source.id)}${topic ? `/${encodeURIComponent(topic.id)}` : ''}`);
+  $('.chat-owner-messages').scrollTop = $('.chat-owner-messages').scrollHeight;
+  renderChatFileDrafts();
+  if (composerSelection) {
+    const composer = $('#chat-message-form textarea[name="body"]');
+    composer?.focus();
+    composer?.setSelectionRange(...composerSelection);
+  }
+}
+
+function renderChatFileDrafts() {
+  const target = $('#chat-file-drafts');
+  if (!target) return;
+  target.innerHTML = state.chatPendingFiles.map((file, index) => `<span>${h(file.name)} · ${h(formatBytes(file.size))}<button type="button" data-chat-file-remove="${index}">×</button></span>`).join('');
+}
+
+function chatDraftKey(sourceId = state.chatSourceId, topicId = state.chatTopicId) {
+  return `webspider_chat_draft:${sourceId}:${topicId || ''}`;
+}
+
+function chatDraftValue(sourceId = state.chatSourceId, topicId = state.chatTopicId) {
+  try { return sessionStorage.getItem(chatDraftKey(sourceId, topicId)) || ''; } catch { return ''; }
 }
 
 async function renderProject(projectId) {
@@ -1685,6 +1760,7 @@ function connectEvents() {
         return;
       }
       if (state.selectedProject) renderProject(state.selectedProject.id);
+      else if (location.hash.startsWith('#/chat')) renderChat();
       else if (location.hash === '#/nodes') renderNodes();
     }).catch(() => {}), 180);
   });
@@ -1697,6 +1773,7 @@ async function routeFromHash() {
   if (parts[0] === 'sub-spider-instructions') return renderWorkerInstructions();
   if (parts[0] === 'archived') return renderArchivedProjects();
   if (parts[0] === 'notes') return renderNotes(parts[1] ? decodeURIComponent(parts[1]) : null);
+  if (parts[0] === 'chat') return renderChat(parts[1] ? decodeURIComponent(parts[1]) : 'local', parts[2] ? decodeURIComponent(parts[2]) : null);
   if (parts[0] === 'nodes') return renderNodes();
   const agentIndex = parts.indexOf('agents');
   if (agentIndex >= 0 && parts[agentIndex + 1]) return renderAgent(decodeURIComponent(parts[agentIndex + 1]), parts[agentIndex + 2] || 'terminal');
@@ -1799,6 +1876,10 @@ document.addEventListener('click', async (event) => {
       const copied = await copyControlValue($('#worker-command'));
       return toast(copied ? 'Worker command copied' : 'Command selected; press Ctrl/Cmd+C to copy it.', !copied);
     }
+    if (action === 'copy-chat-share') {
+      const copied = await copyControlValue($('#chat-share-value'));
+      return toast(copied ? 'Chat details copied' : 'Details selected; press Ctrl/Cmd+C to copy.', !copied);
+    }
     if (action === 'close-terminal') {
       const terminalId = actionTarget.dataset.terminalId;
       await api(`/api/v1/terminals/${encodeURIComponent(terminalId)}`, { method: 'DELETE' });
@@ -1828,6 +1909,36 @@ document.addEventListener('click', async (event) => {
       return renderAgent(state.selectedAgent.id, state.tab);
     }
     if (action === 'refresh') { await loadData(); return routeFromHash(); }
+    if (action === 'show-chat') { closeMobileSidebar(); return renderChat(); }
+    if (action === 'refresh-chat') return renderChat();
+    if (action === 'chat-topic') return renderChat(state.chatSourceId, actionTarget.dataset.topicId);
+    if (action === 'chat-files') return $('#chat-files')?.click();
+    if (action === 'new-chat-topic') {
+      const name = prompt('Topic name:');
+      if (!name) return;
+      const topic = await api('/api/v1/team-chat/topics', { method: 'POST', body: { name } });
+      return renderChat('local', topic.id);
+    }
+    if (action === 'revoke-chat-invite') {
+      await api(`/api/v1/team-chat/invites/${encodeURIComponent(actionTarget.dataset.id)}`, { method: 'DELETE' });
+      toast('Chat link revoked.'); return renderChat();
+    }
+    if (action === 'revoke-chat-federation') {
+      await api(`/api/v1/team-chat/federation-tokens/${encodeURIComponent(actionTarget.dataset.id)}`, { method: 'DELETE' });
+      toast('WebSpider chat credential revoked.'); return renderChat();
+    }
+    if (action === 'delete-chat-remote') {
+      await api(`/api/v1/team-chat/remotes/${encodeURIComponent(actionTarget.dataset.id)}`, { method: 'DELETE' });
+      state.chatSourceId = 'local'; state.chatTopicId = null;
+      toast('Linked team chat disconnected.'); return renderChat('local', null);
+    }
+    if (action === 'unlink-chat-agent') {
+      await api('/api/v1/team-chat/agent-links', { method: 'POST', body: {
+        agent_instance_id: actionTarget.dataset.linkAgentId, source_id: actionTarget.dataset.sourceId,
+        topic_id: actionTarget.dataset.topicId || null, enabled: false,
+      } });
+      toast('Agent unlinked from chat.'); return renderChat();
+    }
     if (action === 'show-nodes') { closeMobileSidebar(); return renderNodes(); }
     if (action === 'claim-recovery-candidate') return showRecoveryClaimForm(actionTarget.dataset.runtimeId);
     if (action === 'prepare-fleet-update') {
@@ -1992,6 +2103,69 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'chat-message-form') {
+    event.preventDefault();
+    const body = String(new FormData(event.target).get('body') || '').trim();
+    if (!body && !state.chatPendingFiles.length) return;
+    const button = event.target.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      let total = 0;
+      const attachments = [];
+      for (const file of state.chatPendingFiles) {
+        total += file.size;
+        if (total > 20 * 1024 * 1024) throw new Error('Chat attachments are limited to 20 MiB per message.');
+        attachments.push({ filename: file.name, mime_type: file.type || 'application/octet-stream', data_base64: bytesToBase64(new Uint8Array(await file.arrayBuffer())) });
+      }
+      const resource = state.chatSourceId === 'local'
+        ? `/api/v1/team-chat/topics/${encodeURIComponent(state.chatTopicId)}/messages`
+        : `/api/v1/team-chat/remotes/${encodeURIComponent(state.chatSourceId)}/topics/${encodeURIComponent(state.chatTopicId)}/messages`;
+      await api(resource, { method: 'POST', body: { body, attachments } });
+      state.chatPendingFiles = [];
+      try { sessionStorage.removeItem(chatDraftKey()); } catch {}
+      return renderChat();
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
+    return;
+  }
+  if (event.target.id === 'chat-invite-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const invite = await api('/api/v1/team-chat/invites', { method: 'POST', body: {
+      label: form.get('label'), topic_ids: form.get('scope') === 'all' ? [] : [state.chatTopicId], can_post: true,
+    } });
+    openModal(`<div class="modal-header"><div><h2>Team chat link</h2><p>Anyone with this link can read and post in its permitted topics.</p></div><button data-action="close-modal">×</button></div><div class="modal-body"><textarea id="chat-share-value" class="command-output" readonly>${h(invite.url)}</textarea><div class="modal-actions"><button class="primary" data-action="copy-chat-share">Copy link</button></div></div>`);
+    return;
+  }
+  if (event.target.id === 'chat-federation-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const credential = await api('/api/v1/team-chat/federation-tokens', { method: 'POST', body: {
+      label: form.get('label'), topic_ids: form.get('scope') === 'all' ? [] : [state.chatTopicId],
+    } });
+    openModal(`<div class="modal-header"><div><h2>WebSpider chat connection</h2><p>Enter these once in the other WebSpider's Chat → Connect panel.</p></div><button data-action="close-modal">×</button></div><div class="modal-body"><textarea id="chat-share-value" class="command-output" readonly>${h(JSON.stringify({ name: credential.label, base_url: credential.hub_url, token: credential.token }, null, 2))}</textarea><div class="modal-actions"><button class="primary" data-action="copy-chat-share">Copy details</button></div></div>`);
+    return;
+  }
+  if (event.target.id === 'chat-remote-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    let details;
+    try { details = JSON.parse(String(form.get('details') || '')); } catch { return toast('Paste the complete WebSpider chat connection JSON.', true); }
+    await api('/api/v1/team-chat/remotes', { method: 'POST', body: {
+      name: details.name, base_url: details.base_url, token: details.token,
+    } });
+    toast('Team chat connected.'); return renderChat();
+  }
+  if (event.target.id === 'chat-agent-link-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    await api('/api/v1/team-chat/agent-links', { method: 'POST', body: {
+      agent_instance_id: form.get('agent'), source_id: form.get('scope') === 'all' ? '*' : state.chatSourceId,
+      topic_id: form.get('scope') === 'topic' ? state.chatTopicId : null,
+      can_post: Boolean(form.get('can_post')), enabled: true,
+    } });
+    toast('Agent linked. Mention it with @ followed by its displayed name.'); return renderChat();
+  }
   if (event.target.id === 'recovery-claim-form') {
     event.preventDefault();
     const form = new FormData(event.target);
@@ -2259,6 +2433,39 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('change', (event) => {
+  if (event.target.id === 'chat-source') renderChat(event.target.value, null).catch((error) => toast(friendlyError(error), true));
+  if (event.target.id === 'chat-files') {
+    state.chatPendingFiles.push(...[...event.target.files].slice(0, 8 - state.chatPendingFiles.length));
+    event.target.value = '';
+    renderChatFileDrafts();
+  }
+});
+
+document.addEventListener('input', (event) => {
+  if (!event.target.matches('#chat-message-form textarea[name="body"]')) return;
+  try { sessionStorage.setItem(chatDraftKey(), event.target.value); } catch {}
+});
+
+document.addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-chat-file-remove]');
+  if (!remove) return;
+  state.chatPendingFiles.splice(Number(remove.dataset.chatFileRemove), 1);
+  renderChatFileDrafts();
+});
+
+document.addEventListener('paste', (event) => {
+  const composer = event.target.closest('#chat-message-form');
+  if (!composer) return;
+  const itemFiles = [...(event.clipboardData?.items || [])].filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile()).filter(Boolean);
+  const files = itemFiles.length ? itemFiles : [...(event.clipboardData?.files || [])];
+  if (!files.length) return;
+  event.preventDefault();
+  state.chatPendingFiles.push(...files.slice(0, 8 - state.chatPendingFiles.length));
+  renderChatFileDrafts();
+});
+
 document.addEventListener('keydown', (event) => trackTerminalKey(event, terminalKeyState), true);
 document.addEventListener('keyup', (event) => trackTerminalKey(event, terminalKeyState), true);
 window.addEventListener('blur', () => resetTerminalKeyState(terminalKeyState));
@@ -2281,6 +2488,11 @@ document.addEventListener('keydown', (event) => {
     if (action === 'newline' || action === 'native') return;
     event.preventDefault();
     if (action === 'submit') event.target.form?.requestSubmit();
+    return;
+  }
+  if (event.target.matches('#chat-message-form textarea[name="body"]') && event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    event.target.form?.requestSubmit();
     return;
   }
   if (event.target.closest('#terminal-output') && clipboardPasteShortcut(event)) {
