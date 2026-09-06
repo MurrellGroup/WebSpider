@@ -375,6 +375,22 @@ while :; do sleep 0.05; done
   assert.deepEqual(resumeArgs.slice(0, 3), ['resume', '-C', fs.realpathSync(workspace)]);
   assert.equal(resumeArgs.at(-1), '--last');
   assert.equal(hub.database.getAgent(bootstrap.agent.id).state, 'ready');
+
+  const resumedRuntime = node.database.getProcessByAgent(bootstrap.agent.id);
+  node.supervisor.stopProcess(resumedRuntime.id);
+  await waitUntil(() => !['running', 'stopping'].includes(
+    node.database.getProcessByAgent(bootstrap.agent.id)?.state,
+  ), 5_000);
+  hub.database.setAgentState(bootstrap.agent.id, 'ready', 'test:false-ready-after-update');
+  const recovered = await jsonFetch(
+    `${listening.url}/api/v1/agent-instances/${bootstrap.agent.id}:recover-managed-codex`,
+    listening.ownerToken,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+  );
+  assert.equal(recovered.response.status, 200);
+  assert.equal(recovered.body.state, 'ready');
+  assert.equal(node.database.getProcessByAgent(bootstrap.agent.id).state, 'running');
+  assert.notEqual(node.database.getProcessByAgent(bootstrap.agent.id).id, resumedRuntime.id);
 });
 
 test('quiet browser uploads and large agent file handoffs stream across nodes without SSH', async (t) => {

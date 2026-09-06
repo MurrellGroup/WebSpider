@@ -1384,6 +1384,38 @@ export class Hub {
       await this.#stopAgent(ctx.params.id, ctx.principal.principal_id);
       return this.#wakeAgent(ctx.params.id, ctx.principal.principal_id);
     });
+    route('POST', '/api/v1/agent-instances/:id:recover-managed-codex', async (ctx) => {
+      const agent = this.database.getAgent(ctx.params.id);
+      invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+      invariant(agent.codex_capable, 'WS_ADAPTER_UNAVAILABLE', 'This agent profile does not launch Codex.', 409);
+      invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before recovering its agent.', 409);
+      invariant(this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'The agent workstation is offline.', 503);
+      const terminal = this.database.getTerminal(agent.terminal_id);
+      invariant(terminal?.kind === 'primary_agent', 'WS_NOT_FOUND', 'The primary agent terminal is unavailable.', 404);
+      const snapshot = await this.broker.request(agent.node_id, 'terminal.snapshot', {
+        terminal_id: terminal.id,
+        max_bytes: 4_096,
+      });
+      invariant(['lost', 'exited', 'failed', 'detached'].includes(snapshot?.state), 'WS_RECOVERY_CONFLICT',
+        'The primary agent process is still running; recovery was not started.', 409,
+        { runtime_state: snapshot?.state || 'unknown' });
+      this.database.setTerminalState(agent.terminal_id, 'exited');
+      this.database.setAgentState(agent.id, 'failed', ctx.principal.principal_id, {
+        reason: 'owner_verified_lost_primary_runtime',
+        previous_reported_state: agent.state,
+        node_runtime_state: snapshot.state,
+      });
+      const recovered = await this.#wakeAgent(agent.id, ctx.principal.principal_id, { resumeManaged: true });
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.codex_session.recover_managed',
+        targetType: 'agent_instance', targetId: agent.id, projectId: agent.project_id,
+        decision: 'verified_lost_runtime_without_stop_signal',
+        previousState: { agent_state: agent.state, terminal_state: snapshot.state },
+        newState: { agent_state: recovered.state, terminal_state: recovered.terminal_state },
+      });
+      return recovered;
+    });
     route('GET', '/api/v1/agent-instances/:id/terminals', async (ctx) => ({
       terminals: this.database.listAgentTerminals(ctx.params.id),
     }));
