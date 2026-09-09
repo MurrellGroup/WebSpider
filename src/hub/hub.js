@@ -2637,8 +2637,13 @@ export class Hub {
         });
       }
     }
-    const runningAgents = new Set(runningAgentRuntimes.map((runtime) => runtime.agent_instance_id));
-    for (const runtime of runningAgentRuntimes) {
+    // Older workers label auxiliary shell tabs as kind=agent too. Only the
+    // registered primary terminal proves that the agent itself is running.
+    const primaryTerminals = new Map(agents.map((agent) => [agent.id, agent.terminal_id]));
+    const primaryRuntimes = runningAgentRuntimes.filter((runtime) =>
+      primaryTerminals.get(runtime.agent_instance_id) === runtime.terminal_id);
+    const runningAgents = new Set(primaryRuntimes.map((runtime) => runtime.agent_instance_id));
+    for (const runtime of primaryRuntimes) {
       if (knownAgentIds.has(runtime.agent_instance_id)) this.agentRuntimes.set(runtime.agent_instance_id, runtime.id);
     }
     for (let agent of agents) {
@@ -2662,6 +2667,16 @@ export class Hub {
             connection_epoch: connectionEpoch,
           });
         }
+        continue;
+      }
+      if (['ready', 'busy'].includes(agent.state)
+        && runningAgentRuntimes.some((runtime) => runtime.agent_instance_id === agent.id)) {
+        // Correct legacy shell-only status without automatically launching a
+        // replacement or disturbing the surviving interactive shell.
+        this.database.setTerminalState(agent.terminal_id, 'detached');
+        this.database.setAgentState(agent.id, 'stopped', 'hub:reconciler', {
+          reason: 'only_auxiliary_terminal_survives',
+        });
         continue;
       }
       if (!['ready', 'busy', 'starting'].includes(agent.state)) continue;

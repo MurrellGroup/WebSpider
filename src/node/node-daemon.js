@@ -370,7 +370,7 @@ export class NodeDaemon extends EventEmitter {
           sha256: payload.sha256,
         });
       case 'process.start-agent': {
-        const existing = this.database.getProcessByAgent(payload.agent_instance_id);
+        const existing = this.database.getProcessByTerminal(payload.terminal_id);
         if (existing && existing.state === 'running') return { runtime: existing, resumed: true };
         const runtime = this.supervisor.launch({
           kind: 'agent',

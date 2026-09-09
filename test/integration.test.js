@@ -363,6 +363,24 @@ test('same-machine Hub and worker identities stay online across one shared proce
   assert.equal(hub.broker.isOnline('nod_local'), true);
   assert.equal(hub.broker.isOnline('nod_worker'), true);
   assert.equal(unexpectedOffline, 0);
+  // Legacy shell tabs used kind=agent. Starting the primary must neither
+  // reuse that shell nor stop it, and repeated starts remain idempotent.
+  const shell = worker.supervisor.launch({ kind: 'agent', agentInstanceId: 'agt_test_primary',
+    terminalId: 'trm_test_shell', rootId: 'awr_worker', argv: ['/bin/cat'] });
+  let primary;
+  try {
+    const payload = { agent_instance_id: 'agt_test_primary', terminal_id: 'trm_test_primary',
+      root_id: 'awr_worker', argv: ['/bin/cat'] };
+    primary = (await hub.broker.request('nod_worker', 'process.start-agent', payload)).runtime;
+    assert.notEqual(primary.id, shell.id);
+    assert.equal(primary.terminalId, payload.terminal_id);
+    const repeated = await hub.broker.request('nod_worker', 'process.start-agent', payload);
+    assert.equal(repeated.runtime.id, primary.id);
+    assert.equal(worker.database.getProcess(shell.id).state, 'running');
+  } finally {
+    if (primary) worker.supervisor.stopProcess(primary.id);
+    worker.supervisor.stopProcess(shell.id);
+  }
 });
 
 test('shared process inventory does not offer another registered agent for recovery', async (t) => {
@@ -388,6 +406,11 @@ test('shared process inventory does not offer another registered agent for recov
   assert.equal(hub.database.getAgent(worker.id).recovery_pending, false);
   assert.equal(hub.database.getAgent(worker.id).state, 'stopped');
   assert.equal(hub.agentRuntimes.has(bootstrap.agent.id), false, 'foreign inventory must not take ownership');
+  const shell = { ...inventory[0], id: 'run_worker_shell', agent_instance_id: worker.id, terminal_id: 'trm_worker_shell' };
+  hub.database.setAgentState(worker.id, 'ready', 'test');
+  assert.deepEqual(await reconcile([...inventory, shell]), []);
+  assert.equal(hub.database.getAgent(worker.id).state, 'stopped', 'an auxiliary shell is not a live primary agent');
+  assert.equal(hub.agentRuntimes.has(worker.id), false);
   const unknown = { ...inventory[0], id: 'run_unknown', agent_instance_id: 'agt_old_hub' };
   hub.database.setAgentRecoveryPending(worker.id, true, 'test');
   const candidates = await reconcile([...inventory, unknown]);
