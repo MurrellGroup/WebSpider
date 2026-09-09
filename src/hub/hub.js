@@ -2616,13 +2616,17 @@ export class Hub {
   }
 
   async #reconcileNode(nodeId, runtimeInventory, connectionEpoch) {
-    const agents = this.database.listAgents().filter((agent) => agent.node_id === nodeId);
+    const allAgents = this.database.listAgents();
+    const agents = allAgents.filter((agent) => agent.node_id === nodeId);
     const knownAgentIds = new Set(agents.map((agent) => agent.id));
+    // Hub and worker identities on one host can report the same process store.
+    // A runtime owned by another registered agent is not an orphan to claim.
+    const registeredAgentIds = new Set(allAgents.map((agent) => agent.id));
     for (const agent of agents) this.agentRuntimes.delete(agent.id);
     const runningAgentRuntimes = runtimeInventory
       .filter((runtime) => runtime.kind === 'agent' && runtime.state === 'running' && runtime.agent_instance_id);
     const orphanedRuntimes = runningAgentRuntimes
-      .filter((runtime) => !knownAgentIds.has(runtime.agent_instance_id))
+      .filter((runtime) => !registeredAgentIds.has(runtime.agent_instance_id))
       .map((runtime) => ({ ...runtime, node_id: nodeId }));
     if (orphanedRuntimes.length) this.recoveryCandidates.set(nodeId, orphanedRuntimes);
     else {

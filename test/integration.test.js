@@ -365,6 +365,36 @@ test('same-machine Hub and worker identities stay online across one shared proce
   assert.equal(unexpectedOffline, 0);
 });
 
+test('shared process inventory does not offer another registered agent for recovery', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-shared-recovery-'));
+  const identity = generateNodeIdentity();
+  const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
+  const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_local', publicKey: identity.publicKey, workspace: directory });
+  hub.database.createNode({ id: 'nod_worker', displayName: 'Same host worker', publicKey: generateNodeIdentity().publicKey });
+  const worker = hub.database.createAgent({ profileId: bootstrap.agent.profile_id,
+    projectId: bootstrap.agent.project_id, nodeId: 'nod_worker', title: 'New project' });
+  const listening = await hub.listen();
+  t.after(async () => { await hub.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const inventory = [{ id: 'run_master_shell', kind: 'agent', state: 'running',
+    agent_instance_id: bootstrap.agent.id, terminal_id: 'trm_master_shell' }];
+  const reconcile = async (runtimeInventory) => {
+    hub.database.emit('event', { type: 'node.online.v1', scope_id: 'nod_worker',
+      payload: { runtime_inventory: runtimeInventory, connection_epoch: 1 } });
+    await new Promise((resolve) => setImmediate(resolve));
+    return (await jsonFetch(`${listening.url}/api/v1/recovery/candidates`, listening.ownerToken)).body.candidates;
+  };
+  hub.database.setAgentRecoveryPending(worker.id, true, 'test');
+  assert.deepEqual(await reconcile(inventory), []);
+  assert.equal(hub.database.getAgent(worker.id).recovery_pending, false);
+  assert.equal(hub.database.getAgent(worker.id).state, 'stopped');
+  assert.equal(hub.agentRuntimes.has(bootstrap.agent.id), false, 'foreign inventory must not take ownership');
+  const unknown = { ...inventory[0], id: 'run_unknown', agent_instance_id: 'agt_old_hub' };
+  hub.database.setAgentRecoveryPending(worker.id, true, 'test');
+  const candidates = await reconcile([...inventory, unknown]);
+  assert.deepEqual(candidates.map((candidate) => candidate.id), ['run_unknown']);
+  assert.equal(hub.database.getAgent(worker.id).recovery_pending, true, 'genuine unknown survivors still block');
+});
+
 test('coordinated update waits for explicit readiness and resumes the Master Codex session', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-fleet-update-'));
   const workspace = path.join(directory, 'workspace');
