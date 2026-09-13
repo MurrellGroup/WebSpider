@@ -15,6 +15,7 @@ import { RootedFileService } from '../src/node/root-fs.js';
 import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
 import { FILE_TRANSFER_CHUNK_BYTES } from '../src/lib/file-transfer.js';
 import { WEBSPIDER_VERSION } from '../src/lib/self-update.js';
+import { CODEX_STABLE_MODEL_ARGUMENTS } from '../src/lib/agent-profile.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -968,7 +969,8 @@ test('the owner can adopt a remote Codex session and WebSpider pins it to the re
   assert.deepEqual(adopted.body.codex_session, { source: 'user', selector: 'last', session_id: null });
   await waitUntil(() => fs.existsSync(path.join(workspace, 'api-adopted-args.txt')));
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'api-adopted-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', canonicalWorkspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '--last',
+    'resume', '-C', canonicalWorkspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access',
+    ...CODEX_STABLE_MODEL_ARGUMENTS, '--last',
   ]);
   const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
   assert.deepEqual(runtime.argv.slice(0, 4), [fakeCodex, 'resume', '-C', canonicalWorkspace]);

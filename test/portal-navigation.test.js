@@ -22,6 +22,11 @@ test('portal and hub version are synchronized and version skew is explicit', () 
   assert.match(app, /systemctl --user restart webspider\.service/);
 });
 
+test('queued message reasons remain visible in the conversation', () => {
+  assert.match(app, /message\.delivery\?\.failure_reason/);
+  assert.match(app, /deliveryReason/);
+});
+
 test('Nodes exposes a Hub-last coordinated update with persistent owner rescue controls', () => {
   assert.match(app, /data-action="prepare-fleet-update"/);
   assert.match(app, /updates remote nodes first and the Hub last/i);

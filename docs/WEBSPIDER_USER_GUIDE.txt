@@ -186,6 +186,11 @@ Per-agent instructions
 
 Instruction changes are revisioned. Running agents keep their immutable launch snapshot until restarted.
 
+Model stability
+    WebSpider never automatically changes a managed Codex model. Managed launches hide Codex's rate-limit suggestion to switch models. WebSpider-delivered Text-box messages, reminders, hooks, and agent-to-agent messages use a private Ctrl+Enter submit binding, so they cannot confirm a Codex popup whose selected action changes the model or reasoning effort. Direct terminal input may still deliberately use `/model` or accept a visible choice.
+
+    An agent launched before this safeguard does not receive an unsafe compatibility Enter. Automated deliveries stay durably queued with a restart-required reason and drain after that individual agent is restarted/resumed. No machine reboot is required.
+
 8. Persistence and recovery
 ---------------------------
 

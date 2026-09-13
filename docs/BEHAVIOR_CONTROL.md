@@ -25,6 +25,8 @@ Every launch still receives an immutable instruction snapshot, but the snapshot 
 
 Codex continues to discover the resulting instructions through its normal layered `AGENTS.md` mechanism. WebSpider composes inherited user guidance with the role-specific snapshot in a private managed `CODEX_HOME`; it does not modify the workspace or the user's original Codex home.
 
+Managed Codex launches also enforce model stability at the transport boundary. WebSpider disables Codex's rate-limit model-switch nudge and adds `Ctrl+Enter` as a composer-only submit binding. Durable PTY deliveries use that binding instead of ordinary `Enter`, so a reminder, hook, Text-box message, or agent message cannot accept the default action in a model-switch or faster-model popup. Existing profile arguments cannot override these two safety settings. A pre-safeguard live session receives no automated input; its delivery remains queued until that agent is restarted/resumed with a protected launch. Direct terminal model choices remain user-controlled.
+
 A Codex-native subagent spawned inside the main session may see the parent's global instruction layer and inherits the parent runtime permission mode. The main snapshot therefore starts with a role-scope boundary: a native child discards the main-only orchestration, reporting, and control sections, keeps its own harness behavior, and follows the delegated objective plus result-critical constraints. The only transport-level addition is a UTC completion timestamp in its returned result. WebSpider does not replace Codex's tuned built-in worker or explorer definitions.
 
 ## Layered defaults

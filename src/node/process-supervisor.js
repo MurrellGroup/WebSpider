@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
+import { hasStableCodexModelArguments } from '../lib/agent-profile.js';
 
 const WEBSPIDER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
 const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
@@ -144,6 +145,21 @@ function usableCodexInstruction(home) {
     } catch { /* this Codex home has no instruction file at this level */ }
   }
   return '';
+}
+
+export function automatedMessagePayload(runtime, text) {
+  invariant(typeof text === 'string' && text.length > 0, 'WS_VALIDATION', 'Message text is required.');
+  const normalized = text.replace(/\r\n?/g, '\n');
+  invariant(!normalized.includes('\0'), 'WS_VALIDATION', 'Message contains forbidden content.');
+  const codexRuntime = path.basename(runtime?.argv?.[0] || '').toLowerCase().includes('codex');
+  invariant(!codexRuntime || hasStableCodexModelArguments(runtime.argv),
+    'WS_AGENT_RESTART_REQUIRED',
+    'Automated delivery is paused until this Codex session is restarted with model-switch protection.', 409,
+    { agent_instance_id: runtime?.agentInstanceId, terminal_id: runtime?.terminalId });
+  const enhanced = codexRuntime || enhancedKeyboardEnabled(runtime?.outputLog);
+  return Buffer.from(enhanced
+    ? `\u001b[200~${normalized}\u001b[201~${codexRuntime ? '\u001b[13;5u' : '\u001b[13u'}`
+    : `${normalized}\n`);
 }
 
 function materializeCodexHome(contextDirectory, renderedInstructions, environment, { sessionSource = 'managed' } = {}) {
@@ -912,17 +928,9 @@ export class ProcessSupervisor extends EventEmitter {
   }
 
   message(agentInstanceId, text) {
-    invariant(typeof text === 'string' && text.length > 0, 'WS_VALIDATION', 'Message text is required.');
     const runtime = this.database.getProcessByAgent(agentInstanceId);
     invariant(runtime && runtime.terminalId, 'WS_AGENT_NOT_READY', 'Agent terminal is not running.', 409);
-    const normalized = text.replace(/\r\n?/g, '\n');
-    invariant(!normalized.includes('\0'), 'WS_VALIDATION', 'Message contains forbidden content.');
-    const codexRuntime = path.basename(runtime.argv?.[0] || '').toLowerCase().includes('codex');
-    const enhanced = codexRuntime || enhancedKeyboardEnabled(runtime.outputLog);
-    const payload = enhanced
-      ? `\u001b[200~${normalized}\u001b[201~\u001b[13u`
-      : `${normalized}\n`;
-    return this.input(runtime.terminalId, Buffer.from(payload));
+    return this.input(runtime.terminalId, automatedMessagePayload(runtime, text));
   }
 
   stopProcess(id, signal = 'SIGTERM') {

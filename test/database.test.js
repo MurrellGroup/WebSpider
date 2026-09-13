@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { HubDatabase } from '../src/db/hub-database.js';
 import { NodeBroker } from '../src/hub/node-broker.js';
-import { generateNodeIdentity } from '../src/lib/security.js';
+import { generateNodeIdentity, signNodeHello } from '../src/lib/security.js';
 import { createDefaultProjectPolicy } from '../src/lib/project-policy.js';
 
 function databaseFixture(t) {
@@ -24,7 +25,7 @@ function databaseFixture(t) {
     id: 'agt_test', profileId: 'apf_test', projectId: 'prj_test', nodeId: 'nod_test',
     root: { id: 'awr_test', logical_name: 'workspace' },
   });
-  return { database, agent };
+  return { database, agent, identity };
 }
 
 test('browser sessions remain valid until explicitly revoked', (t) => {
@@ -233,6 +234,46 @@ test('offline transient commands expire while durable messages reuse one outbox 
   assert.deepEqual(durableErrors.map((error) => error.code), ['WS_NODE_OFFLINE', 'WS_NODE_OFFLINE']);
   assert.equal(durableErrors[0].details.command_id, durableErrors[1].details.command_id);
   assert.equal(database.pendingOutbox('nod_test').length, 1);
+});
+
+test('model-protection deferrals keep durable node commands retryable', async (t) => {
+  const { database, identity } = databaseFixture(t);
+  const broker = new NodeBroker(database);
+  class TestConnection extends EventEmitter {
+    constructor() { super(); this.frames = []; }
+    sendJSON(frame) { this.frames.push(frame); }
+    close() {}
+  }
+  const connection = new TestConnection();
+  broker.attach(connection);
+  const timestamp = Date.now();
+  const nonce = 'model-protection-test';
+  connection.emit('text', JSON.stringify({
+    type: 'hello', node_id: 'nod_test', timestamp, nonce,
+    signature: signNodeHello(identity.privateKey, 'nod_test', timestamp, nonce),
+  }));
+  const first = broker.request('nod_test', 'message.deliver', { message: { id: 'msg_safe' } }, {
+    idempotencyKey: 'msg_safe',
+  });
+  const command = connection.frames.find((frame) => frame.type === 'command');
+  connection.emit('text', JSON.stringify({
+    type: 'command_receipt', connection_epoch: command.connection_epoch, command_id: command.command_id,
+    error: { code: 'WS_AGENT_RESTART_REQUIRED', message: 'Protected resume required.', status: 409 },
+  }));
+  await assert.rejects(first, (error) => error.code === 'WS_AGENT_RESTART_REQUIRED');
+  assert.equal(database.getOutbox(command.command_id).state, 'pending');
+
+  const second = broker.request('nod_test', 'message.deliver', { message: { id: 'msg_safe' } }, {
+    idempotencyKey: 'msg_safe',
+  });
+  const replay = connection.frames.filter((frame) => frame.type === 'command').at(-1);
+  assert.equal(replay.command_id, command.command_id);
+  connection.emit('text', JSON.stringify({
+    type: 'command_receipt', connection_epoch: replay.connection_epoch, command_id: replay.command_id,
+    result: { accepted_bytes: 12 },
+  }));
+  assert.deepEqual(await second, { accepted_bytes: 12 });
+  assert.equal(database.getOutbox(command.command_id).state, 'acknowledged');
 });
 
 test('terminal leases fence stale controllers', (t) => {

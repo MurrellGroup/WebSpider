@@ -296,7 +296,12 @@ export class NodeDaemon extends EventEmitter {
       this.#send({ type: 'command_receipt', connection_epoch: this.epoch, command_id: frame.command_id, result });
     } catch (error) {
       const serialized = serializeError(error);
-      this.database.completeCommand(frame.command_id, null, serialized);
+      // A live session created before the model-stability keymap existed must
+      // not receive an Enter key that could accept a Codex model-switch popup.
+      // Leave the durable command retryable until that session is resumed.
+      if (serialized.code !== 'WS_AGENT_RESTART_REQUIRED') {
+        this.database.completeCommand(frame.command_id, null, serialized);
+      }
       this.#send({ type: 'command_receipt', connection_epoch: this.epoch, command_id: frame.command_id, error: serialized });
     }
   }

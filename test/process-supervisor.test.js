@@ -6,7 +6,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { NodeDatabase } from '../src/db/node-database.js';
 import { RootedFileService } from '../src/node/root-fs.js';
-import { codexResumeArgv, ProcessSupervisor, sanitizeInput } from '../src/node/process-supervisor.js';
+import {
+  automatedMessagePayload, codexResumeArgv, ProcessSupervisor, sanitizeInput,
+} from '../src/node/process-supervisor.js';
+import { CODEX_STABLE_MODEL_ARGUMENTS } from '../src/lib/agent-profile.js';
 
 function waitForCompletion(supervisor, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
@@ -38,6 +41,20 @@ test('terminal input preserves interactive control-key sequences', () => {
   const input = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 127]);
   assert.deepEqual(sanitizeInput(input), input);
   assert.throws(() => sanitizeInput(Buffer.from([0])), (error) => error.code === 'WS_VALIDATION');
+});
+
+test('automated Codex delivery cannot accept a model-switch popup', () => {
+  const protectedRuntime = {
+    argv: ['codex', ...CODEX_STABLE_MODEL_ARGUMENTS],
+    agentInstanceId: 'agt_protected', terminalId: 'trm_protected',
+  };
+  assert.equal(automatedMessagePayload(protectedRuntime, 'check progress').toString(),
+    '\u001b[200~check progress\u001b[201~\u001b[13;5u');
+  assert.throws(
+    () => automatedMessagePayload({ ...protectedRuntime, argv: ['codex'] }, 'unsafe'),
+    (error) => error.code === 'WS_AGENT_RESTART_REQUIRED' && error.status === 409,
+  );
+  assert.equal(automatedMessagePayload({ argv: ['/bin/sh'] }, 'echo safe').toString(), 'echo safe\n');
 });
 
 test('terminal output polling defaults to interactive latency', (t) => {

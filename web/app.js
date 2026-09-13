@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.26';
+const PORTAL_VERSION = '0.6.27';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -724,9 +724,10 @@ async function renderConversation(agent) {
 function renderMessage(message) {
   const text = message.content_parts.filter((part) => part.type === 'text').map((part) => part.text).join('\n');
   const actual = message.authenticated_actor_id !== message.display_sender ? `${message.authenticated_actor_id} → delivered as ${message.delivery_role}` : message.delivery_role;
+  const deliveryReason = message.delivery?.failure_reason ? ` · ${message.delivery.failure_reason}` : '';
   return `<article class="message ${h(message.delivery_role)}">
     <div class="message-avatar">${h((message.display_sender || '?').slice(0, 2).toUpperCase())}</div>
-    <div class="message-body"><div class="message-meta"><strong>${h(message.display_sender)}</strong><time>${h(formatTime(message.created_at))}</time><span>#${message.sequence}</span></div><div class="message-text markdown-body">${renderMarkdown(text)}</div><div class="delivery-note">${h(actual)} · ${h(message.delivery?.state || 'accepted')}</div></div>
+    <div class="message-body"><div class="message-meta"><strong>${h(message.display_sender)}</strong><time>${h(formatTime(message.created_at))}</time><span>#${message.sequence}</span></div><div class="message-text markdown-body">${renderMarkdown(text)}</div><div class="delivery-note">${h(actual)} · ${h(message.delivery?.state || 'accepted')}${h(deliveryReason)}</div></div>
   </article>`;
 }
 

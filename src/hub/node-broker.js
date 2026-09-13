@@ -140,7 +140,11 @@ export class NodeBroker extends EventEmitter {
       const durable = pending?.transient ? null : this.database.getOutbox(frame.command_id);
       if (!pending && frame.transient) return;
       if (durable?.node_id && durable.node_id !== state.nodeId) return;
-      if (durable) this.database.markOutboxResult(frame.command_id, frame.result, frame.error?.message || null);
+      if (durable && frame.error?.code === 'WS_AGENT_RESTART_REQUIRED') {
+        this.database.markOutboxPending(frame.command_id, frame.error.message);
+      } else if (durable) {
+        this.database.markOutboxResult(frame.command_id, frame.result, frame.error?.message || null);
+      }
       if (pending) {
         clearTimeout(pending.timer);
         this.pending.delete(frame.command_id);

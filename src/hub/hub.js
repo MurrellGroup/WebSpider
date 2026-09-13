@@ -2798,6 +2798,10 @@ export class Hub {
       }, message.trace_id);
     } catch (error) {
       if (error.code === 'WS_NODE_OFFLINE') this.database.updateMessageDelivery(messageId, 'queued');
+      else if (error.code === 'WS_AGENT_RESTART_REQUIRED') {
+        this.database.updateMessageDelivery(messageId, 'queued', null, error.message);
+        return;
+      }
       else this.database.updateMessageDelivery(messageId, 'failed', null, error.message);
       throw error;
     }

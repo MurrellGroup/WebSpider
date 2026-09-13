@@ -2409,6 +2409,11 @@ export class HubDatabase extends EventEmitter {
       .run(error ? 'failed' : 'acknowledged', nowISO(), encode(result), error, id);
   }
 
+  markOutboxPending(id, reason = null) {
+    this.db.prepare(`UPDATE outbox SET state = 'pending', acknowledged_at = NULL,
+      result_json = NULL, failure_reason = ? WHERE id = ?`).run(reason, id);
+  }
+
   pendingOutbox(nodeId) {
     return this.db.prepare(`SELECT * FROM outbox WHERE node_id = ? AND state IN ('pending','sent') ORDER BY created_at`)
       .all(nodeId).map((row) => ({ ...row, payload: decode(row.payload_json, {}), result: decode(row.result_json) }));

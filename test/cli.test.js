@@ -9,6 +9,7 @@ import {
   resolveAgentProfile,
   writeNodeConfig,
 } from '../src/cli.js';
+import { CODEX_STABLE_MODEL_ARGUMENTS } from '../src/lib/agent-profile.js';
 
 test('the built-in Hub node identity is isolated from enrolled worker state', () => {
   assert.equal(localNodeIdentityStateDir('/var/lib/webspider'), '/var/lib/webspider/local-node-identity');
@@ -29,7 +30,7 @@ test('one explicit agent command resolves without a full profile specification',
   });
   assert.equal(profile.name, 'Codex');
   assert.equal(profile.executable, '/opt/tools/codex');
-  assert.deepEqual(profile.arguments, ['--example']);
+  assert.deepEqual(profile.arguments, ['--example', ...CODEX_STABLE_MODEL_ARGUMENTS]);
 });
 
 test('Codex agents default to unattended full access when no arguments are supplied', () => {
@@ -39,6 +40,7 @@ test('Codex agents default to unattended full access when no arguments are suppl
     'never',
     '--sandbox',
     'danger-full-access',
+    ...CODEX_STABLE_MODEL_ARGUMENTS,
   ]);
 });
 
