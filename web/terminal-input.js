@@ -90,3 +90,56 @@ export function enqueueTerminalData(data, {
   enqueue?.(data);
   return true;
 }
+
+export function attachTerminalTouchScrolling(element, terminal) {
+  if (!element || !terminal) return { dispose() {} };
+  let touchIdentifier = null;
+  let lastY = 0;
+  let remainder = 0;
+
+  const reset = () => {
+    touchIdentifier = null;
+    lastY = 0;
+    remainder = 0;
+  };
+  const matchingTouch = (event) => [...(event.changedTouches || [])]
+    .find((touch) => touch.identifier === touchIdentifier);
+  const onTouchStart = (event) => {
+    if (event.touches?.length !== 1) return reset();
+    const touch = event.touches[0];
+    touchIdentifier = touch.identifier;
+    lastY = touch.clientY;
+    remainder = 0;
+  };
+  const onTouchMove = (event) => {
+    const touch = matchingTouch(event);
+    if (!touch || !Number.isFinite(lastY)) return;
+    const rowHeight = Math.max(1, element.clientHeight / Math.max(1, terminal.rows || 1));
+    remainder += lastY - touch.clientY;
+    lastY = touch.clientY;
+    const lines = remainder < 0 ? Math.ceil(remainder / rowHeight) : Math.floor(remainder / rowHeight);
+    if (lines) {
+      terminal.scrollLines?.(lines);
+      remainder -= lines * rowHeight;
+    }
+    if (event.cancelable) event.preventDefault();
+  };
+  const onTouchEnd = (event) => {
+    if (!matchingTouch(event)) return;
+    reset();
+  };
+
+  element.addEventListener('touchstart', onTouchStart, { passive: true });
+  element.addEventListener('touchmove', onTouchMove, { passive: false });
+  element.addEventListener('touchend', onTouchEnd, { passive: true });
+  element.addEventListener('touchcancel', onTouchEnd, { passive: true });
+  return {
+    dispose() {
+      element.removeEventListener('touchstart', onTouchStart);
+      element.removeEventListener('touchmove', onTouchMove);
+      element.removeEventListener('touchend', onTouchEnd);
+      element.removeEventListener('touchcancel', onTouchEnd);
+      reset();
+    },
+  };
+}

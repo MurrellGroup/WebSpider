@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import {
-  clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  attachTerminalTouchScrolling, clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
   resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
@@ -10,7 +10,7 @@ import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraf
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
-const PORTAL_VERSION = '0.6.27';
+const PORTAL_VERSION = '0.6.28';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -51,6 +51,7 @@ const state = {
   terminalEmulator: null,
   terminalFitAddon: null,
   terminalInputSubscription: null,
+  terminalTouchSubscription: null,
   terminalResizeObserver: null,
   terminalDimensions: null,
   terminalKeyboardProtocol: false,
@@ -338,6 +339,8 @@ function closeTerminal() {
   state.terminalResyncCount = 0;
   state.terminalInputSubscription?.dispose();
   state.terminalInputSubscription = null;
+  state.terminalTouchSubscription?.dispose();
+  state.terminalTouchSubscription = null;
   state.terminalResizeObserver?.disconnect();
   state.terminalResizeObserver = null;
   state.terminalFitAddon = null;
@@ -682,7 +685,7 @@ async function renderAgent(agentId, tab = 'terminal') {
   const resumable = ['stopped', 'failed', 'hibernated'].includes(agent.state);
   const codexAction = agent.codex_capable ? '<button data-action="adopt-codex-session">Adopt Codex session…</button>' : '';
   const actionMenu = `<details class="action-menu"><summary>Agent actions</summary><div>${codexAction}${resumable ? '' : '<button class="danger" data-action="stop-agent">Stop agent</button>'}</div></details>`;
-  $('#main-view').innerHTML = `<div class="page">
+  $('#main-view').innerHTML = `<div class="page ${tab === 'terminal' ? 'terminal-page' : ''}">
     ${pageHeader(agent.title || agent.profile_name, `${agent.project_name} · ${agent.node_name} · ${agent.work_status}${agent.status_summary ? ` · ${agent.status_summary}` : ''}`, `
       <span class="status-pill ${h(agent.state)}">${h(agent.state)}</span>
       ${agent.orchestration_role === 'main' ? '<button class="mobile-primary" data-action="overview">Portfolio</button>' : ''}
@@ -1358,6 +1361,7 @@ async function renderTerminal(agent) {
   state.terminalFitAddon = fitAddon;
   emulator.attachCustomKeyEventHandler(handleTerminalKey);
   emulator.open($('#terminal-output'));
+  state.terminalTouchSubscription = attachTerminalTouchScrolling($('#terminal-output'), emulator);
   fitTerminal();
   state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(() => fitTerminal({ redraw: true })));
   state.terminalResizeObserver.observe($('#terminal-output'));
@@ -2470,8 +2474,21 @@ document.addEventListener('paste', (event) => {
 document.addEventListener('keydown', (event) => trackTerminalKey(event, terminalKeyState), true);
 document.addEventListener('keyup', (event) => trackTerminalKey(event, terminalKeyState), true);
 window.addEventListener('blur', () => resetTerminalKeyState(terminalKeyState));
-window.addEventListener('focus', () => refreshTerminalLayout());
-window.addEventListener('resize', () => refreshTerminalLayout());
+let viewportGeometryFrame = null;
+function syncViewportGeometry() {
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty('--webspider-viewport-height', `${Math.round(viewportHeight)}px`);
+  if (viewportGeometryFrame != null) return;
+  viewportGeometryFrame = requestAnimationFrame(() => {
+    viewportGeometryFrame = null;
+    refreshTerminalLayout();
+  });
+}
+
+window.addEventListener('focus', syncViewportGeometry);
+window.addEventListener('resize', syncViewportGeometry);
+window.visualViewport?.addEventListener('resize', syncViewportGeometry);
+window.visualViewport?.addEventListener('scroll', syncViewportGeometry);
 window.addEventListener('pageshow', () => refreshTerminalLayout());
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refreshTerminalLayout();
@@ -2513,6 +2530,7 @@ document.addEventListener('keydown', (event) => {
 window.addEventListener('hashchange', () => routeFromHash().catch((error) => toast(friendlyError(error), true)));
 
 async function init() {
+  syncViewportGeometry();
   const accessToken = consumeAccessToken();
   try {
     state.session = accessToken

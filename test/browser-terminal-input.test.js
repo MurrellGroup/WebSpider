@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
+  attachTerminalTouchScrolling, clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
   resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from '../web/terminal-input.js';
+
+function touchEvent(type, { touches = [], changedTouches = touches } = {}) {
+  const event = new Event(type, { cancelable: true });
+  Object.defineProperties(event, {
+    touches: { value: touches },
+    changedTouches: { value: changedTouches },
+  });
+  return event;
+}
 
 test('rapid printable keydowns bypass the hidden terminal textarea without losing characters', () => {
   const expected = Array.from({ length: 2_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join('');
@@ -100,4 +109,28 @@ test('terminal data always queues and requests control when no precursor event d
   });
   assert.deepEqual(events, ['data:def']);
   assert.equal(enqueueTerminalData('', { enqueue: () => events.push('unexpected') }), false);
+});
+
+test('touch swipes scroll terminal history by rows and can be disposed', () => {
+  const element = new EventTarget();
+  Object.defineProperty(element, 'clientHeight', { value: 240 });
+  const lines = [];
+  const subscription = attachTerminalTouchScrolling(element, { rows: 12, scrollLines: (count) => lines.push(count) });
+  const start = { identifier: 7, clientY: 180 };
+  element.dispatchEvent(touchEvent('touchstart', { touches: [start] }));
+  const first = { identifier: 7, clientY: 135 };
+  const move = touchEvent('touchmove', { touches: [first], changedTouches: [first] });
+  element.dispatchEvent(move);
+  assert.deepEqual(lines, [2]);
+  assert.equal(move.defaultPrevented, true);
+
+  const second = { identifier: 7, clientY: 215 };
+  element.dispatchEvent(touchEvent('touchmove', { touches: [second], changedTouches: [second] }));
+  assert.deepEqual(lines, [2, -3]);
+  element.dispatchEvent(touchEvent('touchend', { touches: [], changedTouches: [second] }));
+
+  subscription.dispose();
+  element.dispatchEvent(touchEvent('touchstart', { touches: [start] }));
+  element.dispatchEvent(touchEvent('touchmove', { touches: [first], changedTouches: [first] }));
+  assert.deepEqual(lines, [2, -3]);
 });

@@ -140,6 +140,20 @@ test('mobile navigation keeps project actions available and More opens the navig
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.main-view \{[^}]*height: calc\(100dvh[^}]*overflow-y: auto;/);
 });
 
+test('mobile terminal stays inside the keyboard-resized viewport with reachable controls', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(page, /interactive-widget=resizes-content/);
+  assert.match(app, /class="page \$\{tab === 'terminal' \? 'terminal-page' : ''\}"/);
+  assert.match(app, /window\.visualViewport\?\.addEventListener\('resize', syncViewportGeometry\)/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.terminal-page \{[^}]*height: 100%;[^}]*overflow: hidden;/);
+  assert.match(styles, /\.terminal-page-content \{[^}]*flex: 1 1 auto;[^}]*overflow: hidden;/);
+  assert.match(styles, /\.terminal-shell \{[^}]*height: 100%;[^}]*min-height: 0;/);
+  assert.match(styles, /\.terminal-toolbar \{[^}]*overflow-x: auto;/);
+  assert.match(styles, /\.terminal-output \.xterm-viewport \{[^}]*-webkit-overflow-scrolling: touch;/);
+  assert.match(styles, /\.terminal-compose button \{[^}]*width: 100%;[^}]*min-height: 42px;/);
+  assert.match(app, /attachTerminalTouchScrolling\(\$\('#terminal-output'\), emulator\)/);
+});
+
 test('archived projects have a dedicated restore and guarded-delete view', () => {
   assert.match(page, /data-action="show-archived"/);
   assert.match(app, /api\('\/api\/v1\/projects\?archived=only'/);
@@ -244,8 +258,8 @@ test('terminal display has an explicit deep refresh and repairs its layout after
   assert.match(app, /fitTerminal\(\{ redraw: true, syncPty \}\)/);
   assert.match(app, /emulator\.refresh\(0, emulator\.rows - 1\)/);
   assert.match(app, /changed \|\| syncPty/);
-  assert.match(app, /window\.addEventListener\('focus', \(\) => refreshTerminalLayout\(\)\)/);
-  assert.match(app, /window\.addEventListener\('resize', \(\) => refreshTerminalLayout\(\)\)/);
+  assert.match(app, /window\.addEventListener\('focus', syncViewportGeometry\)/);
+  assert.match(app, /window\.addEventListener\('resize', syncViewportGeometry\)/);
   assert.match(app, /document\.addEventListener\('visibilitychange'/);
   assert.match(app, /terminalResizeObserver = new ResizeObserver/);
 });
