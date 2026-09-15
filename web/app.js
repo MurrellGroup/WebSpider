@@ -14,9 +14,37 @@ const PORTAL_VERSION = '0.6.28';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
+const FILE_BROWSER_STORAGE_KEY = 'webspider_file_browser_states_v1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const terminalKeyState = createTerminalKeyState();
+
+function normalizedFileBrowserState(value = {}) {
+  return {
+    path: typeof value.path === 'string' ? value.path : '',
+    previewPath: typeof value.previewPath === 'string' ? value.previewPath : null,
+    previewMode: ['source', 'rendered'].includes(value.previewMode) ? value.previewMode : 'source',
+    showHidden: value.showHidden === true,
+    searchQuery: typeof value.searchQuery === 'string' ? value.searchQuery : '',
+  };
+}
+
+function loadFileBrowserStates() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(FILE_BROWSER_STORAGE_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed)
+      .filter(([key, value]) => key && value && typeof value === 'object' && !Array.isArray(value))
+      .slice(-100)
+      .map(([key, value]) => [key, normalizedFileBrowserState(value)]));
+  } catch {
+    return {};
+  }
+}
+
+function fileBrowserStateKey(agentId, rootId) {
+  return `${encodeURIComponent(agentId || '')}:${encodeURIComponent(rootId || '')}`;
+}
 
 const state = {
   session: null,
@@ -77,6 +105,8 @@ const state = {
   terminalPendingFiles: [],
   filePath: '',
   fileShowHidden: false,
+  fileSearchQuery: '',
+  fileBrowserStates: loadFileBrowserStates(),
   workspacePendingFiles: [],
   workspaceUploadBusy: false,
   activeRoot: null,
@@ -691,7 +721,7 @@ async function renderAgent(agentId, tab = 'terminal') {
       ${agent.orchestration_role === 'main' ? '<button class="mobile-primary" data-action="overview">Portfolio</button>' : ''}
       ${resumable ? '<button class="primary" data-action="wake-agent">Resume agent</button>' : ''}${codexAction || !resumable ? actionMenu : ''}`)}
     <nav class="tabs">${agentTabs()}</nav>
-    <div id="agent-content" class="page-content ${tab === 'terminal' ? 'terminal-page-content' : ''}"><div class="loading">Loading ${h(tab)}…</div></div>
+    <div id="agent-content" class="page-content ${tab === 'terminal' ? 'terminal-page-content' : ''} ${tab === 'files' ? 'file-page-content' : ''}"><div class="loading">Loading ${h(tab)}…</div></div>
   </div>`;
   history.replaceState(null, '', `#/projects/${encodeURIComponent(agent.project_id)}/agents/${encodeURIComponent(agent.id)}/${tab}`);
   await renderAgentTab();
@@ -1446,16 +1476,54 @@ async function renderTerminal(agent) {
 async function renderFiles(agent) {
   const data = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/roots`);
   state.activeRoot = data.roots[0] || null;
-  state.filePath = '';
-  state.fileShowHidden = false;
-  state.previewPath = null;
-  state.previewMode = 'source';
   if (!state.activeRoot) {
     $('#agent-content').innerHTML = '<div class="empty"><div><strong>No exposed root</strong><p>This agent has no project root available to the portal.</p></div></div>';
     return;
   }
-  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong>No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
-  await loadDirectory();
+  const restored = normalizedFileBrowserState(state.fileBrowserStates[fileBrowserStateKey(agent.id, state.activeRoot.id)]);
+  state.filePath = restored.path;
+  state.fileShowHidden = restored.showHidden;
+  state.fileSearchQuery = restored.searchQuery;
+  state.previewPath = restored.previewPath;
+  state.previewMode = restored.previewMode;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  try {
+    await loadDirectory();
+  } catch (error) {
+    if (!state.filePath) throw error;
+    state.filePath = '';
+    state.fileSearchQuery = '';
+    state.previewPath = null;
+    rememberFileBrowserState();
+    await loadDirectory();
+    toast('The remembered folder is no longer available; showing the workspace root.', true);
+  }
+  if (state.fileSearchQuery) await searchFiles(state.fileSearchQuery);
+  if (state.previewPath) await previewFile('', { relativePath: state.previewPath, preferredMode: state.previewMode });
+}
+
+function rememberFileBrowserState() {
+  if (!state.selectedAgent?.id || !state.activeRoot?.id) return;
+  const key = fileBrowserStateKey(state.selectedAgent.id, state.activeRoot.id);
+  delete state.fileBrowserStates[key];
+  state.fileBrowserStates[key] = normalizedFileBrowserState({
+    path: state.filePath,
+    previewPath: state.previewPath,
+    previewMode: state.previewMode,
+    showHidden: state.fileShowHidden,
+    searchQuery: state.fileSearchQuery,
+  });
+  while (Object.keys(state.fileBrowserStates).length > 100) delete state.fileBrowserStates[Object.keys(state.fileBrowserStates)[0]];
+  try { sessionStorage.setItem(FILE_BROWSER_STORAGE_KEY, JSON.stringify(state.fileBrowserStates)); } catch {
+    // The in-memory state still survives tab and agent navigation.
+  }
+}
+
+async function openFileDirectory(path) {
+  state.filePath = path;
+  state.fileSearchQuery = '';
+  rememberFileBrowserState();
+  return loadDirectory();
 }
 
 async function loadDirectory() {
@@ -1463,10 +1531,14 @@ async function loadDirectory() {
   const data = await api(`/api/v1/roots/${encodeURIComponent(root.id)}/entries?path=${encodeURIComponent(state.filePath)}&hidden=${state.fileShowHidden}`);
   const parts = state.filePath ? state.filePath.split('/') : [];
   const crumbs = [{ name: root.logical_name, path: '' }, ...parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join('/') }))];
-  $('#file-toolbar').innerHTML = `${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}<button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" placeholder="Search" aria-label="Search files">`;
-  $('#file-rows').innerHTML = data.entries.length ? data.entries.map((entry) => `<button class="file-row ${h(entry.kind)}" data-file-name="${h(entry.name)}" data-file-kind="${h(entry.kind)}">
-    <span class="file-icon">${entry.kind === 'directory' ? '▰' : entry.kind === 'symlink' ? '↗' : '▤'}</span><span class="file-name">${h(entry.name)}</span><span class="file-size">${h(formatBytes(entry.size))}</span><span class="file-date">${h(formatTime(entry.mtime))}</span>
-  </button>`).join('') : '<div class="empty"><div><strong>Empty directory</strong><p>No visible entries in this workspace path.</p></div></div>';
+  $('#file-toolbar').innerHTML = `<div class="file-location" aria-label="Current workspace path">${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}</div><div class="file-toolbar-actions"><button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" value="${h(state.fileSearchQuery)}" placeholder="Search" aria-label="Search files"></div>`;
+  $('#file-rows').innerHTML = data.entries.length ? data.entries.map((entry) => {
+    const relative = state.filePath ? `${state.filePath}/${entry.name}` : entry.name;
+    return `<button class="file-row ${h(entry.kind)} ${relative === state.previewPath ? 'selected' : ''}" data-file-name="${h(entry.name)}" data-file-path="${h(relative)}" data-file-kind="${h(entry.kind)}">
+      <span class="file-icon">${entry.kind === 'directory' ? '▰' : entry.kind === 'symlink' ? '↗' : '▤'}</span><span class="file-name" title="${h(relative)}">${h(entry.name)}</span><span class="file-size">${h(formatBytes(entry.size))}</span><span class="file-date">${h(formatTime(entry.mtime))}</span>
+    </button>`;
+  }).join('') : '<div class="empty"><div><strong>Empty directory</strong><p>No visible entries in this workspace path.</p></div></div>';
+  rememberFileBrowserState();
 }
 
 async function retryWorkspaceUploadRequest(path, options) {
@@ -1504,17 +1576,19 @@ async function uploadWorkspaceFile(entry, conflict, progress) {
   });
 }
 
-async function previewFile(name) {
+async function previewFile(name, { relativePath = null, preferredMode = null } = {}) {
   closeStructurePreview();
   const previewGeneration = state.structurePreviewGeneration;
-  const relative = state.filePath ? `${state.filePath}/${name}` : name;
+  const relative = relativePath || (state.filePath ? `${state.filePath}/${name}` : name);
   state.previewPath = relative;
   const markdown = /\.(?:md|markdown|qmd|rmd)$/i.test(relative);
   const image = /\.(?:png|jpe?g|gif|webp|svg)$/i.test(relative);
   const pdf = /\.pdf$/i.test(relative);
   const structure = /\.(?:pdb|cif|mmcif)$/i.test(relative);
-  state.previewMode = markdown ? 'rendered' : 'source';
-  $('#preview-header').innerHTML = `<strong>${h(relative)}</strong><div class="preview-actions">${markdown ? '<div class="preview-mode-switch"><button data-preview-mode="rendered" class="selected">Readable</button><button data-preview-mode="source">Source</button></div>' : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
+  state.previewMode = markdown && ['source', 'rendered'].includes(preferredMode) ? preferredMode : markdown ? 'rendered' : 'source';
+  rememberFileBrowserState();
+  $$('.file-row').forEach((row) => row.classList.toggle('selected', row.dataset.filePath === relative));
+  $('#preview-header').innerHTML = `<strong class="preview-path" title="${h(relative)}">${h(relative)}</strong><div class="preview-actions">${markdown ? `<div class="preview-mode-switch"><button data-preview-mode="rendered" class="${state.previewMode === 'rendered' ? 'selected' : ''}">Readable</button><button data-preview-mode="source" class="${state.previewMode === 'source' ? 'selected' : ''}">Source</button></div>` : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
   if (structure) {
@@ -1591,6 +1665,7 @@ function setPreviewMode(mode) {
   const content = $('#preview-content');
   if (!content?.dataset.source) return;
   state.previewMode = mode;
+  rememberFileBrowserState();
   $$('[data-preview-mode]').forEach((button) => button.classList.toggle('selected', button.dataset.previewMode === mode));
   if (mode === 'rendered') {
     content.className = 'preview-content markdown-body';
@@ -1602,9 +1677,11 @@ function setPreviewMode(mode) {
 }
 
 async function searchFiles(query) {
+  state.fileSearchQuery = query;
+  rememberFileBrowserState();
   const result = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/search?path=${encodeURIComponent(state.filePath)}&query=${encodeURIComponent(query)}`);
-  $('#file-rows').innerHTML = result.results.length ? result.results.map((entry) => `<button class="file-row ${h(entry.kind)}" data-search-path="${h(entry.path)}" data-search-kind="${h(entry.kind)}">
-    <span class="file-icon">${entry.kind === 'directory' ? '▰' : '⌕'}</span><span class="file-name">${h(entry.path)}${entry.line ? `:${entry.line}` : ''}<small style="display:block;color:var(--muted-2);overflow:hidden;text-overflow:ellipsis">${h(entry.excerpt || entry.match)}</small></span><span class="file-size"></span><span class="file-date">${h(entry.match)}</span>
+  $('#file-rows').innerHTML = result.results.length ? result.results.map((entry) => `<button class="file-row ${h(entry.kind)} ${entry.path === state.previewPath ? 'selected' : ''}" data-file-path="${h(entry.path)}" data-search-path="${h(entry.path)}" data-search-kind="${h(entry.kind)}">
+    <span class="file-icon">${entry.kind === 'directory' ? '▰' : '⌕'}</span><span class="file-name" title="${h(entry.path)}">${h(entry.path)}${entry.line ? `:${entry.line}` : ''}<small class="file-match">${h(entry.excerpt || entry.match)}</small></span><span class="file-size"></span><span class="file-date">${h(entry.match)}</span>
   </button>`).join('') : '<div class="empty"><div><strong>No matches</strong><p>Search stays within this registered workspace root.</p></div></div>';
 }
 
@@ -1833,18 +1910,20 @@ document.addEventListener('click', async (event) => {
   const tab = event.target.closest('[data-tab]');
   if (tab && state.selectedAgent) return renderAgent(state.selectedAgent.id, tab.dataset.tab);
   const directory = event.target.closest('[data-file-dir]');
-  if (directory) { state.filePath = directory.dataset.fileDir; return loadDirectory(); }
+  if (directory) return openFileDirectory(directory.dataset.fileDir);
   const searchResult = event.target.closest('[data-search-path]');
   if (searchResult) {
     const relative = searchResult.dataset.searchPath;
-    if (searchResult.dataset.searchKind === 'directory') { state.filePath = relative; return loadDirectory(); }
+    if (searchResult.dataset.searchKind === 'directory') return openFileDirectory(relative);
     const slash = relative.lastIndexOf('/');
     state.filePath = slash < 0 ? '' : relative.slice(0, slash);
+    state.fileSearchQuery = '';
+    await loadDirectory();
     return previewFile(slash < 0 ? relative : relative.slice(slash + 1));
   }
   const file = event.target.closest('[data-file-name]');
   if (file) {
-    if (file.dataset.fileKind === 'directory') { state.filePath = state.filePath ? `${state.filePath}/${file.dataset.fileName}` : file.dataset.fileName; return loadDirectory(); }
+    if (file.dataset.fileKind === 'directory') return openFileDirectory(file.dataset.filePath);
     return previewFile(file.dataset.fileName);
   }
   const actionTarget = event.target.closest('[data-action]');
@@ -2018,6 +2097,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'show-tasks') { closeMobileSidebar(); return renderAllTasks(); }
     if (action === 'toggle-hidden-files') {
       state.fileShowHidden = !state.fileShowHidden;
+      rememberFileBrowserState();
       return loadDirectory();
     }
     if (action === 'mobile-agents') {
@@ -2452,6 +2532,12 @@ document.addEventListener('input', (event) => {
   try { sessionStorage.setItem(chatDraftKey(), event.target.value); } catch {}
 });
 
+document.addEventListener('input', (event) => {
+  if (event.target.id !== 'file-search') return;
+  state.fileSearchQuery = event.target.value;
+  rememberFileBrowserState();
+});
+
 document.addEventListener('click', (event) => {
   const remove = event.target.closest('[data-chat-file-remove]');
   if (!remove) return;
@@ -2522,7 +2608,11 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     const query = event.target.value.trim();
     if (query) searchFiles(query).catch((error) => toast(friendlyError(error), true));
-    else loadDirectory().catch((error) => toast(friendlyError(error), true));
+    else {
+      state.fileSearchQuery = '';
+      rememberFileBrowserState();
+      loadDirectory().catch((error) => toast(friendlyError(error), true));
+    }
     return;
   }
 });

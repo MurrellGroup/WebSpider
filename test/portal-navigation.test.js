@@ -332,6 +332,19 @@ test('file browser can reveal hidden workspace files explicitly', () => {
   assert.match(app, /Show hidden/);
 });
 
+test('file browser restores per-agent navigation and exposes complete scrollable paths', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /fileBrowserStates: loadFileBrowserStates\(\)/);
+  assert.match(app, /normalizedFileBrowserState\(state\.fileBrowserStates\[fileBrowserStateKey\(agent\.id, state\.activeRoot\.id\)\]\)/);
+  assert.match(app, /previewFile\('', \{ relativePath: state\.previewPath, preferredMode: state\.previewMode \}\)/);
+  assert.match(app, /sessionStorage\.setItem\(FILE_BROWSER_STORAGE_KEY/);
+  assert.match(app, /class="preview-path" title="\$\{h\(relative\)\}"/);
+  assert.match(app, /data-file-path="\$\{h\(relative\)\}"/);
+  assert.match(styles, /\.file-page-content \{ width: min\(1540px, 100%\); \}/);
+  assert.match(styles, /\.file-name \{[^}]*overflow-x: auto;[^}]*text-overflow: clip;/);
+  assert.match(styles, /\.preview-path \{[^}]*overflow-x: auto;[^}]*text-overflow: clip;/);
+});
+
 test('file viewer renders safe inline image, SVG, and PDF previews', () => {
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
   assert.match(app, /\(\?:png\|jpe\?g\|gif\|webp\|svg\)/);
