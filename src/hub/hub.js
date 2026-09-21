@@ -1586,6 +1586,8 @@ export class Hub {
       };
     });
     route('POST', '/api/v1/agent-instances/:id:wake', async (ctx) => this.#wakeAgent(ctx.params.id, ctx.principal.principal_id));
+    route('POST', '/api/v1/agent-instances/:id:refresh-control', async (ctx) =>
+      this.#refreshAgentControl(ctx.params.id, ctx.principal.principal_id));
     route('POST', '/api/v1/agent-instances/:id:resume-codex', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       let agent = this.database.setAgentCodexSession(ctx.params.id, {
@@ -2393,12 +2395,13 @@ export class Hub {
     return output.sort((left, right) => String(right.created_at || '').localeCompare(String(left.created_at || '')));
   }
 
-  #issueAgentControl(agent) {
+  #issueAgentControl(agent, { replaceExisting = true } = {}) {
     const token = randomToken('wsa');
     const scopes = agent.orchestration_role === 'main' ? MAIN_AGENT_CONTROL_SCOPES : WORKER_AGENT_CONTROL_SCOPES;
-    const record = this.database.issueAgentControlToken(agent.id, token, scopes);
+    const record = this.database.issueAgentControlToken(agent.id, token, scopes, null, replaceExisting);
     return {
       token,
+      record,
       control: {
         url: new URL('/api/v1/agent-control', this.url).href,
         token,
@@ -2407,6 +2410,91 @@ export class Hub {
         expires_at: record.expires_at,
       },
     };
+  }
+
+  async #refreshAgentControl(agentId, actor) {
+    const agent = this.database.getAgent(agentId);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before refreshing its control credential.', 409);
+    invariant(this.broker.isOnline(agent.node_id), 'WS_NODE_OFFLINE', 'The agent workstation is offline.', 503);
+    const snapshot = await this.broker.requestTransient(agent.node_id, 'terminal.snapshot', {
+      terminal_id: agent.terminal_id,
+      max_bytes: 1,
+    }, { timeoutMs: 30_000 });
+    invariant(snapshot?.state === 'running', 'WS_AGENT_NOT_READY', 'The primary agent process is not running.', 409,
+      { runtime_state: snapshot?.state || 'unknown' });
+    const runtimeId = this.agentRuntimes.get(agent.id)
+      || this.database.latestStartedAgentRuntimeId(agent.id, agent.terminal_id);
+    invariant(runtimeId, 'WS_AGENT_NOT_READY', 'No verified runtime identity is recorded for the live primary terminal.', 409);
+    const root = this.database.listAgentRoots(agent.id)[0];
+    invariant(root, 'WS_ROOT_NOT_FOUND', 'The agent has no registered workspace root.', 404);
+    const project = this.database.getProject(agent.project_id);
+    const renderedInstructions = renderProjectInstructions(project, {
+      role: agent.orchestration_role,
+      customInstructions: agent.custom_instructions,
+    });
+    const policySnapshot = this.database.createPolicySnapshot({
+      projectId: project.id,
+      agentInstanceId: agent.id,
+      agentRole: agent.orchestration_role,
+      systemPolicyRevision: project.system_policy_revision,
+      policyRevision: project.policy_revision,
+      policy: project.policy,
+      agentInstructions: agent.custom_instructions,
+      agentInstructionRevision: agent.instruction_revision,
+      renderedInstructions,
+    });
+    // Keep the current token valid until the replacement reaches the node. A
+    // failed refresh therefore cannot break an otherwise healthy session.
+    const issued = this.#issueAgentControl(agent, { replaceExisting: false });
+    const payload = {
+      runtime_id: runtimeId,
+      agent_instance_id: agent.id,
+      terminal_id: agent.terminal_id,
+      root_id: root.node_root_id,
+      policy_snapshot: policySnapshot,
+      agent_control: issued.control,
+    };
+    try {
+      let result;
+      try {
+        result = await this.broker.requestTransient(agent.node_id, 'process.refresh-agent-control', payload,
+          { timeoutMs: 30_000 });
+      } catch (error) {
+        if (error.code !== 'WS_NODE_COMMAND_UNSUPPORTED') throw error;
+        // Compatibility for a live node predating the refresh command. A
+        // same-identity claim only re-materializes private context files.
+        result = await this.broker.requestTransient(agent.node_id, 'process.claim-agent', {
+          ...payload,
+          expected_agent_instance_id: agent.id,
+        }, { timeoutMs: 30_000 });
+      }
+      invariant(result?.runtime?.id === runtimeId && result.runtime.agentInstanceId === agent.id,
+        'WS_RECOVERY_STALE', 'The workstation returned a different agent runtime.', 409);
+      this.database.revokeAgentControlTokensExcept(agent.id, issued.record.id);
+      this.agentRuntimes.set(agent.id, runtimeId);
+      this.database.setTerminalState(agent.terminal_id, 'attached');
+      if (!['ready', 'busy'].includes(agent.state)) {
+        this.database.setAgentState(agent.id, 'ready', `node:${agent.node_id}`, {
+          recovered: true,
+          recovery_mode: 'live_control_refresh',
+          runtime_id: runtimeId,
+        });
+      }
+      this.database.audit({
+        actorId: actor,
+        action: 'agent.control.refresh',
+        targetType: 'agent_instance',
+        targetId: agent.id,
+        projectId: agent.project_id,
+        decision: 'live_runtime_preserved',
+        newState: { runtime_id: runtimeId, process_restarted: false },
+      });
+      return { refreshed: true, agent_id: agent.id, runtime_id: runtimeId, process_restarted: false };
+    } catch (error) {
+      this.database.revokeAgentControlToken(issued.record.id);
+      throw error;
+    }
   }
 
   async #claimRecoveryCandidate({ runtimeId, expectedAgentInstanceId, targetAgentInstanceId, actor }) {
@@ -2668,6 +2756,28 @@ export class Hub {
           });
         }
         continue;
+      }
+      if (['ready', 'busy'].includes(agent.state) && this.broker.isOnline(agent.node_id)) {
+        try {
+          const snapshot = await this.broker.requestTransient(agent.node_id, 'terminal.snapshot', {
+            terminal_id: agent.terminal_id,
+            max_bytes: 1,
+          }, { timeoutMs: 10_000 });
+          if (snapshot?.state === 'running') {
+            const runtimeId = this.database.latestStartedAgentRuntimeId(agent.id, agent.terminal_id);
+            if (runtimeId) this.agentRuntimes.set(agent.id, runtimeId);
+            this.database.setTerminalState(agent.terminal_id, 'attached');
+            this.database.appendEvent('agent', agent.id, 'agent.runtime_inventory.omission.v1',
+              'hub:reconciler', runtimeId || agent.id, {
+                node_id: nodeId,
+                connection_epoch: connectionEpoch,
+                runtime_id: runtimeId,
+              });
+            continue;
+          }
+        } catch (error) {
+          this.#logError(error);
+        }
       }
       if (['ready', 'busy'].includes(agent.state)
         && runningAgentRuntimes.some((runtime) => runtime.agent_instance_id === agent.id)) {

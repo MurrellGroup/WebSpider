@@ -1034,7 +1034,7 @@ export class HubDatabase extends EventEmitter {
     this.db.prepare('UPDATE browser_sessions SET revoked_at = ? WHERE id = ?').run(nowISO(), id);
   }
 
-  issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = null) {
+  issueAgentControlToken(agentInstanceId, token, scopes, ttlMs = null, replaceExisting = true) {
     const agent = this.getAgent(agentInstanceId);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
     invariant(!agent.project_archived_at, 'WS_PROJECT_ARCHIVED', 'Restore the project before starting its agent.', 409);
@@ -1068,8 +1068,10 @@ export class HubDatabase extends EventEmitter {
       expires_at: ttlMs == null ? null : storedExpiry,
     };
     this.transaction(() => {
-      this.db.prepare('UPDATE agent_control_tokens SET revoked_at = ? WHERE agent_instance_id = ? AND revoked_at IS NULL')
-        .run(now, agent.id);
+      if (replaceExisting) {
+        this.db.prepare('UPDATE agent_control_tokens SET revoked_at = ? WHERE agent_instance_id = ? AND revoked_at IS NULL')
+          .run(now, agent.id);
+      }
       this.db.prepare(`INSERT INTO agent_control_tokens
         (id, token_hash, agent_instance_id, project_id, scopes_json, created_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
@@ -1078,6 +1080,19 @@ export class HubDatabase extends EventEmitter {
       );
     });
     return record;
+  }
+
+  revokeAgentControlToken(id) {
+    const result = this.db.prepare('UPDATE agent_control_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(nowISO(), id);
+    return Number(result.changes) > 0;
+  }
+
+  revokeAgentControlTokensExcept(agentInstanceId, retainedId) {
+    const result = this.db.prepare(`UPDATE agent_control_tokens SET revoked_at = ?
+      WHERE agent_instance_id = ? AND id <> ? AND revoked_at IS NULL`)
+      .run(nowISO(), agentInstanceId, retainedId);
+    return Number(result.changes);
   }
 
   getAgentControlToken(token) {
@@ -1817,6 +1832,17 @@ export class HubDatabase extends EventEmitter {
       content_hash: row.content_hash,
       created_at: row.created_at,
     };
+  }
+
+  latestStartedAgentRuntimeId(agentInstanceId, terminalId) {
+    const rows = this.db.prepare(`SELECT subject_id, payload_json FROM events
+      WHERE scope_type = 'agent' AND scope_id = ? AND type = 'runtime.started.v1'
+      ORDER BY global_sequence DESC LIMIT 100`).all(agentInstanceId);
+    for (const row of rows) {
+      const payload = decode(row.payload_json, {});
+      if (payload.kind === 'agent' && payload.terminalId === terminalId) return row.subject_id;
+    }
+    return null;
   }
 
   createProfile({ id = makeId('apf'), name, adapterKind = 'command', executable = '/bin/bash', arguments: args = [], environment = {}, restartPolicy = {} }, actor = 'owner:local') {

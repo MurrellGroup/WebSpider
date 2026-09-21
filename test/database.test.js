@@ -79,6 +79,39 @@ test('agent control tokens follow the managed process lifecycle and migrate acti
   assert.equal(database.getAgentControlToken('wsa_lifecycle_active'), null);
 });
 
+test('agent control token rotation keeps the prior credential until the replacement is committed', (t) => {
+  const { database, agent } = databaseFixture(t);
+  database.setAgentState(agent.id, 'ready');
+  const previous = database.issueAgentControlToken(agent.id, 'wsa_previous', ['status:write:self']);
+  const replacement = database.issueAgentControlToken(
+    agent.id, 'wsa_replacement', ['status:write:self'], null, false,
+  );
+  assert.equal(database.getAgentControlToken('wsa_previous').id, previous.id);
+  assert.equal(database.getAgentControlToken('wsa_replacement').id, replacement.id);
+  database.revokeAgentControlTokensExcept(agent.id, replacement.id);
+  assert.equal(database.getAgentControlToken('wsa_previous'), null);
+  assert.equal(database.getAgentControlToken('wsa_replacement').id, replacement.id);
+
+  const staged = database.issueAgentControlToken(
+    agent.id, 'wsa_failed_stage', ['status:write:self'], null, false,
+  );
+  database.revokeAgentControlToken(staged.id);
+  assert.equal(database.getAgentControlToken('wsa_failed_stage'), null);
+  assert.equal(database.getAgentControlToken('wsa_replacement').id, replacement.id);
+});
+
+test('the latest recorded primary runtime can be recovered after an incomplete reconnect inventory', (t) => {
+  const { database, agent } = databaseFixture(t);
+  database.appendEvent('agent', agent.id, 'runtime.started.v1', 'node:nod_test', 'run_old', {
+    kind: 'agent', terminalId: 'trm_old',
+  });
+  database.appendEvent('agent', agent.id, 'runtime.started.v1', 'node:nod_test', 'run_primary', {
+    kind: 'agent', terminalId: agent.terminal_id,
+  });
+  assert.equal(database.latestStartedAgentRuntimeId(agent.id, agent.terminal_id), 'run_primary');
+  assert.equal(database.latestStartedAgentRuntimeId(agent.id, 'trm_missing'), null);
+});
+
 test('message acceptance is durable and idempotent', (t) => {
   const { database, agent } = databaseFixture(t);
   const input = {

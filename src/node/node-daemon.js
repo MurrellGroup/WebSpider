@@ -163,17 +163,24 @@ export class NodeDaemon extends EventEmitter {
         signature: signNodeHello(this.privateKey, this.nodeId, timestamp, nonce),
         capabilities: this.#capabilities(),
         adapter_inventory: this.#adapterInventory(),
-        runtime_inventory: this.database.listProcesses().map((runtime) => ({
-          id: runtime.id,
-          kind: runtime.kind,
-          agent_instance_id: runtime.agentInstanceId,
-          task_id: runtime.taskId,
-          terminal_id: runtime.terminalId,
-          root_id: runtime.rootId,
-          executable: path.basename(String(runtime.argv?.[0] || '')),
-          state: runtime.state,
-          created_at: runtime.createdAt,
-        })),
+        // Reconciliation needs live work, not an unbounded history. Selecting
+        // before the Hub's protocol cap prevents old completed tasks from
+        // crowding a newer primary agent out of the reconnect inventory.
+        runtime_inventory: this.database.listProcesses()
+          .filter((runtime) => ['running', 'stopping'].includes(runtime.state))
+          .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+          .slice(0, 1_000)
+          .map((runtime) => ({
+            id: runtime.id,
+            kind: runtime.kind,
+            agent_instance_id: runtime.agentInstanceId,
+            task_id: runtime.taskId,
+            terminal_id: runtime.terminalId,
+            root_id: runtime.rootId,
+            executable: path.basename(String(runtime.argv?.[0] || '')),
+            state: runtime.state,
+            created_at: runtime.createdAt,
+          })),
       }));
     });
     socket.addEventListener('message', (message) => {
@@ -376,7 +383,17 @@ export class NodeDaemon extends EventEmitter {
         });
       case 'process.start-agent': {
         const existing = this.database.getProcessByTerminal(payload.terminal_id);
-        if (existing && existing.state === 'running') return { runtime: existing, resumed: true };
+        if (existing && existing.state === 'running') {
+          const runtime = this.supervisor.refreshAgentRuntime({
+            runtimeId: existing.id,
+            agentInstanceId: payload.agent_instance_id,
+            terminalId: payload.terminal_id,
+            rootId: payload.root_id,
+            policySnapshot: payload.policy_snapshot,
+            agentControl: payload.agent_control,
+          });
+          return { runtime, resumed: true, control_refreshed: Boolean(payload.agent_control) };
+        }
         const runtime = this.supervisor.launch({
           kind: 'agent',
           agentInstanceId: payload.agent_instance_id,
@@ -389,6 +406,17 @@ export class NodeDaemon extends EventEmitter {
           codexSession: payload.codex_session,
         });
         return { runtime };
+      }
+      case 'process.refresh-agent-control': {
+        const runtime = this.supervisor.refreshAgentRuntime({
+          runtimeId: payload.runtime_id,
+          agentInstanceId: payload.agent_instance_id,
+          terminalId: payload.terminal_id,
+          rootId: payload.root_id,
+          policySnapshot: payload.policy_snapshot,
+          agentControl: payload.agent_control,
+        });
+        return { runtime, control_refreshed: true };
       }
       case 'process.claim-agent': {
         const runtime = this.supervisor.claimAgentRuntime({

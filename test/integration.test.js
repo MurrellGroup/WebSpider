@@ -370,13 +370,23 @@ test('same-machine Hub and worker identities stay online across one shared proce
     terminalId: 'trm_test_shell', rootId: 'awr_worker', argv: ['/bin/cat'] });
   let primary;
   try {
+    const oldControl = { url: `${listening.url}/api/v1/agent-control`, token: 'wsa_old',
+      agent_instance_id: 'agt_test_primary' };
     const payload = { agent_instance_id: 'agt_test_primary', terminal_id: 'trm_test_primary',
-      root_id: 'awr_worker', argv: ['/bin/cat'] };
+      root_id: 'awr_worker', argv: ['/bin/cat'], agent_control: oldControl };
     primary = (await hub.broker.request('nod_worker', 'process.start-agent', payload)).runtime;
     assert.notEqual(primary.id, shell.id);
     assert.equal(primary.terminalId, payload.terminal_id);
-    const repeated = await hub.broker.request('nod_worker', 'process.start-agent', payload);
+    const repeated = await hub.broker.request('nod_worker', 'process.start-agent', {
+      ...payload,
+      agent_control: { ...oldControl, token: 'wsa_new' },
+    });
     assert.equal(repeated.runtime.id, primary.id);
+    assert.equal(repeated.runtime.pid, primary.pid);
+    assert.equal(repeated.control_refreshed, true);
+    const control = JSON.parse(fs.readFileSync(
+      path.join(sharedState, 'agent-context', 'agt_test_primary', 'webspider-control.json'), 'utf8'));
+    assert.equal(control.token, 'wsa_new');
     assert.equal(worker.database.getProcess(shell.id).state, 'running');
   } finally {
     if (primary) worker.supervisor.stopProcess(primary.id);
@@ -1641,6 +1651,41 @@ test('a project invite provisions a persistent remote Codex worker with reports 
   assert.equal(node.database.getProcessByAgent(worker.id)?.state, 'running');
   assert.match(fs.readFileSync(path.join(remoteWorkspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'),
     /Direct project mode/);
+
+  // A long-lived node can have more historical process rows than fit in the
+  // reconnect inventory. A direct snapshot of the registered primary must
+  // win over a truncated inventory containing only a legacy auxiliary tab.
+  hub.database.emit('event', {
+    type: 'node.online.v1',
+    scope_id: enrolled.node_id,
+    payload: {
+      connection_epoch: 999,
+      runtime_inventory: [{
+        id: 'run_legacy_auxiliary', kind: 'agent', state: 'running',
+        agent_instance_id: worker.id, terminal_id: 'trm_legacy_auxiliary',
+      }],
+    },
+  });
+  await waitUntil(() => hub.database.listEvents(0).some((event) =>
+    event.type === 'agent.runtime_inventory.omission.v1' && event.scope_id === worker.id));
+  assert.equal(hub.database.getAgent(worker.id).state, 'ready');
+  assert.equal(hub.database.getAgent(worker.id).terminal_state, 'attached');
+
+  const workerRuntime = node.database.getProcessByAgent(worker.id);
+  const controlPath = path.join(directory, 'remote-node', 'agent-context', worker.id, 'webspider-control.json');
+  const controlBefore = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
+  const refreshed = await jsonFetch(
+    `${listening.url}/api/v1/agent-instances/${worker.id}:refresh-control`, listening.ownerToken,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) },
+  );
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(refreshed.body.process_restarted, false);
+  assert.equal(refreshed.body.runtime_id, workerRuntime.id);
+  assert.equal(node.database.getProcessByAgent(worker.id).pid, workerRuntime.pid);
+  const controlAfter = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
+  assert.notEqual(controlAfter.token, controlBefore.token);
+  const authorizedAfterRefresh = await jsonFetch(`${listening.url}/api/v1/agent-control/tasks`, controlAfter.token);
+  assert.equal(authorizedAfterRefresh.response.status, 200);
 
   hub.database.issueAgentControlToken(bootstrap.agent.id, 'wsa_portfolio_master', ['portfolio:read', 'agents:read', 'messages:write']);
   const portfolio = await jsonFetch(`${listening.url}/api/v1/agent-control/portfolio`, 'wsa_portfolio_master');

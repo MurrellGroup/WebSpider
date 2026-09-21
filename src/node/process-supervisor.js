@@ -885,6 +885,22 @@ export class ProcessSupervisor extends EventEmitter {
     return claimed;
   }
 
+  refreshAgentRuntime({
+    runtimeId, agentInstanceId, terminalId, rootId, policySnapshot, agentControl,
+  }) {
+    const runtime = this.database.getProcess(runtimeId);
+    invariant(runtime?.kind === 'agent' && runtime.state === 'running',
+      'WS_AGENT_NOT_READY', 'The agent process is not running.', 409);
+    invariant(runtime.agentInstanceId === agentInstanceId
+      && runtime.terminalId === terminalId && runtime.rootId === rootId,
+      'WS_RECOVERY_CONFLICT', 'The live agent runtime no longer matches the requested identity.', 409);
+    invariant(this.rootService.getRoot(rootId), 'WS_ROOT_NOT_FOUND', 'The agent workspace root is unavailable.', 404);
+    const contextDirectory = agentContextDirectory(this.stateDir, runtime.contextId || runtime.agentInstanceId);
+    if (policySnapshot) materializePolicyFiles(contextDirectory, policySnapshot);
+    if (agentControl) materializeControl(contextDirectory, agentControl);
+    return this.database.getProcess(runtime.id);
+  }
+
   input(terminalId, bytes) {
     const runtime = this.database.getProcessByTerminal(terminalId);
     invariant(runtime && runtime.state === 'running', 'WS_AGENT_NOT_READY', 'Terminal process is not running.', 409);
