@@ -219,6 +219,7 @@ test('sidebar projects can be reordered and cosmetically inactivated with browse
   assert.match(app, /document\.addEventListener\('pointermove'/);
   assert.match(app, /\['ArrowUp', 'ArrowDown'\]/);
   assert.match(styles, /\.inactive-projects\.drop-target/);
+  assert.match(styles, /\.inactive-projects:not\(\[open\]\) > \.inactive-project-list \{ display: none; \}/);
 });
 
 test('terminal pages begin in watch mode and acquire control only on interaction', () => {

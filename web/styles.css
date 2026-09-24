@@ -95,6 +95,7 @@ input, textarea, select { background: #0d1119; color: var(--text); border: 1px s
 .inactive-projects > summary > span:first-child { margin-right: auto; }
 .inactive-count { min-width: 20px; padding: 2px 6px; border-radius: 999px; background: var(--surface-2); text-align: center; font-size: 9px; }
 .inactive-project-list { display: grid; gap: 3px; padding: 1px 4px 7px; }
+.inactive-projects:not([open]) > .inactive-project-list { display: none; }
 .inactive-project-list button { width: 100%; min-width: 0; padding: 7px 8px; display: flex; justify-content: space-between; gap: 8px; border: 0; border-radius: 7px; background: transparent; color: #c2ccd5; cursor: pointer; text-align: left; }
 .inactive-project-list button:hover { background: var(--surface-2); color: var(--text); }
 .inactive-project-list button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

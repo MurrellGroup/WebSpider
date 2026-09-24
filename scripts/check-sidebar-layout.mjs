@@ -17,14 +17,21 @@ document.querySelectorAll('body > section').forEach(e => e.remove());
 document.querySelector('#app-shell').classList.remove('hidden');
 document.querySelector('.sidebar').classList.add('mobile-open');
 const tree = document.querySelector('#project-tree');
-tree.innerHTML = Array.from({length: 80}, (_,i) => '<div class="project-group"><button class="project-heading">Project '+i+'</button><button class="agent-link"><span></span><span class="name">Agent '+i+'</span></button></div>').join('');
+tree.innerHTML = Array.from({length: 80}, (_,i) => '<div class="project-group"><button class="project-heading">Project '+i+'</button><button class="agent-link"><span></span><span class="name">Agent '+i+'</span></button></div>').join('')
+  + '<details class="inactive-projects"><summary><span>Inactive projects</span><span class="inactive-count">2</span></summary><div class="inactive-project-list"><button>Hidden project one</button><button>Hidden project two</button></div></details>';
 window.addEventListener('load', () => {
+  const inactive = document.querySelector('.inactive-projects');
+  const inactiveList = document.querySelector('.inactive-project-list');
+  const inactiveHidden = getComputedStyle(inactiveList).display === 'none';
+  inactive.open = true;
+  const inactiveVisibleAfterOpen = getComputedStyle(inactiveList).display !== 'none';
   tree.scrollTop = tree.scrollHeight;
   const notes = document.querySelector('[data-action="show-notes"]');
   const box = notes.getBoundingClientRect();
   const result = {width: innerWidth, height: innerHeight, scrolled: tree.scrollTop,
     notesVisible: box.top >= 0 && box.bottom <= innerHeight && box.right <= innerWidth,
-    sidebarHeight: document.querySelector('.sidebar').getBoundingClientRect().height};
+    sidebarHeight: document.querySelector('.sidebar').getBoundingClientRect().height,
+    inactiveHidden, inactiveVisibleAfterOpen};
   const out = document.createElement('pre'); out.id='layout-result'; out.textContent=JSON.stringify(result); document.body.append(out);
 });
 </script></body>`);
@@ -47,6 +54,8 @@ try {
       assert.ok(result.scrolled > 0,'Agent list must scroll');
       assert.ok(result.notesVisible,'Notes must stay reachable in the viewport');
       assert.ok(result.sidebarHeight <= result.height,'Sidebar must not expand beyond viewport');
+      assert.ok(result.inactiveHidden,'Inactive project names must remain hidden while collapsed');
+      assert.ok(result.inactiveVisibleAfterOpen,'Inactive project names must appear after opening the dropdown');
     } finally { fs.rmSync(profile,{recursive:true,force:true}); }
   }
 } finally { server.close(); }
