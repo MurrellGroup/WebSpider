@@ -42,7 +42,7 @@ test('rooted directory resolution creates only real directories inside the works
     fs.rmSync(value.base, { recursive: true, force: true });
   });
   const created = value.service.resolveDirectory('awr_test', 'manuscript/source', { create: true });
-  assert.equal(created, path.join(value.root, 'manuscript', 'source'));
+  assert.equal(created, fs.realpathSync(path.join(value.root, 'manuscript', 'source')));
   assert.equal(fs.statSync(created).isDirectory(), true);
   assert.throws(() => value.service.resolveDirectory('awr_test', '../outside'), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
   fs.symlinkSync(value.outside, path.join(value.root, 'linked-directory'));
