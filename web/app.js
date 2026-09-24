@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.29';
+const PORTAL_VERSION = '0.6.30';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -158,6 +158,7 @@ const state = {
   fleetUpdate: null,
   tasks: [],
   attention: [],
+  attentionCollapsed: localStorage.getItem('webspider_attention_collapsed') === 'true',
   notes: [],
   selectedNoteId: null,
   selectedProject: null,
@@ -673,7 +674,10 @@ function renderSidebar() {
 function renderAttention() {
   const offline = state.nodes.filter((node) => node.status !== 'online');
   const recoveryCount = state.recoveryCandidates.length;
-  $('#attention-panel').innerHTML = `<div class="attention-head"><strong>Attention</strong><span class="attention-count">${state.attention.length + recoveryCount}</span></div>
+  const panel = $('#attention-panel');
+  panel.classList.toggle('collapsed', state.attentionCollapsed);
+  $('#app-shell').classList.toggle('attention-collapsed', state.attentionCollapsed);
+  panel.innerHTML = `<div class="attention-head"><strong>Attention</strong><div class="attention-head-actions"><span class="attention-count">${state.attention.length + recoveryCount}</span><button class="attention-collapse" data-action="toggle-attention" type="button" aria-expanded="${!state.attentionCollapsed}" aria-label="${state.attentionCollapsed ? 'Expand' : 'Collapse'} Attention panel" title="${state.attentionCollapsed ? 'Expand' : 'Collapse'} Attention panel">${state.attentionCollapsed ? '‹' : '›'}</button></div></div>
     <div class="attention-body">
       ${state.attention.length ? state.attention.map((item) => `<article class="attention-item"><span class="severity">${h(item.severity)} · ${h(item.type)}</span><p>${h(item.summary)}</p></article>`).join('') : ''}
       ${recoveryCount ? `<article class="attention-item"><span class="severity">Hub recovery</span><p>${recoveryCount} live agent process${recoveryCount === 1 ? '' : 'es'} need owner mapping. Replacement launch is held.</p><button class="secondary" data-action="show-nodes">Review surviving agents</button></article>` : ''}
@@ -2051,12 +2055,17 @@ function updateLatexEditorStatus() {
   $('#latex-save')?.toggleAttribute('disabled', !context.dirty);
 }
 
-async function refreshLatexPdf() {
+function renderLatexPdfEmpty(context, host, message = '') {
+  const detail = message || 'Overleaf Git synchronizes source files, not its generated PDF. Compile this document on the workstation, or choose an existing PDF.';
+  host.innerHTML = `<div class="latex-pdf-empty"><strong>No compiled PDF at ${h(context.pdfPath)}</strong><span>${h(detail)}</span><div><button data-action="compile-latex">Compile ${h(context.path.split('/').at(-1))} now</button><button data-action="set-latex-pdf">PDF path…</button></div></div>`;
+}
+
+async function refreshLatexPdf({ quiet = false } = {}) {
   const context = state.latexContext;
   const host = $('#latex-pdf-host');
   if (!context || !host) return false;
   const generation = context.generation;
-  host.innerHTML = '<div class="loading">Checking PDF…</div>';
+  if (!quiet) host.innerHTML = '<div class="loading">Checking PDF…</div>';
   try {
     await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/stat?path=${encodeURIComponent(context.pdfPath)}`);
     if (state.latexContext !== context || context.generation !== generation || !host.isConnected) return false;
@@ -2065,9 +2074,38 @@ async function refreshLatexPdf() {
     return true;
   } catch (error) {
     if (state.latexContext !== context || !host.isConnected) return false;
-    host.innerHTML = `<div class="latex-pdf-empty"><strong>No compiled PDF at ${h(context.pdfPath)}</strong><span>Compile this document or choose another output path.</span><div><button data-action="compile-latex">Compile</button><button data-action="set-latex-pdf">PDF path…</button></div></div>`;
+    renderLatexPdfEmpty(context, host, error.status && error.status !== 404 ? friendlyError(error) : '');
     return false;
   }
+}
+
+async function watchLatexCompilation(context, taskId) {
+  const terminalStates = new Set(['succeeded', 'failed', 'cancelled']);
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, attempt ? 1_500 : 350));
+    if (state.latexContext !== context || context.compileTaskId !== taskId) return;
+    const task = await api(`/api/v1/tasks/${encodeURIComponent(taskId)}`);
+    if (!terminalStates.has(task.state)) continue;
+    context.compileTaskId = null;
+    if (task.state === 'succeeded' && await refreshLatexPdf()) {
+      toast(`Compiled ${context.path.split('/').at(-1)}.`);
+      return;
+    }
+    const exitStatus = task.result?.metrics?.exit_status;
+    const message = exitStatus === 127
+      ? 'Compilation failed because this workstation has no LaTeX compiler. Install latexmk or tectonic, then try again.'
+      : task.result?.summary || `Compilation ${task.state}. Open its monitoring terminal for the compiler output.`;
+    const host = $('#latex-pdf-host');
+    if (host && state.latexContext === context) renderLatexPdfEmpty(context, host, message);
+    toast(message, true);
+    return;
+  }
+  if (state.latexContext !== context || context.compileTaskId !== taskId) return;
+  context.compileTaskId = null;
+  const message = 'Compilation is still running. Its monitoring terminal has the current compiler output.';
+  const host = $('#latex-pdf-host');
+  if (host) renderLatexPdfEmpty(context, host, message);
+  toast(message, true);
 }
 
 function overleafTextFiles(status, kind) {
@@ -2218,7 +2256,7 @@ async function renderLatexWorkspace(preview, relative) {
   const pdfPath = relative.replace(/\.tex$/i, '.pdf');
   content.className = 'preview-content latex-preview';
   content.innerHTML = `<div id="latex-workspace" class="latex-workspace" data-view="source">
-    <div class="latex-editor-toolbar"><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button class="primary" data-action="ask-latex-agent">Ask agent about selection</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
+    <div class="latex-editor-toolbar"><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button class="primary latex-ask-selection" data-action="ask-latex-agent">Ask agent about selection</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
     <div class="latex-stage"><div id="latex-editor-host" class="latex-editor-host"></div><div id="latex-pdf-host" class="latex-pdf-host"></div></div>
     <section id="overleaf-panel" class="overleaf-panel"></section>
     <aside id="latex-review-panel" class="latex-review-panel"></aside>
@@ -2322,7 +2360,8 @@ async function compileLatexSource() {
   const directory = slash < 0 ? '.' : context.path.slice(0, slash);
   const filename = slash < 0 ? context.path : context.path.slice(slash + 1);
   const script = 'cd -- "$1" || exit; if command -v latexmk >/dev/null 2>&1; then exec latexmk -pdf -interaction=nonstopmode -halt-on-error "$2"; elif command -v tectonic >/dev/null 2>&1; then exec tectonic "$2"; else echo "Install latexmk or tectonic to compile LaTeX." >&2; exit 127; fi';
-  await api('/api/v1/tasks', { method: 'POST', body: {
+  if (context.compileTaskId) return toast('This document is already compiling.', true);
+  const task = await api('/api/v1/tasks', { method: 'POST', body: {
     project_id: agent.project_id,
     type: 'command',
     title: `Compile ${filename}`,
@@ -2330,8 +2369,17 @@ async function compileLatexSource() {
     assigned_agent_instance_id: agent.id,
     node_id: agent.node_id,
   } });
+  context.compileTaskId = task.id;
+  const host = $('#latex-pdf-host');
+  if (host) host.innerHTML = `<div class="latex-pdf-empty"><strong>Compiling ${h(filename)}…</strong><span>The PDF preview will open automatically when the compiler finishes.</span></div>`;
   toast(`Compilation started in a monitoring terminal for ${filename}.`);
-  setTimeout(() => { if (state.latexContext === context) void refreshLatexPdf(); }, 3_000);
+  void watchLatexCompilation(context, task.id).catch((error) => {
+    if (state.latexContext !== context) return;
+    context.compileTaskId = null;
+    const currentHost = $('#latex-pdf-host');
+    if (currentHost) renderLatexPdfEmpty(context, currentHost, friendlyError(error));
+    toast(friendlyError(error), true);
+  });
 }
 
 async function applyLatexReview(review) {
@@ -3011,6 +3059,12 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'close-mobile-agents') return closeMobileSidebar();
     if (action === 'show-attention') return $('#attention-panel').classList.toggle('mobile-open');
+    if (action === 'toggle-attention') {
+      state.attentionCollapsed = !state.attentionCollapsed;
+      localStorage.setItem('webspider_attention_collapsed', String(state.attentionCollapsed));
+      renderAttention();
+      return;
+    }
     if (action === 'show-more') {
       return openMobileSidebar({ focusFooter: true });
     }

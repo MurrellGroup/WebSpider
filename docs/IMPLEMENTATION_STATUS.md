@@ -63,7 +63,7 @@ The current repository is an executable secure vertical slice, not a claim that 
 | Detached command tasks | Complete | Attempts, leases/epochs, runtime events, logs, exit status, structured result. |
 | Completion notification | Complete, fixed trigger | A Sub-Spider task defaults to a self hook and a Master task defaults to a Master hook; explicit `self`, `master`, or `none` targeting emits one idempotent provenance-preserving message when requested. General CEL triggers are not included. |
 | Artifact promotion | Complete | Root-safe open, SHA-256 content-addressed storage, metadata, audit, download. |
-| Attention inbox | Foundation | Durable table and responsive panel; approval response workflows remain work. |
+| Attention inbox | Foundation | Durable responsive panel with a browser-persistent compact rail; approval response workflows remain work. |
 | Task DAG | Partial | Parent/child representation is present. Dependency sets and full cycle validation are not. |
 | Git worktrees | Not yet implemented | Existing-workspace mode is implemented. |
 | General scheduler | Partial | Online node/root/agent placement works for explicitly assigned command tasks; selectors and resource scoring are not. |

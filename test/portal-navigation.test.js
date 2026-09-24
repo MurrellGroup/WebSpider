@@ -404,4 +404,16 @@ test('LaTeX files open a source editor with agent review and per-hunk decisions'
   assert.match(app, /Local working copy/);
   assert.match(app, /Fetched Overleaf/);
   assert.match(styles, /\.overleaf-version-grid/);
+  assert.match(app, /watchLatexCompilation\(context, task\.id\)/);
+  assert.match(app, /Overleaf Git synchronizes source files, not its generated PDF/);
+  assert.match(styles, /\.latex-ask-selection \{[^}]*position: fixed;/);
+});
+
+test('desktop Attention rail collapses without hiding its alert count', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /webspider_attention_collapsed/);
+  assert.match(app, /data-action="toggle-attention"/);
+  assert.match(app, /class="attention-count"/);
+  assert.match(styles, /\.app-shell\.attention-collapsed \{[^}]*44px;/);
+  assert.match(styles, /\.attention-panel\.collapsed \.attention-body \{ display: none; \}/);
 });
