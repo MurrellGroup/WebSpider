@@ -280,7 +280,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .terminal-compose textarea { width: 100%; min-height: 68px; max-height: 190px; resize: vertical; padding: 9px 10px; background: #07090d; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .terminal-compose button { align-self: end; }
 
-.file-page-content { width: min(1540px, 100%); }
+.file-page-content { width: 100%; max-width: none; margin: 0; }
 .file-layout { display: grid; grid-template-columns: minmax(180px, var(--file-pane-width)) 7px minmax(360px, 1fr); min-height: 570px; }
 .file-layout.latex-open { grid-template-columns: minmax(180px, var(--file-pane-width)) 7px minmax(0, 1fr); }
 .file-pane-resizer { cursor: col-resize; }

@@ -367,7 +367,7 @@ test('file browser restores per-agent navigation and exposes complete scrollable
   assert.match(app, /sessionStorage\.setItem\(FILE_BROWSER_STORAGE_KEY/);
   assert.match(app, /class="preview-path" title="\$\{h\(relative\)\}"/);
   assert.match(app, /data-file-path="\$\{h\(relative\)\}"/);
-  assert.match(styles, /\.file-page-content \{ width: min\(1540px, 100%\); \}/);
+  assert.match(styles, /\.file-page-content \{ width: 100%; max-width: none; margin: 0; \}/);
   assert.match(styles, /\.file-name \{[^}]*overflow-x: auto;[^}]*text-overflow: clip;/);
   assert.match(styles, /\.preview-path \{[^}]*overflow-x: auto;[^}]*text-overflow: clip;/);
 });
