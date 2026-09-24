@@ -252,6 +252,18 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(hub, /frame\.type === 'HEARTBEAT'[\s\S]*HEARTBEAT_ACK[\s\S]*frame\.type === 'RESIZE'/);
 });
 
+test('recent agent, task, and shell terminals remain connected as bounded watch-only browser caches', () => {
+  assert.match(app, /const TERMINAL_CACHE_TTL_MS = 10 \* 60 \* 1_000/);
+  assert.match(app, /const TERMINAL_CACHE_LIMIT = 8/);
+  assert.match(app, /terminalContexts: new Map\(\)/);
+  assert.match(app, /function queueCachedTerminalOutput\(context, frame\)/);
+  assert.match(app, /state\.terminalContexts\.get\(terminal\.id\)/);
+  assert.match(app, /context\?\.socket\s*\|\| new WebSocket/);
+  assert.match(app, /releaseCachedTerminalLease\(context, lease\)/);
+  assert.match(app, /A watcher must never retain an uncertain input lease/);
+  assert.match(app, /setInterval\(pruneTerminalContexts, 60_000\)/);
+});
+
 test('every non-primary terminal tab has an explicit close control', () => {
   assert.match(app, /class="terminal-tab-close"/);
   assert.match(app, /aria-label="Close .* terminal tab"/);

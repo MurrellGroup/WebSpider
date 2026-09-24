@@ -16,6 +16,9 @@ const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const FILE_BROWSER_STORAGE_KEY = 'webspider_file_browser_states_v1';
 const PROJECT_ORGANIZER_STORAGE_KEY = 'webspider_project_organizer_v1';
+const TERMINAL_CACHE_TTL_MS = 10 * 60 * 1_000;
+const TERMINAL_CACHE_LIMIT = 8;
+const TERMINAL_CACHE_TEXT_LIMIT = 500_000;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const terminalKeyState = createTerminalKeyState();
@@ -146,6 +149,8 @@ const state = {
   tab: 'terminal',
   eventSocket: null,
   terminalSocket: null,
+  terminalContexts: new Map(),
+  activeTerminalContext: null,
   terminalLease: null,
   terminalLeaseRequested: false,
   terminalSequence: 0,
@@ -388,6 +393,7 @@ function showRecoveryClaimForm(runtimeId) {
 }
 
 function showLogin() {
+  closeAllTerminalContexts();
   $('#login-view').classList.remove('hidden');
   $('#app-shell').classList.add('hidden');
   state.eventSocket?.close();
@@ -418,18 +424,91 @@ function openMobileSidebar({ focusFooter = false } = {}) {
 
 function showVersionMismatch(hubVersion) {
   showApp();
-  closeTerminal();
+  closeAllTerminalContexts();
   $('#main-view').innerHTML = `<div class="page">${pageHeader('Restart required', 'The browser portal and running hub do not match')}<div class="page-content"><section class="panel"><div class="panel-header"><h2>Hub process is stale</h2><span>portal ${h(PORTAL_VERSION)} · hub ${h(hubVersion || 'unknown')}</span></div><div class="panel-body"><p class="muted">Restart the WebSpider service on the hub machine, then reload this page.</p><pre class="command-output">systemctl --user restart webspider.service</pre></div></section></div></div>`;
 }
 
-function closeTerminal() {
+function trimCachedTerminalText(value) {
+  const text = String(value || '');
+  return text.length > TERMINAL_CACHE_TEXT_LIMIT ? text.slice(-TERMINAL_CACHE_TEXT_LIMIT) : text;
+}
+
+function evictTerminalContext(context) {
+  if (!context) return;
+  if (state.terminalContexts.get(context.terminalId) === context) state.terminalContexts.delete(context.terminalId);
+  context.active = false;
+  context.closed = true;
+  clearInterval(context.heartbeat);
+  context.heartbeat = null;
+  if (context.socket?.readyState === WebSocket.OPEN || context.socket?.readyState === WebSocket.CONNECTING) context.socket.close();
+}
+
+function pruneTerminalContexts() {
+  const now = Date.now();
+  const cached = [...state.terminalContexts.values()].filter((context) => !context.active);
+  for (const context of cached) {
+    if (context.closed || now - context.lastVisited >= TERMINAL_CACHE_TTL_MS) evictTerminalContext(context);
+  }
+  const remaining = [...state.terminalContexts.values()]
+    .filter((context) => !context.active)
+    .sort((left, right) => right.lastVisited - left.lastVisited);
+  for (const context of remaining.slice(TERMINAL_CACHE_LIMIT)) evictTerminalContext(context);
+}
+
+async function releaseCachedTerminalLease(context, lease) {
+  if (!context || !lease) return;
+  clearInterval(context.heartbeat);
+  context.heartbeat = null;
+  context.lease = null;
+  const release = api(`/api/v1/terminals/${encodeURIComponent(context.terminalId)}/leases/${encodeURIComponent(lease.id)}?attachment=${encodeURIComponent(context.attachment)}`, { method: 'DELETE' });
+  context.releasePromise = release;
+  try {
+    await release;
+  } catch {
+    // A watcher must never retain an uncertain input lease. Closing this one
+    // connection makes the Hub release it authoritatively.
+    evictTerminalContext(context);
+  } finally {
+    if (context.releasePromise === release) context.releasePromise = null;
+  }
+}
+
+function closeAllTerminalContexts() {
+  closeTerminal({ preserve: false });
+  for (const context of [...state.terminalContexts.values()]) evictTerminalContext(context);
+}
+
+function closeTerminal({ preserve = true } = {}) {
   closeStructurePreview();
   const composer = $('#terminal-compose');
   if (composer?.dataset.terminalId) {
     saveTerminalDraft(state.terminalDrafts, composer.dataset.terminalId, composer.value);
   }
+  const context = state.activeTerminalContext;
+  if (context) {
+    context.active = false;
+    context.lastVisited = Date.now();
+    context.text = trimCachedTerminalText(state.terminalText);
+    context.sequence = state.terminalSequence;
+    context.snapshotReady = state.terminalSnapshotReady;
+    context.backlog = state.terminalOutputBacklog.slice();
+    context.keyboardProtocol = state.terminalKeyboardProtocol;
+    context.bracketedPaste = state.terminalBracketedPaste;
+    context.protocolTail = state.terminalProtocolTail;
+    const lease = state.terminalLease;
+    context.lease = null;
+    clearInterval(context.heartbeat);
+    context.heartbeat = null;
+    if (!preserve || context.closed || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(context.socket?.readyState)) {
+      evictTerminalContext(context);
+    } else {
+      state.terminalContexts.set(context.terminalId, context);
+      if (lease) void releaseCachedTerminalLease(context, lease);
+      pruneTerminalContexts();
+    }
+  }
+  state.activeTerminalContext = null;
   state.terminalGeneration += 1;
-  state.terminalSocket?.close();
   state.terminalSocket = null;
   if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
   state.terminalHeartbeat = null;
@@ -1218,6 +1297,19 @@ function transmitTerminalInput(data) {
 
 function requestTerminalLease() {
   if (state.terminalLease || state.terminalLeaseRequested || state.terminalSocket?.readyState !== WebSocket.OPEN) return;
+  const context = state.activeTerminalContext;
+  if (context?.releasePromise) {
+    if (context.controlAfterRelease) return;
+    context.controlAfterRelease = true;
+    const button = $('#terminal-control');
+    if (button) button.textContent = 'Requesting control';
+    const requestAfterRelease = () => {
+      context.controlAfterRelease = false;
+      if (context.active && state.activeTerminalContext === context) requestTerminalLease();
+    };
+    context.releasePromise.then(requestAfterRelease, requestAfterRelease);
+    return;
+  }
   state.terminalLeaseRequested = true;
   const button = $('#terminal-control');
   if (button) button.textContent = 'Requesting control';
@@ -1374,6 +1466,120 @@ function queueTerminalOutput(frame) {
   void resyncTerminalOutput();
 }
 
+function rememberCachedTerminalOutput(context, frame) {
+  context.backlog.push(frame);
+  if (context.backlog.length > 4_096) {
+    context.backlog.shift();
+    context.needsResync = true;
+  }
+}
+
+function appendCachedTerminalOutput(context, frame) {
+  const plan = reconcileTerminalOutput(context.sequence, frame, base64ToBytes(frame.data));
+  if (plan.kind === 'stale') return true;
+  if (plan.kind !== 'append') return false;
+  const addition = new TextDecoder().decode(plan.bytes);
+  const protocolText = context.protocolTail + addition;
+  for (const match of protocolText.matchAll(/\u001b\[(>|<)\d*u/g)) context.keyboardProtocol = match[1] === '>';
+  for (const match of protocolText.matchAll(/\u001b\[\?2004([hl])/g)) context.bracketedPaste = match[1] === 'h';
+  context.protocolTail = protocolText.slice(-16);
+  context.text = trimCachedTerminalText(context.text + addition);
+  context.sequence = plan.sequence;
+  return true;
+}
+
+function applyCachedTerminalSnapshot(context, snapshot) {
+  const sequence = Number(snapshot?.sequence || 0);
+  if (!Number.isSafeInteger(sequence) || sequence < context.sequence) return false;
+  context.text = trimCachedTerminalText(snapshot?.text || '');
+  context.sequence = sequence;
+  context.snapshotReady = true;
+  context.needsResync = false;
+  const backlog = orderTerminalOutputFrames(context.backlog);
+  context.backlog = [];
+  for (const frame of backlog) {
+    if (!appendCachedTerminalOutput(context, frame)) {
+      context.needsResync = true;
+      break;
+    }
+  }
+  return true;
+}
+
+function queueCachedTerminalOutput(context, frame) {
+  if (!context.snapshotReady || context.needsResync) {
+    rememberCachedTerminalOutput(context, frame);
+    return;
+  }
+  if (!appendCachedTerminalOutput(context, frame)) {
+    rememberCachedTerminalOutput(context, frame);
+    context.needsResync = true;
+  }
+}
+
+function handleTerminalSocketFrame(context, socket, frame) {
+  if (!context.active || state.activeTerminalContext !== context) {
+    if (frame.type === 'ATTACHED' && frame.keyboard_protocol === 'kitty') context.keyboardProtocol = true;
+    if (frame.type === 'SNAPSHOT') applyCachedTerminalSnapshot(context, frame);
+    if (frame.type === 'OUTPUT') queueCachedTerminalOutput(context, frame);
+    if (frame.type === 'RESYNC_REQUIRED') context.needsResync = true;
+    if (frame.type === 'LEASE_GRANTED') void releaseCachedTerminalLease(context, frame.lease);
+    return;
+  }
+  if (!state.terminalEmulator) return;
+  if (frame.type === 'ATTACHED' && frame.keyboard_protocol === 'kitty') {
+    state.terminalKeyboardProtocol = true;
+    const output = $('#terminal-output');
+    if (output) output.dataset.keyboardProtocol = 'true';
+  }
+  if (frame.type === 'SNAPSHOT') {
+    applyTerminalSnapshot(frame);
+    state.terminalSnapshotReady = true;
+    drainTerminalOutputBacklog();
+  }
+  if (frame.type === 'OUTPUT') queueTerminalOutput(frame);
+  if (frame.type === 'RESYNC_REQUIRED') void resyncTerminalOutput();
+  if (frame.type === 'RESIZE_ACK') {
+    const output = $('#terminal-output');
+    if (output) output.dataset.ptyResized = String(frame.result?.resized === true);
+  }
+  if (frame.type === 'INPUT_ACK') {
+    state.terminalInputAcknowledged = Math.max(state.terminalInputAcknowledged, Number(frame.input_sequence || 0));
+    const output = $('#terminal-output');
+    if (output) output.dataset.inputAcknowledged = String(state.terminalInputAcknowledged);
+  }
+  if (frame.type === 'LEASE_GRANTED') {
+    state.terminalLease = frame.lease;
+    context.lease = frame.lease;
+    state.terminalLeaseRequested = false;
+    const control = $('#terminal-control');
+    if (control) control.textContent = 'In Control';
+    flushTerminalInput();
+    transmitTerminalResize();
+    if (state.terminalInputMode === 'direct') state.terminalEmulator.focus();
+    if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
+    state.terminalHeartbeat = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN && state.terminalLease && state.activeTerminalContext === context) socket.send(JSON.stringify({
+        type: 'HEARTBEAT',
+        lease_id: state.terminalLease.id,
+        lease_epoch: state.terminalLease.lease_epoch,
+      }));
+    }, 5_000);
+    context.heartbeat = state.terminalHeartbeat;
+  }
+  if (frame.type === 'ERROR') {
+    if (['WS_TERMINAL_LEASE_REQUIRED', 'WS_TERMINAL_LEASE_STALE'].includes(frame.code)) {
+      state.terminalLease = null;
+      context.lease = null;
+      state.terminalLeaseRequested = false;
+      state.terminalPendingInput = [];
+      const button = $('#terminal-control');
+      if (button) button.textContent = 'Take control';
+    }
+    toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
+  }
+}
+
 function flushTerminalInput() {
   const pending = state.terminalPendingInput;
   state.terminalPendingInput = [];
@@ -1433,7 +1639,7 @@ async function refreshTerminalDisplay() {
 
 async function renderTerminal(agent) {
   closeTerminal();
-  state.terminalText = '';
+  pruneTerminalContexts();
   const data = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/terminals`);
   state.terminals = data.terminals.filter((item) => item.kind === 'primary_agent' || item.state !== 'exited');
   const terminal = state.terminals.find((candidate) => candidate.id === state.selectedTerminalId)
@@ -1444,6 +1650,20 @@ async function renderTerminal(agent) {
     return;
   }
   state.selectedTerminalId = terminal.id;
+  let context = state.terminalContexts.get(terminal.id) || null;
+  if (context && (context.closed || context.needsResync
+    || Date.now() - context.lastVisited >= TERMINAL_CACHE_TTL_MS
+    || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(context.socket?.readyState))) {
+    evictTerminalContext(context);
+    context = null;
+  }
+  state.terminalText = context?.text || '';
+  state.terminalSequence = context?.sequence || 0;
+  state.terminalSnapshotReady = context?.snapshotReady || false;
+  state.terminalOutputBacklog = context?.backlog?.slice() || [];
+  state.terminalKeyboardProtocol = context?.keyboardProtocol || false;
+  state.terminalBracketedPaste = context?.bracketedPaste || false;
+  state.terminalProtocolTail = context?.protocolTail || '';
   const agentEnded = ['stopped', 'failed', 'hibernated'].includes(agent.state);
   const interactive = terminal.state === 'attached' && !(terminal.kind === 'primary_agent' && agentEnded);
   const textBoxPurpose = terminal.kind === 'primary_agent'
@@ -1487,6 +1707,11 @@ async function renderTerminal(agent) {
   emulator.attachCustomKeyEventHandler(handleTerminalKey);
   emulator.open($('#terminal-output'));
   state.terminalTouchSubscription = attachTerminalTouchScrolling($('#terminal-output'), emulator);
+  if (context?.snapshotReady) {
+    applyTerminalSnapshot({ text: context.text, sequence: context.sequence });
+    state.terminalSnapshotReady = true;
+    state.terminalOutputBacklog = [];
+  }
   fitTerminal();
   state.terminalResizeObserver = new ResizeObserver(() => requestAnimationFrame(() => fitTerminal({ redraw: true })));
   state.terminalResizeObserver.observe($('#terminal-output'));
@@ -1497,75 +1722,61 @@ async function renderTerminal(agent) {
     state.terminalInputSubscription = emulator.onData(handleTerminalData);
   }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const attachment = sessionStorage.getItem('webspider_attachment') || randomIdentifier();
+  const attachment = context?.attachment || sessionStorage.getItem('webspider_attachment') || randomIdentifier();
   sessionStorage.setItem('webspider_attachment', attachment);
-  state.terminalSequence = 0;
-  state.terminalSnapshotReady = false;
-  state.terminalOutputBacklog = [];
-  const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminal.id)}?attachment=${encodeURIComponent(attachment)}`);
-  state.terminalSocket = socket;
-  socket.addEventListener('open', () => {
-    if (state.terminalPendingInput.length || state.terminalInputBuffer) requestTerminalLease();
-  });
-  socket.addEventListener('message', (event) => {
-    const frame = JSON.parse(event.data);
-    if (!state.terminalEmulator) return;
-    if (frame.type === 'ATTACHED' && frame.keyboard_protocol === 'kitty') {
-      state.terminalKeyboardProtocol = true;
-      const output = $('#terminal-output');
-      if (output) output.dataset.keyboardProtocol = 'true';
-    }
-    if (frame.type === 'SNAPSHOT') {
-      applyTerminalSnapshot(frame);
-      state.terminalSnapshotReady = true;
-      drainTerminalOutputBacklog();
-    }
-    if (frame.type === 'OUTPUT') queueTerminalOutput(frame);
-    if (frame.type === 'RESYNC_REQUIRED') void resyncTerminalOutput();
-    if (frame.type === 'RESIZE_ACK') {
-      const output = $('#terminal-output');
-      if (output) output.dataset.ptyResized = String(frame.result?.resized === true);
-    }
-    if (frame.type === 'INPUT_ACK') {
-      state.terminalInputAcknowledged = Math.max(state.terminalInputAcknowledged, Number(frame.input_sequence || 0));
-      const output = $('#terminal-output');
-      if (output) output.dataset.inputAcknowledged = String(state.terminalInputAcknowledged);
-    }
-    if (frame.type === 'LEASE_GRANTED') {
-      state.terminalLease = frame.lease;
-      state.terminalLeaseRequested = false;
-      $('#terminal-control').textContent = 'In Control';
-      flushTerminalInput();
-      transmitTerminalResize();
-      if (state.terminalInputMode === 'direct') state.terminalEmulator.focus();
-      if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
-      state.terminalHeartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN && state.terminalLease) socket.send(JSON.stringify({
-          type: 'HEARTBEAT',
-          lease_id: state.terminalLease.id,
-          lease_epoch: state.terminalLease.lease_epoch,
-        }));
-      }, 5_000);
-    }
-    if (frame.type === 'ERROR') {
-      if (['WS_TERMINAL_LEASE_REQUIRED', 'WS_TERMINAL_LEASE_STALE'].includes(frame.code)) {
-        state.terminalLease = null;
-        state.terminalLeaseRequested = false;
-        state.terminalPendingInput = [];
-        const button = $('#terminal-control');
-        if (button) button.textContent = 'Take control';
+  const socket = context?.socket
+    || new WebSocket(`${protocol}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminal.id)}?attachment=${encodeURIComponent(attachment)}`);
+  if (!context) {
+    context = {
+      terminalId: terminal.id,
+      agentId: agent.id,
+      attachment,
+      socket,
+      active: true,
+      closed: false,
+      needsResync: false,
+      text: '',
+      sequence: 0,
+      snapshotReady: false,
+      backlog: [],
+      keyboardProtocol: false,
+      bracketedPaste: false,
+      protocolTail: '',
+      lease: null,
+      heartbeat: null,
+      lastVisited: Date.now(),
+    };
+    state.terminalContexts.set(terminal.id, context);
+    const socketContext = context;
+    socket.addEventListener('open', () => {
+      if (socketContext.active && state.activeTerminalContext === socketContext
+        && (state.terminalPendingInput.length || state.terminalInputBuffer)) requestTerminalLease();
+    });
+    socket.addEventListener('message', (event) => {
+      handleTerminalSocketFrame(socketContext, socket, JSON.parse(event.data));
+    });
+    socket.addEventListener('close', () => {
+      socketContext.closed = true;
+      clearInterval(socketContext.heartbeat);
+      socketContext.heartbeat = null;
+      if (!socketContext.active || state.activeTerminalContext !== socketContext) {
+        state.terminalContexts.delete(socketContext.terminalId);
+        return;
       }
-      toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
-    }
-  });
-  socket.addEventListener('close', () => {
-    if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
-    state.terminalHeartbeat = null;
-    state.terminalLease = null;
-    state.terminalLeaseRequested = false;
-    const button = $('#terminal-control');
-    if (button) button.textContent = 'Reconnect';
-  });
+      if (state.terminalHeartbeat) clearInterval(state.terminalHeartbeat);
+      state.terminalHeartbeat = null;
+      state.terminalLease = null;
+      state.terminalLeaseRequested = false;
+      const button = $('#terminal-control');
+      if (button) button.textContent = 'Reconnect';
+    });
+  } else {
+    context.active = true;
+    context.agentId = agent.id;
+    context.lastVisited = Date.now();
+  }
+  state.activeTerminalContext = context;
+  state.terminalSocket = socket;
 }
 
 async function renderFiles(agent) {
@@ -1979,8 +2190,8 @@ document.addEventListener('click', async (event) => {
   if (agentButton) { closeMobileSidebar(); return renderAgent(agentButton.dataset.agentId, 'terminal'); }
   const terminalButton = event.target.closest('.terminal-select[data-terminal-id]');
   if (terminalButton && state.selectedAgent) {
-    state.selectedTerminalId = terminalButton.dataset.terminalId;
     closeTerminal();
+    state.selectedTerminalId = terminalButton.dataset.terminalId;
     return renderTerminal(state.selectedAgent);
   }
   const noteButton = event.target.closest('.note-row[data-note-id]');
@@ -2081,6 +2292,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'close-terminal') {
       const terminalId = actionTarget.dataset.terminalId;
       await api(`/api/v1/terminals/${encodeURIComponent(terminalId)}`, { method: 'DELETE' });
+      evictTerminalContext(state.terminalContexts.get(terminalId));
       const composer = $('#terminal-compose');
       if (composer?.dataset.terminalId === terminalId) composer.value = '';
       clearTerminalDraft(state.terminalDrafts, terminalId);
@@ -2863,6 +3075,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('hashchange', () => routeFromHash().catch((error) => toast(friendlyError(error), true)));
+setInterval(pruneTerminalContexts, 60_000);
 
 async function init() {
   syncViewportGeometry();
