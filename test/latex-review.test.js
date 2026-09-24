@@ -34,3 +34,16 @@ test('LaTeX agent requests use durable workspace artifacts and do not repeat sel
   assert.doesNotMatch(message, /expensive selected source/);
   assert.ok(LATEX_REVIEW_PROTOCOL.length < 1_200);
 });
+
+test('one LaTeX request can target multiple disjoint tagged passages', () => {
+  const message = latexReviewMessage({
+    id: 'lrv_many', path: 'main.tex', basePath: '.webspider/base.tex', proposalPath: '.webspider/proposal.tex',
+    selections: [
+      { fromLine: 4, fromColumn: 1, toLine: 6, toColumn: 8 },
+      { fromLine: 31, fromColumn: 3, toLine: 31, toColumn: 19 },
+    ],
+    instruction: 'Make both passages use consistent notation.',
+  });
+  assert.match(message, /Selections in the base \(2\): 4:1-6:8; 31:3-31:19/);
+  assert.match(LATEX_REVIEW_PROTOCOL, /Apply the request to all listed selections/);
+});

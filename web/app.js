@@ -14,19 +14,50 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.30';
+const PORTAL_VERSION = '0.6.31';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const FILE_BROWSER_STORAGE_KEY = 'webspider_file_browser_states_v1';
 const PROJECT_ORGANIZER_STORAGE_KEY = 'webspider_project_organizer_v1';
 const LATEX_REVIEW_STORAGE_KEY = 'webspider_latex_reviews_v1';
+const PANEL_LAYOUT_STORAGE_KEY = 'webspider_panel_layout_v1';
 const TERMINAL_CACHE_TTL_MS = 10 * 60 * 1_000;
 const TERMINAL_CACHE_LIMIT = 8;
 const TERMINAL_CACHE_TEXT_LIMIT = 500_000;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const terminalKeyState = createTerminalKeyState();
+
+function loadPanelLayout() {
+  const defaults = { sidebar: 260, attention: 290, files: 360, notes: 300, chatTopics: 210, chatSettings: 270, latexSplit: 50, terminalSplit: 50, overleafSplit: 50 };
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANEL_LAYOUT_STORAGE_KEY) || '{}');
+    for (const [key, fallback] of Object.entries(defaults)) {
+      if (!Number.isFinite(Number(saved[key]))) saved[key] = fallback;
+    }
+    return saved;
+  } catch { return defaults; }
+}
+
+function applyPanelLayout() {
+  const root = document.documentElement;
+  const layout = state.panelLayout;
+  root.style.setProperty('--sidebar-width', `${layout.sidebar}px`);
+  root.style.setProperty('--attention-width', `${layout.attention}px`);
+  root.style.setProperty('--file-pane-width', `${layout.files}px`);
+  root.style.setProperty('--notes-list-width', `${layout.notes}px`);
+  root.style.setProperty('--chat-topics-width', `${layout.chatTopics}px`);
+  root.style.setProperty('--chat-settings-width', `${layout.chatSettings}px`);
+  root.style.setProperty('--latex-split-size', `${layout.latexSplit}%`);
+  root.style.setProperty('--terminal-split-size', `${layout.terminalSplit}%`);
+  root.style.setProperty('--overleaf-split-size', `${layout.overleafSplit}%`);
+}
+
+function savePanelLayout() {
+  try { localStorage.setItem(PANEL_LAYOUT_STORAGE_KEY, JSON.stringify(state.panelLayout)); } catch {}
+  applyPanelLayout();
+}
 
 function normalizedFileBrowserState(value = {}) {
   return {
@@ -211,6 +242,8 @@ const state = {
   fileSearchQuery: '',
   fileBrowserStates: loadFileBrowserStates(),
   projectOrganizer: loadProjectOrganizer(),
+  panelLayout: loadPanelLayout(),
+  filePaneCollapsed: localStorage.getItem('webspider_file_pane_collapsed') === 'true',
   inactiveProjectsOpen: false,
   workspacePendingFiles: [],
   workspaceUploadBusy: false,
@@ -237,6 +270,8 @@ const state = {
   chatTopicId: null,
   chatPendingFiles: [],
 };
+
+applyPanelLayout();
 
 function h(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (character) => ({
@@ -796,8 +831,10 @@ async function renderChat(sourceId = state.chatSourceId, topicId = state.chatTop
     ${pageHeader('Team chat', 'Human collaboration with explicit, mention-driven agent participation', '<button data-action="refresh-chat">Refresh</button>')}
     <div class="chat-owner-layout">
       <aside class="chat-owner-sidebar"><label>Chat source<select id="chat-source">${sourceOptions}</select></label><div class="chat-topic-list">${topicRows || '<div class="muted">No topics</div>'}</div>${source.id === 'local' ? '<button class="secondary" data-action="new-chat-topic">New topic</button>' : ''}</aside>
+      <div class="panel-resizer chat-topics-resizer" data-panel-resizer="chatTopics" role="separator" aria-orientation="vertical" aria-label="Resize chat topics"></div>
       <section class="chat-owner-conversation"><header><div><h2>${h(topic?.name || 'Choose a topic')}</h2><p>${h(topic?.description || '')}</p></div></header><div class="chat-owner-messages">${messageRows || '<div class="empty"><div><strong>No messages yet</strong></div></div>'}</div>
       ${topic ? `<div id="chat-file-drafts" class="chat-file-drafts"></div><form id="chat-message-form"><input id="chat-files" type="file" multiple hidden><button type="button" data-action="chat-files">＋</button><textarea name="body" maxlength="20000" placeholder="Message the team · use @AgentName to invite an agent">${h(chatDraftValue(source.id, topic.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}</section>
+      <div class="panel-resizer chat-settings-resizer" data-panel-resizer="chatSettings" role="separator" aria-orientation="vertical" aria-label="Resize chat settings"></div>
       <aside class="chat-owner-settings"><details open><summary>Share with people</summary><form id="chat-invite-form" class="compact-form"><input name="label" maxlength="120" placeholder="Link label"><select name="scope"><option value="topic">This topic</option><option value="all">All topics</option></select><button type="submit">Create chat link</button></form>${invites.invites.filter((item) => !item.revoked_at).map((item) => `<div class="chat-setting-row"><span>${h(item.label)}</span><button data-action="revoke-chat-invite" data-id="${h(item.id)}">Revoke</button></div>`).join('')}</details>
       <details><summary>Link an agent</summary><form id="chat-agent-link-form" class="compact-form"><select name="agent">${agentOptions}</select><select name="scope"><option value="topic">This topic</option><option value="source">All topics here</option><option value="all">All connected chats</option></select><label><input type="checkbox" name="can_post" checked> Can reply</label><button type="submit">Link agent</button></form>${links.links.filter((item) => item.source_id === source.id || item.source_id === '*').map((item) => `<div class="chat-setting-row"><span>${h(state.agents.find((a) => a.id === item.agent_instance_id)?.title || item.agent_instance_id)} · ${h(item.source_id === '*' ? 'all chats' : item.topic_id ? source.topics.find((t) => t.id === item.topic_id)?.name || item.topic_id : 'all topics here')}</span><button data-action="unlink-chat-agent" data-link-agent-id="${h(item.agent_instance_id)}" data-source-id="${h(item.source_id)}" data-topic-id="${h(item.topic_id || '')}">Remove</button></div>`).join('')}</details>
       <details><summary>Connect another WebSpider</summary><form id="chat-remote-form" class="compact-form"><textarea name="details" placeholder="Paste WebSpider chat connection JSON" required></textarea><button type="submit">Connect</button></form>${remotes.remotes.map((item) => `<div class="chat-setting-row"><span>${h(item.name)}</span><button data-action="delete-chat-remote" data-id="${h(item.id)}">Disconnect</button></div>`).join('')}<form id="chat-federation-form" class="compact-form"><input name="label" maxlength="120" placeholder="WebSpider name"><select name="scope"><option value="all">All topics</option><option value="topic">This topic</option></select><button type="submit">Create connection credential</button></form>${federation.tokens.filter((item) => !item.revoked_at).map((item) => `<div class="chat-setting-row"><span>${h(item.label)}</span><button data-action="revoke-chat-federation" data-id="${h(item.id)}">Revoke</button></div>`).join('')}</details></aside>
@@ -1312,6 +1349,9 @@ document.addEventListener('input', (event) => {
   if (event.target.id === 'terminal-compose' && event.target.dataset.terminalId) {
     saveTerminalDraft(state.terminalDrafts, event.target.dataset.terminalId, event.target.value);
   }
+  if (event.target.id === 'latex-review-instruction' && state.latexContext) {
+    state.latexContext.reviewInstruction = event.target.value;
+  }
 });
 
 function transmitTerminalInput(data) {
@@ -1721,7 +1761,7 @@ async function renderTerminal(agent) {
     return `<div class="terminal-tab ${item.id === terminal.id ? 'selected' : ''}"><button class="terminal-select" data-terminal-id="${h(item.id)}"><i class="state-dot ${h(item.state === 'attached' ? 'ready' : item.state)}"></i><span>${h(label)}</span></button>${item.kind !== 'primary_agent' ? `<button class="terminal-tab-close" data-action="close-terminal" data-terminal-id="${h(item.id)}" aria-label="Close ${h(label)} terminal tab" title="${item.kind === 'task_shell' ? 'Dismiss task terminal; the task keeps running' : 'Close terminal and stop its shell'}">×</button>` : ''}</div>`;
   }).join('')}<button class="terminal-add" data-action="add-terminal" title="New terminal" aria-label="New terminal tab">+</button></div>
     <div class="terminal-toolbar"><div class="terminal-lights"><i></i><i></i><i></i></div><span>${h(agent.node_name)} / ${h(terminal.label)}</span>${interactive ? `<button class="secondary terminal-attach" type="button" data-action="choose-terminal-files" title="Attach files to this agent">Attach file</button><div class="terminal-input-switch" aria-label="Terminal input mode"><button data-terminal-input-mode="direct">Direct</button><button data-terminal-input-mode="compose" title="${h(textBoxPurpose)}">Text box</button></div>` : ''}<div class="terminal-view-switch" aria-label="Terminal view"><button data-terminal-view="terminal">Terminal</button><button data-terminal-view="maths">Maths</button><button data-terminal-view="split">Split</button></div><button class="secondary terminal-refresh" type="button" data-action="refresh-terminal" title="Rebuild, refit, and redraw the terminal display" aria-label="Refresh terminal display">Refresh</button>${agentEnded && terminal.kind === 'primary_agent' ? '<button class="primary" id="terminal-control" data-action="wake-agent">Restart agent</button>' : `<button class="secondary" id="terminal-control" data-action="take-control">${interactive ? 'Take control' : 'Not running'}</button>`}</div>
-    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
+    <div id="terminal-layout" class="terminal-layout" data-view="${h(state.terminalView)}"><div id="terminal-output" class="terminal-output" aria-label="Interactive agent terminal"></div><div class="panel-resizer terminal-split-resizer" data-panel-resizer="terminalSplit" role="separator" aria-orientation="vertical" aria-label="Resize terminal and Maths view"></div><div id="terminal-maths" class="terminal-maths" aria-live="polite"><div class="terminal-maths-empty">Maths output will appear here as the agent writes.</div></div></div>
     ${interactive ? '<input id="terminal-file-input" class="hidden" type="file" multiple aria-label="Choose files to attach"><div id="terminal-image-draft" class="terminal-image-draft hidden"><div class="terminal-image-previews" aria-label="Staged attachment previews"></div><div class="terminal-image-summary"><strong>Attachment ready</strong><span class="terminal-image-names"></span></div><span class="terminal-image-status"></span><button type="button" data-action="discard-terminal-images" aria-label="Discard staged attachments" title="Discard staged attachments">×</button></div>' : ''}
     ${interactive ? `<form id="terminal-compose-form" class="terminal-compose hidden"><textarea id="terminal-compose" name="text" data-terminal-id="${h(terminal.id)}" aria-label="Terminal text box" placeholder="${h(textBoxPurpose)}">${h(terminalDraft(state.terminalDrafts, terminal.id))}</textarea><button class="primary" type="submit">Send</button></form>` : ''}
   </section>`;
@@ -1839,7 +1879,7 @@ async function renderFiles(agent) {
   state.fileSearchQuery = restored.searchQuery;
   state.previewPath = restored.previewPath;
   state.previewMode = restored.previewMode;
-  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><section class="preview-pane"><div id="preview-header" class="preview-header"><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout ${state.filePaneCollapsed ? 'file-pane-collapsed' : ''}"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><div class="panel-resizer file-pane-resizer" data-panel-resizer="files" role="separator" aria-orientation="vertical" aria-label="Resize file browser"></div><section class="preview-pane"><div id="preview-header" class="preview-header"><button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
   try {
     await loadDirectory();
   } catch (error) {
@@ -1952,6 +1992,7 @@ function closeLatexWorkspace() {
   state.latexContext = null;
   state.pendingLatexSelection = null;
   state.pendingLatexRevision = null;
+  $('#app-shell')?.classList.remove('latex-focus-mode');
   $('.file-layout')?.classList.remove('latex-open');
 }
 
@@ -1987,6 +2028,8 @@ function renderLatexReviewPanel() {
   const panel = $('#latex-review-panel');
   if (!panel || !state.latexContext) return;
   const reviews = latexReviewsForCurrentFile();
+  const toggle = $('[data-action="toggle-latex-reviews"]');
+  if (toggle) toggle.textContent = `Reviews${reviews.length ? ` (${reviews.length})` : ''}`;
   if (!reviews.length) {
     panel.innerHTML = '<div class="latex-review-empty"><strong>No agent suggestions yet</strong><span>Select source text and choose Ask agent.</span></div>';
     return;
@@ -2036,6 +2079,61 @@ function applyLatexWorkspaceView() {
   workspace.dataset.view = context.view;
   $$('[data-latex-view]').forEach((button) => button.classList.toggle('selected', button.dataset.latexView === context.view));
   if (['pdf', 'split'].includes(context.view)) void refreshLatexPdf();
+}
+
+function applyLatexAuxiliaryVisibility() {
+  const context = state.latexContext;
+  const workspace = $('#latex-workspace');
+  if (!context || !workspace) return;
+  workspace.dataset.overleafOpen = String(context.showOverleaf);
+  workspace.dataset.reviewsOpen = String(context.showReviews);
+  $('[data-action="toggle-latex-overleaf"]')?.setAttribute('aria-expanded', String(context.showOverleaf));
+  $('[data-action="toggle-latex-reviews"]')?.setAttribute('aria-expanded', String(context.showReviews));
+}
+
+function latexSelectionLabel(selection) {
+  return selection.fromLine === selection.toLine
+    ? `line ${selection.fromLine}`
+    : `lines ${selection.fromLine}–${selection.toLine}`;
+}
+
+function renderLatexSelectionBar() {
+  const context = state.latexContext;
+  const host = $('#latex-selection-bar');
+  if (!context || !host) return;
+  const selections = context.taggedSelections || [];
+  const current = state.latexEditor?.selection();
+  const canTag = Boolean(current?.text.trim()) && !context.dirty;
+  const chips = selections.map((selection, index) => `<span class="latex-selection-chip" title="${h(selection.text.trim().replace(/\s+/g, ' ').slice(0, 180))}">${h(latexSelectionLabel(selection))}<button type="button" data-action="remove-latex-selection" data-selection-index="${index}" aria-label="Remove ${h(latexSelectionLabel(selection))}">×</button></span>`).join('');
+  host.innerHTML = `<form id="latex-review-form" class="latex-selection-form"><strong>Ask ${h(state.selectedAgent?.title || 'agent')}</strong><div class="latex-selection-chips">${chips || '<span class="latex-selection-hint">Select text, then tag it. Add as many separate passages as needed.</span>'}</div><button type="button" data-action="tag-latex-selection" ${canTag ? '' : 'disabled'}>${selections.length ? 'Tag another' : 'Tag selection'}</button>${selections.length ? '<button type="button" data-action="clear-latex-selections">Clear</button>' : ''}<input id="latex-review-instruction" name="instruction" value="${h(context.reviewInstruction || '')}" maxlength="12000" placeholder="What should the agent fix across these passages?" aria-label="Instruction for the selected passages"><button type="submit" class="primary" ${selections.length ? '' : 'disabled'}>Ask agent</button></form>`;
+}
+
+function tagLatexSelection() {
+  const context = state.latexContext;
+  const selection = state.latexEditor?.selection();
+  if (!context || !selection?.text.trim()) return toast('Select a passage in the LaTeX source first.', true);
+  if (context.dirty) return toast('Save the source before tagging passages for agent review.', true);
+  context.reviewInstruction = $('#latex-review-instruction')?.value || context.reviewInstruction || '';
+  const overlaps = context.taggedSelections.some((tagged) => selection.from < tagged.to && selection.to > tagged.from);
+  if (overlaps) return toast('That passage overlaps one you already tagged.', true);
+  context.taggedSelections.push({ ...selection });
+  context.taggedSelections.sort((left, right) => left.from - right.from);
+  state.latexEditor?.setTaggedRanges(context.taggedSelections);
+  renderLatexSelectionBar();
+  state.latexEditor?.focus();
+}
+
+function toggleLatexFullscreen(force = null) {
+  const context = state.latexContext;
+  if (!context) return;
+  context.fullscreen = force == null ? !context.fullscreen : Boolean(force);
+  $('#app-shell')?.classList.toggle('latex-focus-mode', context.fullscreen);
+  const button = $('[data-action="toggle-latex-fullscreen"]');
+  if (button) {
+    button.textContent = context.fullscreen ? 'Exit full screen' : 'Full screen';
+    button.setAttribute('aria-pressed', String(context.fullscreen));
+  }
+  requestAnimationFrame(() => state.latexEditor?.focus());
 }
 
 function startLatexProposalPolling() {
@@ -2199,7 +2297,7 @@ async function showOverleafDiff(file) {
     const local = versions.local || '';
     const remote = versions.remote || '';
     const chunks = state.latexContext?.module?.latexDiffChunks(local, remote) || [];
-    host.innerHTML = `<div class="overleaf-version-grid"><section><strong>Local working copy</strong><pre data-overleaf-version="local">${overleafHighlightedVersion(local, chunks, 'local')}</pre></section><section><strong>Fetched Overleaf</strong><pre data-overleaf-version="remote">${overleafHighlightedVersion(remote, chunks, 'remote')}</pre></section></div>`;
+    host.innerHTML = `<div class="overleaf-version-grid"><section><strong>Local working copy</strong><pre data-overleaf-version="local">${overleafHighlightedVersion(local, chunks, 'local')}</pre></section><div class="panel-resizer overleaf-split-resizer" data-panel-resizer="overleafSplit" role="separator" aria-orientation="vertical" aria-label="Resize local and Overleaf comparison"></div><section><strong>Fetched Overleaf</strong><pre data-overleaf-version="remote">${overleafHighlightedVersion(remote, chunks, 'remote')}</pre></section></div>`;
     const panes = [...host.querySelectorAll('[data-overleaf-version]')];
     let syncing = false;
     for (const [pane, other] of [[panes[0], panes[1]], [panes[1], panes[0]]]) pane.addEventListener('scroll', () => {
@@ -2255,9 +2353,10 @@ async function renderLatexWorkspace(preview, relative) {
   const content = $('#preview-content');
   const pdfPath = relative.replace(/\.tex$/i, '.pdf');
   content.className = 'preview-content latex-preview';
-  content.innerHTML = `<div id="latex-workspace" class="latex-workspace" data-view="source">
-    <div class="latex-editor-toolbar"><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button class="primary latex-ask-selection" data-action="ask-latex-agent">Ask agent about selection</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
-    <div class="latex-stage"><div id="latex-editor-host" class="latex-editor-host"></div><div id="latex-pdf-host" class="latex-pdf-host"></div></div>
+  content.innerHTML = `<div id="latex-workspace" class="latex-workspace" data-view="source" data-overleaf-open="false" data-reviews-open="false">
+    <div class="latex-editor-toolbar"><button data-action="toggle-latex-fullscreen" aria-pressed="false">Full screen</button><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button data-action="toggle-latex-overleaf" aria-expanded="false">Overleaf</button><button data-action="toggle-latex-reviews" aria-expanded="false">Reviews</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
+    <div id="latex-selection-bar" class="latex-selection-bar"></div>
+    <div class="latex-stage"><div id="latex-editor-host" class="latex-editor-host"></div><div class="panel-resizer latex-split-resizer" data-panel-resizer="latexSplit" role="separator" aria-orientation="vertical" aria-label="Resize LaTeX source and PDF"></div><div id="latex-pdf-host" class="latex-pdf-host"></div></div>
     <section id="overleaf-panel" class="overleaf-panel"></section>
     <aside id="latex-review-panel" class="latex-review-panel"></aside>
   </div>`;
@@ -2276,6 +2375,11 @@ async function renderLatexWorkspace(preview, relative) {
     suppressChange: false,
     pdfPath,
     view: 'source',
+    fullscreen: false,
+    showOverleaf: false,
+    showReviews: false,
+    taggedSelections: [],
+    reviewInstruction: '',
     module,
   };
   state.latexContext = context;
@@ -2283,13 +2387,23 @@ async function renderLatexWorkspace(preview, relative) {
     document: preview.content,
     onChange: () => {
       if (!context.suppressChange) context.dirty = state.latexEditor?.getValue() !== context.source;
+      if (!context.suppressChange && context.taggedSelections.length) {
+        context.taggedSelections = [];
+        queueMicrotask(() => {
+          if (state.latexContext === context) state.latexEditor?.setTaggedRanges([]);
+        });
+      }
       updateLatexEditorStatus();
+      renderLatexSelectionBar();
     },
+    onSelection: () => renderLatexSelectionBar(),
   });
+  renderLatexSelectionBar();
   renderLatexReviewPanel();
   renderOverleafPanel();
   void refreshOverleafStatus({ silent: true });
   applyLatexWorkspaceView();
+  applyLatexAuxiliaryVisibility();
   if (latexReviewsForCurrentFile().some((review) => ['waiting', 'revising'].includes(review.status))) startLatexProposalPolling();
 }
 
@@ -2326,15 +2440,6 @@ async function checkLatexProposal(review, { silent = false } = {}) {
     if (!silent) toast(review.error, true);
     return false;
   }
-}
-
-function showLatexReviewForm() {
-  const context = state.latexContext;
-  const selection = state.latexEditor?.selection();
-  if (!context || !selection?.text.trim()) return toast('Select the LaTeX source you want the agent to revise.', true);
-  if (context.dirty) return toast('Save your source edits before requesting an agent review.', true);
-  state.pendingLatexSelection = selection;
-  openModal(`<div class="modal-header"><div><h2>Ask ${h(state.selectedAgent.title || 'Sub-Spider')}</h2><p>${h(context.path)} · lines ${h(selection.fromLine)}–${h(selection.toLine)}</p></div><button data-action="close-modal">×</button></div><form id="latex-review-form" class="modal-body form-grid"><label>What should change?<textarea name="instruction" required maxlength="12000" placeholder="For example: make this argument more concise and define the notation before using it."></textarea></label><div class="latex-selection-preview">${h(selection.text.slice(0, 1200))}${selection.text.length > 1200 ? '\n…' : ''}</div><div class="modal-actions"><span>The agent proposes; your source is not changed.</span><button type="button" data-action="close-modal">Cancel</button><button type="submit" class="primary">Send review</button></div></form>`);
 }
 
 async function saveLatexSource() {
@@ -2422,7 +2527,7 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
   state.previewMode = markdown && ['source', 'rendered'].includes(preferredMode) ? preferredMode : markdown ? 'rendered' : 'source';
   rememberFileBrowserState();
   $$('.file-row').forEach((row) => row.classList.toggle('selected', row.dataset.filePath === relative));
-  $('#preview-header').innerHTML = `<strong class="preview-path" title="${h(relative)}">${h(relative)}</strong><div class="preview-actions">${markdown ? `<div class="preview-mode-switch"><button data-preview-mode="rendered" class="${state.previewMode === 'rendered' ? 'selected' : ''}">Readable</button><button data-preview-mode="source" class="${state.previewMode === 'source' ? 'selected' : ''}">Source</button></div>` : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
+  $('#preview-header').innerHTML = `<button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path" title="${h(relative)}">${h(relative)}</strong><div class="preview-actions">${markdown ? `<div class="preview-mode-switch"><button data-preview-mode="rendered" class="${state.previewMode === 'rendered' ? 'selected' : ''}">Readable</button><button data-preview-mode="source" class="${state.previewMode === 'source' ? 'selected' : ''}">Source</button></div>` : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
   if (structure) {
@@ -2640,6 +2745,7 @@ async function renderNotes(noteId = state.selectedNoteId) {
     ${pageHeader('Notes', 'Plaintext notes stored on this hub machine', '<button class="primary mobile-primary" data-action="new-note">New note</button>')}
     <div class="page-content notes-page">
       <aside class="notes-list" aria-label="Notes">${state.notes.length ? state.notes.map((item) => `<button class="note-row ${item.id === selected ? 'selected' : ''}" data-note-id="${h(item.id)}"><strong>${h(item.title)}</strong><span>${item.visibility === 'master' ? 'Visible to Master' : 'Just for me'} · ${h(formatTime(item.updated_at, true))}</span></button>`).join('') : '<div class="empty compact"><div><strong>No notes yet</strong><p>Create a plaintext note on the hub.</p></div></div>'}</aside>
+      <div class="panel-resizer notes-resizer" data-panel-resizer="notes" role="separator" aria-orientation="vertical" aria-label="Resize notes list"></div>
       <section class="note-editor">${note ? `<form id="note-form" data-note-id="${h(note.id)}"><div class="note-editor-head"><input name="title" aria-label="Note title" maxlength="120" value="${h(note.title)}" required><label class="note-visibility"><input type="checkbox" name="master_visible" ${note.visibility === 'master' ? 'checked' : ''}><span>Visible to Master</span></label></div><textarea name="content" aria-label="Note text" maxlength="1048576" spellcheck="true">${h(note.content)}</textarea><div class="note-editor-actions"><span>${h(note.filename)}</span><button type="button" class="danger" data-action="delete-note">Delete</button><button type="submit" class="primary">Save</button></div></form>` : '<div class="empty"><div><strong>Select or create a note</strong><p>Notes are private unless you explicitly make one visible to the Master Spider.</p></div></div>'}</section>
     </div>
   </div>`;
@@ -2808,11 +2914,45 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
+    if (action === 'toggle-file-pane') {
+      state.filePaneCollapsed = !state.filePaneCollapsed;
+      localStorage.setItem('webspider_file_pane_collapsed', String(state.filePaneCollapsed));
+      $('.file-layout')?.classList.toggle('file-pane-collapsed', state.filePaneCollapsed);
+      $$('[data-action="toggle-file-pane"]').forEach((button) => { button.textContent = state.filePaneCollapsed ? 'Show files' : 'Hide files'; });
+      return;
+    }
     if (action === 'connect-overleaf') return showOverleafConnectForm();
     if (action === 'fetch-overleaf') return refreshOverleafStatus({ fetch: true });
     if (action === 'pull-overleaf') return runOverleafSync('pull');
     if (action === 'push-overleaf') return runOverleafSync('push');
-    if (action === 'ask-latex-agent') return showLatexReviewForm();
+    if (action === 'tag-latex-selection') return tagLatexSelection();
+    if (action === 'remove-latex-selection') {
+      const context = state.latexContext;
+      if (!context) return;
+      context.reviewInstruction = $('#latex-review-instruction')?.value || context.reviewInstruction || '';
+      context.taggedSelections.splice(Number(actionTarget.dataset.selectionIndex), 1);
+      state.latexEditor?.setTaggedRanges(context.taggedSelections);
+      return renderLatexSelectionBar();
+    }
+    if (action === 'clear-latex-selections') {
+      const context = state.latexContext;
+      if (!context) return;
+      context.reviewInstruction = $('#latex-review-instruction')?.value || context.reviewInstruction || '';
+      context.taggedSelections = [];
+      state.latexEditor?.setTaggedRanges([]);
+      return renderLatexSelectionBar();
+    }
+    if (action === 'toggle-latex-fullscreen') return toggleLatexFullscreen();
+    if (action === 'toggle-latex-overleaf') {
+      if (!state.latexContext) return;
+      state.latexContext.showOverleaf = !state.latexContext.showOverleaf;
+      return applyLatexAuxiliaryVisibility();
+    }
+    if (action === 'toggle-latex-reviews') {
+      if (!state.latexContext) return;
+      state.latexContext.showReviews = !state.latexContext.showReviews;
+      return applyLatexAuxiliaryVisibility();
+    }
     if (action === 'save-latex-source') return saveLatexSource();
     if (action === 'compile-latex') return compileLatexSource();
     if (action === 'set-latex-pdf') {
@@ -3176,10 +3316,11 @@ document.addEventListener('submit', async (event) => {
   if (event.target.id === 'latex-review-form') {
     event.preventDefault();
     const context = state.latexContext;
-    const selection = state.pendingLatexSelection;
     const instruction = String(new FormData(event.target).get('instruction') || '').trim();
+    const selections = context?.taggedSelections?.map(({ from, to, fromLine, fromColumn, toLine, toColumn }) => ({ from, to, fromLine, fromColumn, toLine, toColumn })) || [];
     const button = event.target.querySelector('button[type="submit"]');
-    if (!context || !selection?.text.trim() || !instruction || !button) return;
+    if (!context || !selections.length || !instruction || !button) return;
+    context.reviewInstruction = instruction;
     button.disabled = true;
     try {
       const current = await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/preview?path=${encodeURIComponent(context.path)}`);
@@ -3197,11 +3338,8 @@ document.addEventListener('submit', async (event) => {
         basePath: paths.basePath,
         proposalPath: paths.proposalPath,
         baseEtag: current.etag,
-        selection: {
-          from: selection.from, to: selection.to,
-          fromLine: selection.fromLine, fromColumn: selection.fromColumn,
-          toLine: selection.toLine, toColumn: selection.toColumn,
-        },
+        selection: selections[0],
+        selections,
         instruction,
         status: 'waiting',
         decisions: {},
@@ -3225,8 +3363,10 @@ document.addEventListener('submit', async (event) => {
         saveLatexReviews();
         throw error;
       }
-      closeModal();
-      state.pendingLatexSelection = null;
+      context.taggedSelections = [];
+      context.reviewInstruction = '';
+      state.latexEditor?.setTaggedRanges([]);
+      renderLatexSelectionBar();
       renderLatexReviewPanel();
       startLatexProposalPolling();
       toast(`Review sent to ${review.agentTitle}. Your source remains unchanged.`);
@@ -3722,6 +3862,85 @@ document.addEventListener('pointercancel', () => {
   clearProjectDropIndicators();
 });
 
+let activePanelResize = null;
+
+function clampPanelSize(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function resizePanelFromPointer(key, clientX, clientY) {
+  let container;
+  let value;
+  if (key === 'sidebar') value = clampPanelSize(clientX, 190, Math.min(440, window.innerWidth * .38));
+  else if (key === 'attention') value = clampPanelSize(window.innerWidth - clientX, 190, Math.min(520, window.innerWidth * .42));
+  else if (key === 'files') {
+    container = $('.file-layout');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      value = clampPanelSize(clientX - rect.left, 180, Math.max(180, rect.width - 360));
+    }
+  } else if (key === 'notes') {
+    container = $('.notes-page');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      value = clampPanelSize(clientX - rect.left, 180, Math.max(180, rect.width - 300));
+    }
+  } else if (key === 'chatTopics') {
+    container = $('.chat-owner-layout');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      value = clampPanelSize(clientX - rect.left, 150, Math.max(150, rect.width - state.panelLayout.chatSettings - 360));
+    }
+  } else if (key === 'chatSettings') {
+    container = $('.chat-owner-layout');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      value = clampPanelSize(rect.right - clientX, 190, Math.max(190, rect.width - state.panelLayout.chatTopics - 360));
+    }
+  } else if (['latexSplit', 'terminalSplit', 'overleafSplit'].includes(key)) {
+    container = key === 'latexSplit' ? $('.latex-stage') : key === 'terminalSplit' ? $('.terminal-layout') : $('.overleaf-version-grid');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      const vertical = window.matchMedia('(max-width: 760px)').matches && key !== 'overleafSplit';
+      const position = vertical ? clientY - rect.top : clientX - rect.left;
+      const extent = vertical ? rect.height : rect.width;
+      value = clampPanelSize(position / Math.max(1, extent) * 100, 20, 80);
+    }
+  }
+  if (!Number.isFinite(value)) return;
+  state.panelLayout[key] = Math.round(value * 10) / 10;
+  applyPanelLayout();
+  if (key === 'terminalSplit') refreshTerminalLayout();
+}
+
+document.addEventListener('pointerdown', (event) => {
+  const handle = event.target.closest('[data-panel-resizer]');
+  if (!handle || event.button !== 0) return;
+  event.preventDefault();
+  activePanelResize = { handle, key: handle.dataset.panelResizer, pointerId: event.pointerId };
+  handle.setPointerCapture?.(event.pointerId);
+  document.body.classList.add('panel-resizing');
+  resizePanelFromPointer(activePanelResize.key, event.clientX, event.clientY);
+});
+
+document.addEventListener('pointermove', (event) => {
+  if (!activePanelResize || event.pointerId !== activePanelResize.pointerId) return;
+  event.preventDefault();
+  resizePanelFromPointer(activePanelResize.key, event.clientX, event.clientY);
+});
+
+function finishPanelResize(event) {
+  if (!activePanelResize || (event.pointerId != null && event.pointerId !== activePanelResize.pointerId)) return;
+  activePanelResize.handle.releasePointerCapture?.(activePanelResize.pointerId);
+  activePanelResize = null;
+  document.body.classList.remove('panel-resizing');
+  savePanelLayout();
+  refreshTerminalLayout();
+}
+
+document.addEventListener('pointerup', finishPanelResize);
+document.addEventListener('pointercancel', finishPanelResize);
+
 document.addEventListener('keydown', (event) => {
   const handle = event.target.closest('.project-drag-handle[data-project-drag-id]');
   if (!handle || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -3787,6 +4006,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.latexContext?.fullscreen) {
+    event.preventDefault();
+    toggleLatexFullscreen(false);
+    return;
+  }
   if (event.key === 'Escape' && $('.sidebar')?.classList.contains('mobile-open')) {
     event.preventDefault();
     closeMobileSidebar();

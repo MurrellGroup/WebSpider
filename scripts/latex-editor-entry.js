@@ -1,5 +1,6 @@
-import { basicSetup, EditorView } from 'codemirror';
-import { EditorState, Text } from '@codemirror/state';
+import { basicSetup } from 'codemirror';
+import { EditorState, StateEffect, StateField, Text } from '@codemirror/state';
+import { Decoration, EditorView } from '@codemirror/view';
 import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
 import { Chunk } from '@codemirror/merge';
@@ -21,6 +22,11 @@ const latexTheme = EditorView.theme({
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
     backgroundColor: '#28483f',
   },
+  '.cm-tagged-selection': {
+    backgroundColor: 'rgba(124, 184, 255, .14)',
+    outline: '1px solid rgba(124, 184, 255, .4)',
+    borderRadius: '2px',
+  },
   '.cm-gutters': {
     color: '#647080',
     backgroundColor: '#0d1118',
@@ -35,6 +41,24 @@ const latexTheme = EditorView.theme({
   '.tok-link, .tok-url': { color: '#78dce8' },
 }, { dark: true });
 
+const setTaggedSelections = StateEffect.define();
+const taggedSelectionsField = StateField.define({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let mapped = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (!effect.is(setTaggedSelections)) continue;
+      const length = transaction.state.doc.length;
+      mapped = Decoration.set(effect.value
+        .map(({ from, to }) => ({ from: Math.max(0, Math.min(length, from)), to: Math.max(0, Math.min(length, to)) }))
+        .filter(({ from, to }) => to > from)
+        .map(({ from, to }) => Decoration.mark({ class: 'cm-tagged-selection' }).range(from, to)), true);
+    }
+    return mapped;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 function normalizedDocument(value) {
   return String(value ?? '').replaceAll('\r\n', '\n');
 }
@@ -48,6 +72,7 @@ export function createLatexEditor(parent, { document = '', onChange = null, onSe
         basicSetup,
         StreamLanguage.define(stex),
         latexTheme,
+        taggedSelectionsField,
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChange?.(update.state.doc.toString());
@@ -83,6 +108,9 @@ export function createLatexEditor(parent, { document = '', onChange = null, onSe
       const head = Math.max(anchor, Math.min(length, Number(to) || anchor));
       view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
       view.focus();
+    },
+    setTaggedRanges(ranges = []) {
+      view.dispatch({ effects: setTaggedSelections.of(ranges) });
     },
     focus: () => view.focus(),
     destroy: () => view.destroy(),

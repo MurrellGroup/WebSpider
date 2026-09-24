@@ -387,7 +387,9 @@ test('LaTeX files open a source editor with agent review and per-hunk decisions'
   const latexBundle = fs.readFileSync(path.join(repository, 'web', 'mathjax-config.js'), 'utf8');
   assert.match(app, /globalThis\.WebSpiderLatexEditor/);
   assert.match(latexBundle, /WebSpiderLatexEditor/);
-  assert.match(app, /data-action="ask-latex-agent"/);
+  assert.match(app, /data-action="tag-latex-selection"/);
+  assert.match(app, /taggedSelections/);
+  assert.match(app, /data-action="toggle-latex-fullscreen"/);
   assert.match(app, /data-action="decide-latex-hunk"/);
   assert.match(app, /data-decision="accepted"/);
   assert.match(app, /data-decision="rejected"/);
@@ -406,7 +408,22 @@ test('LaTeX files open a source editor with agent review and per-hunk decisions'
   assert.match(styles, /\.overleaf-version-grid/);
   assert.match(app, /watchLatexCompilation\(context, task\.id\)/);
   assert.match(app, /Overleaf Git synchronizes source files, not its generated PDF/);
-  assert.match(styles, /\.latex-ask-selection \{[^}]*position: fixed;/);
+  assert.match(styles, /\.latex-selection-form \{[^}]*min-height: 43px;/);
+  assert.match(styles, /\.app-shell\.latex-focus-mode \.file-pane/);
+});
+
+test('major adjacent panels expose persistent draggable dividers', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /PANEL_LAYOUT_STORAGE_KEY/);
+  for (const key of ['files', 'latexSplit', 'terminalSplit', 'notes', 'chatTopics', 'chatSettings', 'overleafSplit']) {
+    assert.match(app, new RegExp(`data-panel-resizer="${key}"`));
+  }
+  assert.match(page, /data-panel-resizer="sidebar"/);
+  assert.match(page, /data-panel-resizer="attention"/);
+  assert.match(styles, /--file-pane-width/);
+  assert.match(styles, /--latex-split-size/);
+  assert.match(app, /webspider_file_pane_collapsed/);
+  assert.match(app, /data-action="toggle-file-pane"/);
 });
 
 test('desktop Attention rail collapses without hiding its alert count', () => {

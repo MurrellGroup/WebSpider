@@ -50,6 +50,9 @@ const waitFor = async (description, predicate) => {
   const file = await waitFor('LaTeX file row', () => document.querySelector('[data-file-path="main.tex"]'));
   file.click();
   await waitFor('CodeMirror editor', () => document.querySelector('.latex-editor-host .cm-editor'));
+  document.querySelector('[data-action="toggle-latex-fullscreen"]').click();
+  const fullscreen = document.querySelector('#app-shell').classList.contains('latex-focus-mode');
+  document.querySelector('[data-action="toggle-latex-fullscreen"]').click();
   await waitFor('Overleaf status', () => document.querySelector('.overleaf-summary')?.textContent.includes('project123'));
   await fetch('/api/v1/roots/root-one/overleaf/versions?directory=&file=main.tex');
   document.querySelector('[data-overleaf-diff-file="main.tex"]').click();
@@ -64,9 +67,9 @@ const waitFor = async (description, predicate) => {
   const sourceContent = document.querySelector('.cm-content'); sourceContent.focus();
   sourceContent.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true, cancelable: true }));
   await new Promise(resolve => setTimeout(resolve, 80));
-  document.querySelector('[data-action="ask-latex-agent"]').click();
+  document.querySelector('[data-action="tag-latex-selection"]').click();
   const reviewForm = await waitFor('selection review form', () => document.querySelector('#latex-review-form'));
-  reviewForm.querySelector('textarea').value = 'Make this declaration clearer.';
+  reviewForm.querySelector('input[name="instruction"]').value = 'Make this declaration clearer.';
   reviewForm.requestSubmit();
   await waitFor('review request delivered', () => document.querySelector('.latex-review-head')?.textContent.includes('Waiting for agent'));
   const saved = await (await fetch('/test/source')).json();
@@ -79,9 +82,11 @@ const waitFor = async (description, predicate) => {
     applied: document.querySelector('[data-review="lrv_browser"] .latex-review-head')?.textContent.includes('Applied'),
     compactRequest: delivered.message.includes('Follow .webspider/LATEX_REVIEW.md (protocol v1).') && !delivered.message.includes('\\documentclass'),
     overleafDiff: document.querySelectorAll('.overleaf-version-grid pre').length === 2,
+    fullscreen,
+    selectionBasket: Boolean(document.querySelector('.latex-selection-bar')),
   });
   document.body.append(result);
-  document.querySelector('.overleaf-version-grid')?.scrollIntoView({ block: 'center' });
+  document.querySelector('[data-action="toggle-latex-fullscreen"]').click();
 })().catch(error => { const result = document.createElement('pre'); result.id = 'latex-review-error'; result.textContent = error.stack; document.body.append(result); });
 </script>`;
 
@@ -172,7 +177,7 @@ try {
   const match = dom.match(/<pre id="latex-review-result">([^<]+)<\/pre>/);
   assert.ok(match, 'browser completed LaTeX review interaction');
   const result = JSON.parse(match[1].replaceAll('&quot;', '"'));
-  assert.deepEqual(result, { editor: true, chunks: 2, keptRejectedText: true, applied: true, compactRequest: true, overleafDiff: true });
+  assert.deepEqual(result, { editor: true, chunks: 2, keptRejectedText: true, applied: true, compactRequest: true, overleafDiff: true, fullscreen: true, selectionBasket: true });
   console.log(result);
 } finally {
   server.close(); fs.rmSync(profile, { recursive: true, force: true });

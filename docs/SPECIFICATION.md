@@ -995,6 +995,10 @@ Controls:
 
 A project-root-only file explorer described in detail in section 9. It includes an explicit upload action for placing a file into the open folder without creating an agent message or wake.
 
+On desktop, the file tree and preview are separated by a browser-persistent draggable divider. The file tree can be collapsed without closing the preview or changing agent state. Major adjacent portal panes use the same persistent divider behavior.
+
+Opening a LaTeX source provides source, PDF, and split views plus a distraction-free full-screen workspace. A compact top strip lets the user tag multiple disjoint source passages and send one instruction to the selected agent. Tagged ranges remain visibly marked until the request is sent or the source changes; the returned proposal is still reviewed and applied hunk by hunk.
+
 ### Artifacts tab
 
 Durable promoted outputs with:
