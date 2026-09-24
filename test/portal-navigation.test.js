@@ -381,3 +381,18 @@ test('file viewer renders safe inline image, SVG, and PDF previews', () => {
   assert.match(styles, /\.image-preview/);
   assert.match(styles, /\.document-preview/);
 });
+
+test('LaTeX files open a source editor with agent review and per-hunk decisions', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /import\('\.\/vendor\/latex-editor\.mjs'\)/);
+  assert.match(app, /data-action="ask-latex-agent"/);
+  assert.match(app, /data-action="decide-latex-hunk"/);
+  assert.match(app, /data-decision="accepted"/);
+  assert.match(app, /data-decision="rejected"/);
+  assert.match(app, /applyLatexReviewDecisions/);
+  assert.match(app, /\.webspider\/LATEX_REVIEW\.md/);
+  assert.match(app, /Do not modify the target file/);
+  assert.match(app, /current\.etag !== review\.baseEtag/);
+  assert.match(styles, /\.latex-workspace\[data-view="split"\]/);
+  assert.match(styles, /\.latex-diff-card\.accepted/);
+});

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node ./bin/webspider.js up",
+    "build:latex-editor": "node ./scripts/build-latex-editor.mjs",
     "build:molstar": "node ./scripts/build-molstar-preview.mjs",
     "build:installer": "sh ./scripts/build-self-installer.sh",
     "test": "node --test --test-concurrency=1 test/*.test.js",
@@ -19,6 +20,9 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
+    "@codemirror/legacy-modes": "^6.5.4",
+    "@codemirror/merge": "^6.12.2",
+    "codemirror": "^6.0.2",
     "esbuild": "0.25.9",
     "molstar": "5.4.2"
   }

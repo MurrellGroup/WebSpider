@@ -7,6 +7,9 @@ import {
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraft } from './terminal-drafts.js';
+import {
+  applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
+} from './latex-review.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
 
@@ -16,6 +19,7 @@ const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const FILE_BROWSER_STORAGE_KEY = 'webspider_file_browser_states_v1';
 const PROJECT_ORGANIZER_STORAGE_KEY = 'webspider_project_organizer_v1';
+const LATEX_REVIEW_STORAGE_KEY = 'webspider_latex_reviews_v1';
 const TERMINAL_CACHE_TTL_MS = 10 * 60 * 1_000;
 const TERMINAL_CACHE_LIMIT = 8;
 const TERMINAL_CACHE_TEXT_LIMIT = 500_000;
@@ -64,6 +68,19 @@ function loadProjectOrganizer() {
 
 function saveProjectOrganizer() {
   try { localStorage.setItem(PROJECT_ORGANIZER_STORAGE_KEY, JSON.stringify(state.projectOrganizer)); } catch {}
+}
+
+function loadLatexReviews() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LATEX_REVIEW_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((review) => review?.id && review?.path && review?.rootId).slice(-100) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLatexReviews() {
+  try { localStorage.setItem(LATEX_REVIEW_STORAGE_KEY, JSON.stringify(state.latexReviews.slice(-100))); } catch {}
 }
 
 function reconcileProjectOrganizer() {
@@ -200,6 +217,14 @@ const state = {
   previewMode: 'source',
   structurePreview: null,
   structurePreviewGeneration: 0,
+  latexEditor: null,
+  latexContext: null,
+  latexGeneration: 0,
+  latexPollTimer: null,
+  latexReviews: loadLatexReviews(),
+  latexProposalCache: new Map(),
+  pendingLatexSelection: null,
+  pendingLatexRevision: null,
   chatSourceId: 'local',
   chatTopicId: null,
   chatPendingFiles: [],
@@ -394,6 +419,7 @@ function showRecoveryClaimForm(runtimeId) {
 
 function showLogin() {
   closeAllTerminalContexts();
+  closeLatexWorkspace();
   $('#login-view').classList.remove('hidden');
   $('#app-shell').classList.add('hidden');
   state.eventSocket?.close();
@@ -881,6 +907,7 @@ function agentTabs() {
 }
 
 async function renderAgent(agentId, tab = 'terminal') {
+  closeLatexWorkspace();
   state.selectedAgent = state.agents.find((agent) => agent.id === agentId) || (await api(`/api/v1/agent-instances/${encodeURIComponent(agentId)}`));
   state.selectedProject = state.projects.find((project) => project.id === state.selectedAgent.project_id) || null;
   state.tab = tab;
@@ -1780,6 +1807,7 @@ async function renderTerminal(agent) {
 }
 
 async function renderFiles(agent) {
+  closeLatexWorkspace();
   const data = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/roots`);
   state.activeRoot = data.roots[0] || null;
   if (!state.activeRoot) {
@@ -1882,14 +1910,302 @@ async function uploadWorkspaceFile(entry, conflict, progress) {
   });
 }
 
+async function uploadWorkspaceText(rootId, destinationPath, text, conflict = 'overwrite') {
+  const name = destinationPath.split('/').at(-1);
+  const file = new File([String(text)], name, { type: 'text/plain;charset=utf-8' });
+  return uploadWorkspaceFile({
+    file,
+    transferId: `xfr_${randomIdentifier().replace(/[^a-zA-Z0-9_-]/g, '').slice(-36)}`,
+    rootId,
+    destinationPath,
+  }, conflict, null);
+}
+
+function closeLatexWorkspace() {
+  state.latexGeneration += 1;
+  clearInterval(state.latexPollTimer);
+  state.latexPollTimer = null;
+  state.latexEditor?.destroy?.();
+  state.latexEditor = null;
+  state.latexContext = null;
+  state.pendingLatexSelection = null;
+  state.pendingLatexRevision = null;
+  $('.file-layout')?.classList.remove('latex-open');
+}
+
+function latexReviewsForCurrentFile() {
+  const context = state.latexContext;
+  if (!context) return [];
+  return state.latexReviews
+    .filter((review) => review.rootId === context.rootId && review.path === context.path)
+    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+}
+
+function latexReviewStatusLabel(review) {
+  return {
+    waiting: 'Waiting for agent',
+    revising: 'Agent revising',
+    ready: 'Ready to review',
+    applied: 'Applied',
+    rejected: 'Rejected',
+    delivery_failed: 'Delivery failed',
+  }[review.status] || review.status;
+}
+
+function latexDiffLines(text, prefix, kind) {
+  const source = String(text || '');
+  const lines = source.split('\n');
+  const visible = lines.slice(0, 80);
+  const rendered = visible.map((line) => `<span class="${kind}"><i>${prefix}</i>${h(line || ' ')}</span>`).join('');
+  const omitted = lines.length - visible.length;
+  return `${rendered}${omitted > 0 ? `<span class="diff-omitted">… ${omitted} more line${omitted === 1 ? '' : 's'}</span>` : ''}`;
+}
+
+function renderLatexReviewPanel() {
+  const panel = $('#latex-review-panel');
+  if (!panel || !state.latexContext) return;
+  const reviews = latexReviewsForCurrentFile();
+  if (!reviews.length) {
+    panel.innerHTML = '<div class="latex-review-empty"><strong>No agent suggestions yet</strong><span>Select source text and choose Ask agent.</span></div>';
+    return;
+  }
+  panel.innerHTML = reviews.map((review) => {
+    const cached = state.latexProposalCache.get(review.id);
+    const decisions = review.decisions || {};
+    const chunks = cached?.chunks || [];
+    const accepted = chunks.filter((chunk) => decisions[chunk.id] === 'accepted').length;
+    const rejected = chunks.filter((chunk) => decisions[chunk.id] === 'rejected').length;
+    const pending = chunks.length - accepted - rejected;
+    const controls = review.status === 'delivery_failed'
+      ? `<button data-action="retry-latex-review" data-review-id="${h(review.id)}">Retry delivery</button>`
+      : ['waiting', 'revising'].includes(review.status)
+        ? `<button data-action="check-latex-proposal" data-review-id="${h(review.id)}">Check now</button>`
+      : review.status === 'ready'
+        ? `<span>${accepted} accepted · ${rejected} rejected · ${pending} undecided</span><button data-action="reject-latex-review" data-review-id="${h(review.id)}">Reject proposal</button><button class="primary" data-action="apply-latex-review" data-review-id="${h(review.id)}" ${accepted ? '' : 'disabled'}>Apply accepted</button>`
+        : '';
+    const chunkRows = ['ready', 'applied', 'rejected'].includes(review.status) && cached
+      ? chunks.map((chunk, index) => {
+        const decision = decisions[chunk.id] || 'pending';
+        return `<article class="latex-diff-card ${h(decision)}">
+          <header><button data-action="focus-latex-hunk" data-review-id="${h(review.id)}" data-chunk-id="${h(chunk.id)}">Change ${index + 1} · source line ${h(chunk.lineA)}</button><span>${h(decision)}</span></header>
+          <pre class="latex-diff-lines">${latexDiffLines(chunk.before, '−', 'removed')}${latexDiffLines(chunk.after, '+', 'added')}</pre>
+          ${review.status === 'ready' ? `<footer><button class="reject" data-action="decide-latex-hunk" data-decision="rejected" data-review-id="${h(review.id)}" data-chunk-id="${h(chunk.id)}">Reject</button><button data-action="revise-latex-hunk" data-review-id="${h(review.id)}" data-chunk-id="${h(chunk.id)}">Ask to revise</button><button class="accept" data-action="decide-latex-hunk" data-decision="accepted" data-review-id="${h(review.id)}" data-chunk-id="${h(chunk.id)}">Accept</button></footer>` : ''}
+        </article>`;
+      }).join('')
+      : review.status === 'ready'
+        ? '<div class="loading compact">Loading proposal diff…</div>'
+        : '';
+    return `<section class="latex-review" data-review="${h(review.id)}">
+      <div class="latex-review-head"><div><strong>${h(review.instruction)}</strong><span>${h(latexReviewStatusLabel(review))} · ${h(review.agentTitle || 'Sub-Spider')} · ${h(formatTime(review.createdAt, true))}</span></div><div>${controls}</div></div>
+      ${review.error ? `<p class="form-error">${h(review.error)}</p>` : ''}${chunkRows}
+    </section>`;
+  }).join('');
+  for (const review of reviews) {
+    if (['ready', 'applied', 'rejected'].includes(review.status) && !state.latexProposalCache.has(review.id)) {
+      void checkLatexProposal(review, { silent: true });
+    }
+  }
+}
+
+function applyLatexWorkspaceView() {
+  const context = state.latexContext;
+  const workspace = $('#latex-workspace');
+  if (!context || !workspace) return;
+  workspace.dataset.view = context.view;
+  $$('[data-latex-view]').forEach((button) => button.classList.toggle('selected', button.dataset.latexView === context.view));
+  if (['pdf', 'split'].includes(context.view)) void refreshLatexPdf();
+}
+
+function startLatexProposalPolling() {
+  if (state.latexPollTimer) return;
+  state.latexPollTimer = setInterval(() => {
+    for (const review of latexReviewsForCurrentFile().filter((item) => ['waiting', 'revising'].includes(item.status))) {
+      void checkLatexProposal(review, { silent: true });
+    }
+  }, 7_500);
+}
+
+function updateLatexEditorStatus() {
+  const context = state.latexContext;
+  if (!context) return;
+  const status = $('#latex-source-status');
+  if (status) status.textContent = context.dirty ? 'Unsaved changes' : 'Saved source';
+  $('#latex-save')?.toggleAttribute('disabled', !context.dirty);
+}
+
+async function refreshLatexPdf() {
+  const context = state.latexContext;
+  const host = $('#latex-pdf-host');
+  if (!context || !host) return false;
+  const generation = context.generation;
+  host.innerHTML = '<div class="loading">Checking PDF…</div>';
+  try {
+    await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/stat?path=${encodeURIComponent(context.pdfPath)}`);
+    if (state.latexContext !== context || context.generation !== generation || !host.isConnected) return false;
+    const source = `/api/v1/roots/${encodeURIComponent(context.rootId)}/media-preview?path=${encodeURIComponent(context.pdfPath)}&v=${Date.now()}`;
+    host.innerHTML = `<iframe class="latex-pdf-frame" title="Compiled preview of ${h(context.pdfPath)}" src="${h(source)}"></iframe>`;
+    return true;
+  } catch (error) {
+    if (state.latexContext !== context || !host.isConnected) return false;
+    host.innerHTML = `<div class="latex-pdf-empty"><strong>No compiled PDF at ${h(context.pdfPath)}</strong><span>Compile this document or choose another output path.</span><div><button data-action="compile-latex">Compile</button><button data-action="set-latex-pdf">PDF path…</button></div></div>`;
+    return false;
+  }
+}
+
+async function renderLatexWorkspace(preview, relative) {
+  const generation = ++state.latexGeneration;
+  const content = $('#preview-content');
+  const pdfPath = relative.replace(/\.tex$/i, '.pdf');
+  content.className = 'preview-content latex-preview';
+  content.innerHTML = `<div id="latex-workspace" class="latex-workspace" data-view="source">
+    <div class="latex-editor-toolbar"><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button class="primary" data-action="ask-latex-agent">Ask agent about selection</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
+    <div class="latex-stage"><div id="latex-editor-host" class="latex-editor-host"></div><div id="latex-pdf-host" class="latex-pdf-host"></div></div>
+    <aside id="latex-review-panel" class="latex-review-panel"></aside>
+  </div>`;
+  $('.file-layout')?.classList.add('latex-open');
+  const module = await import('./vendor/latex-editor.mjs');
+  if (generation !== state.latexGeneration || !$('#latex-editor-host')) return;
+  const context = {
+    generation,
+    rootId: state.activeRoot.id,
+    agentId: state.selectedAgent.id,
+    path: relative,
+    source: preview.content,
+    etag: preview.etag,
+    dirty: false,
+    suppressChange: false,
+    pdfPath,
+    view: 'source',
+    module,
+  };
+  state.latexContext = context;
+  state.latexEditor = module.createLatexEditor($('#latex-editor-host'), {
+    document: preview.content,
+    onChange: () => {
+      if (!context.suppressChange) context.dirty = state.latexEditor?.getValue() !== context.source;
+      updateLatexEditorStatus();
+    },
+  });
+  renderLatexReviewPanel();
+  applyLatexWorkspaceView();
+  if (latexReviewsForCurrentFile().some((review) => ['waiting', 'revising'].includes(review.status))) startLatexProposalPolling();
+}
+
+async function checkLatexProposal(review, { silent = false } = {}) {
+  const context = state.latexContext;
+  if (!context || review.rootId !== context.rootId || review.path !== context.path) return false;
+  try {
+    const previousStatus = review.status;
+    const previousProposalEtag = review.proposalEtag;
+    const proposal = await api(`/api/v1/roots/${encodeURIComponent(review.rootId)}/preview?path=${encodeURIComponent(review.proposalPath)}`);
+    if (review.status === 'revising' && proposal.etag === review.proposalEtag) {
+      if (!silent) toast('The agent has not updated this proposal yet.');
+      return false;
+    }
+    const base = await api(`/api/v1/roots/${encodeURIComponent(review.rootId)}/preview?path=${encodeURIComponent(review.basePath)}`);
+    const chunks = context.module.latexDiffChunks(base.content, proposal.content);
+    state.latexProposalCache.set(review.id, { base: base.content, proposal: proposal.content, chunks });
+    review.status = ['applied', 'rejected'].includes(previousStatus) ? previousStatus : 'ready';
+    review.proposalEtag = proposal.etag;
+    review.error = chunks.length ? null : 'The proposal is identical to the base document.';
+    if (previousStatus === 'revising' || (previousProposalEtag && previousProposalEtag !== proposal.etag)) review.decisions = {};
+    saveLatexReviews();
+    renderLatexReviewPanel();
+    if (!silent) toast(chunks.length ? `${chunks.length} proposed change${chunks.length === 1 ? '' : 's'} ready to review.` : 'The proposal contains no changes.');
+    return true;
+  } catch (error) {
+    if (error.status === 404) {
+      if (!silent) toast('The proposal is not ready yet.');
+      return false;
+    }
+    review.error = friendlyError(error);
+    saveLatexReviews();
+    renderLatexReviewPanel();
+    if (!silent) toast(review.error, true);
+    return false;
+  }
+}
+
+function showLatexReviewForm() {
+  const context = state.latexContext;
+  const selection = state.latexEditor?.selection();
+  if (!context || !selection?.text.trim()) return toast('Select the LaTeX source you want the agent to revise.', true);
+  if (context.dirty) return toast('Save your source edits before requesting an agent review.', true);
+  state.pendingLatexSelection = selection;
+  openModal(`<div class="modal-header"><div><h2>Ask ${h(state.selectedAgent.title || 'Sub-Spider')}</h2><p>${h(context.path)} · lines ${h(selection.fromLine)}–${h(selection.toLine)}</p></div><button data-action="close-modal">×</button></div><form id="latex-review-form" class="modal-body form-grid"><label>What should change?<textarea name="instruction" required maxlength="12000" placeholder="For example: make this argument more concise and define the notation before using it."></textarea></label><div class="latex-selection-preview">${h(selection.text.slice(0, 1200))}${selection.text.length > 1200 ? '\n…' : ''}</div><div class="modal-actions"><span>The agent proposes; your source is not changed.</span><button type="button" data-action="close-modal">Cancel</button><button type="submit" class="primary">Send review</button></div></form>`);
+}
+
+async function saveLatexSource() {
+  const context = state.latexContext;
+  if (!context || !state.latexEditor || !context.dirty) return;
+  const current = await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/preview?path=${encodeURIComponent(context.path)}`);
+  if (current.etag !== context.etag) throw new Error('This file changed on the workstation after you opened it. Reload it before saving so newer work is not overwritten.');
+  await uploadWorkspaceText(context.rootId, context.path, state.latexEditor.getValue(), 'overwrite');
+  const fresh = await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/preview?path=${encodeURIComponent(context.path)}`);
+  context.source = fresh.content;
+  context.etag = fresh.etag;
+  context.dirty = false;
+  updateLatexEditorStatus();
+  toast(`Saved ${context.path}.`);
+}
+
+async function compileLatexSource() {
+  const context = state.latexContext;
+  const agent = state.selectedAgent;
+  if (!context || !agent) return;
+  if (context.dirty) return toast('Save the LaTeX source before compiling.', true);
+  const slash = context.path.lastIndexOf('/');
+  const directory = slash < 0 ? '.' : context.path.slice(0, slash);
+  const filename = slash < 0 ? context.path : context.path.slice(slash + 1);
+  const script = 'cd -- "$1" || exit; if command -v latexmk >/dev/null 2>&1; then exec latexmk -pdf -interaction=nonstopmode -halt-on-error "$2"; elif command -v tectonic >/dev/null 2>&1; then exec tectonic "$2"; else echo "Install latexmk or tectonic to compile LaTeX." >&2; exit 127; fi';
+  await api('/api/v1/tasks', { method: 'POST', body: {
+    project_id: agent.project_id,
+    type: 'command',
+    title: `Compile ${filename}`,
+    specification: { argv: ['/bin/sh', '-c', script, 'webspider-latex', directory, filename], root_id: context.rootId, environment: {} },
+    assigned_agent_instance_id: agent.id,
+    node_id: agent.node_id,
+  } });
+  toast(`Compilation started in a monitoring terminal for ${filename}.`);
+  setTimeout(() => { if (state.latexContext === context) void refreshLatexPdf(); }, 3_000);
+}
+
+async function applyLatexReview(review) {
+  const context = state.latexContext;
+  if (!context) return;
+  if (!state.latexProposalCache.has(review.id) && !await checkLatexProposal(review, { silent: true })) return;
+  const cached = state.latexProposalCache.get(review.id);
+  const accepted = cached.chunks.filter((chunk) => review.decisions?.[chunk.id] === 'accepted');
+  if (!accepted.length) return toast('Accept at least one change first.', true);
+  const current = await api(`/api/v1/roots/${encodeURIComponent(review.rootId)}/preview?path=${encodeURIComponent(review.path)}`);
+  if (current.etag !== review.baseEtag) throw new Error('The source changed after this review began. Nothing was overwritten; start a fresh review from the current source.');
+  const finalText = applyLatexReviewDecisions(cached.base, cached.proposal, cached.chunks, review.decisions);
+  await uploadWorkspaceText(review.rootId, review.path, finalText, 'overwrite');
+  const fresh = await api(`/api/v1/roots/${encodeURIComponent(review.rootId)}/preview?path=${encodeURIComponent(review.path)}`);
+  context.suppressChange = true;
+  state.latexEditor.setValue(fresh.content);
+  context.suppressChange = false;
+  context.source = fresh.content;
+  context.etag = fresh.etag;
+  context.dirty = false;
+  review.status = 'applied';
+  review.appliedAt = new Date().toISOString();
+  saveLatexReviews();
+  updateLatexEditorStatus();
+  renderLatexReviewPanel();
+  toast(`Applied ${accepted.length} accepted change${accepted.length === 1 ? '' : 's'} to ${review.path}.`);
+}
+
 async function previewFile(name, { relativePath = null, preferredMode = null } = {}) {
   closeStructurePreview();
+  closeLatexWorkspace();
   const previewGeneration = state.structurePreviewGeneration;
   const relative = relativePath || (state.filePath ? `${state.filePath}/${name}` : name);
   state.previewPath = relative;
   const markdown = /\.(?:md|markdown|qmd|rmd)$/i.test(relative);
   const image = /\.(?:png|jpe?g|gif|webp|svg)$/i.test(relative);
   const pdf = /\.pdf$/i.test(relative);
+  const latex = /\.tex$/i.test(relative);
   const structure = /\.(?:pdb|cif|mmcif)$/i.test(relative);
   state.previewMode = markdown && ['source', 'rendered'].includes(preferredMode) ? preferredMode : markdown ? 'rendered' : 'source';
   rememberFileBrowserState();
@@ -1953,6 +2269,7 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
   }
   try {
     const preview = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/preview?path=${encodeURIComponent(relative)}`);
+    if (latex) return renderLatexWorkspace(preview, relative);
     content.dataset.source = preview.content;
     if (state.previewMode === 'rendered') {
       content.className = 'preview-content markdown-body';
@@ -2213,6 +2530,12 @@ document.addEventListener('click', async (event) => {
   }
   const previewMode = event.target.closest('[data-preview-mode]');
   if (previewMode) return setPreviewMode(previewMode.dataset.previewMode);
+  const latexView = event.target.closest('[data-latex-view]');
+  if (latexView && state.latexContext) {
+    state.latexContext.view = latexView.dataset.latexView;
+    applyLatexWorkspaceView();
+    return;
+  }
   const tab = event.target.closest('[data-tab]');
   if (tab && state.selectedAgent) return renderAgent(state.selectedAgent.id, tab.dataset.tab);
   const directory = event.target.closest('[data-file-dir]');
@@ -2262,6 +2585,82 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
+    if (action === 'ask-latex-agent') return showLatexReviewForm();
+    if (action === 'save-latex-source') return saveLatexSource();
+    if (action === 'compile-latex') return compileLatexSource();
+    if (action === 'set-latex-pdf') {
+      const context = state.latexContext;
+      if (!context) return;
+      const value = prompt('Project-relative path to the compiled PDF:', context.pdfPath);
+      if (value == null) return;
+      const normalized = value.trim().replaceAll('\\', '/');
+      if (!normalized || normalized.startsWith('/') || normalized.endsWith('/') || normalized.split('/').some((part) => !part || part === '.' || part === '..') || !/\.pdf$/i.test(normalized)) {
+        return toast('Enter a normalized project-relative .pdf path.', true);
+      }
+      context.pdfPath = normalized;
+      const button = $('[data-action="set-latex-pdf"]');
+      if (button) button.textContent = normalized;
+      return refreshLatexPdf();
+    }
+    if (action === 'check-latex-proposal') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      if (review) return checkLatexProposal(review);
+      return;
+    }
+    if (action === 'retry-latex-review') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      if (!review) return;
+      await api(`/api/v1/threads/${encodeURIComponent(review.threadId)}/messages`, {
+        method: 'POST',
+        headers: { 'idempotency-key': randomIdentifier() },
+        body: { parts: [{ type: 'text', text: latexReviewMessage(review) }], delivery_role: 'user', wake_policy: 'ensure_running' },
+      });
+      review.status = 'waiting';
+      review.error = null;
+      saveLatexReviews();
+      renderLatexReviewPanel();
+      startLatexProposalPolling();
+      return toast('Review delivery retried.');
+    }
+    if (action === 'focus-latex-hunk') {
+      const cached = state.latexProposalCache.get(actionTarget.dataset.reviewId);
+      const chunk = cached?.chunks.find((item) => item.id === actionTarget.dataset.chunkId);
+      if (!chunk) return;
+      state.latexContext.view = 'source';
+      applyLatexWorkspaceView();
+      state.latexEditor?.select(chunk.fromA, chunk.toA);
+      return;
+    }
+    if (action === 'decide-latex-hunk') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      if (!review || !['accepted', 'rejected'].includes(actionTarget.dataset.decision)) return;
+      review.decisions = { ...(review.decisions || {}), [actionTarget.dataset.chunkId]: actionTarget.dataset.decision };
+      saveLatexReviews();
+      renderLatexReviewPanel();
+      return;
+    }
+    if (action === 'revise-latex-hunk') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      const cached = state.latexProposalCache.get(actionTarget.dataset.reviewId);
+      const chunk = cached?.chunks.find((item) => item.id === actionTarget.dataset.chunkId);
+      if (!review || !chunk) return;
+      state.pendingLatexRevision = { review, chunk };
+      return openModal(`<div class="modal-header"><div><h2>Revise change</h2><p>${h(review.path)} · source line ${h(chunk.lineA)}</p></div><button data-action="close-modal">×</button></div><form id="latex-revision-form" class="modal-body form-grid"><label>What should the agent do differently?<textarea name="instruction" required maxlength="12000"></textarea></label><pre class="latex-selection-preview">${latexDiffLines(chunk.before, '−', 'removed')}${latexDiffLines(chunk.after, '+', 'added')}</pre><div class="modal-actions"><span>The existing proposal will be revised.</span><button type="button" data-action="close-modal">Cancel</button><button type="submit" class="primary">Send revision</button></div></form>`);
+    }
+    if (action === 'reject-latex-review') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      if (!review || !confirm('Reject this entire proposal? The original source will remain unchanged.')) return;
+      review.status = 'rejected';
+      review.rejectedAt = new Date().toISOString();
+      saveLatexReviews();
+      renderLatexReviewPanel();
+      return toast('Proposal rejected; the source was not changed.');
+    }
+    if (action === 'apply-latex-review') {
+      const review = state.latexReviews.find((item) => item.id === actionTarget.dataset.reviewId);
+      if (review) return applyLatexReview(review);
+      return;
+    }
     if (action === 'refresh-terminal') {
       const label = actionTarget.textContent;
       const controlled = Boolean(state.terminalLease);
@@ -2514,6 +2913,96 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'latex-review-form') {
+    event.preventDefault();
+    const context = state.latexContext;
+    const selection = state.pendingLatexSelection;
+    const instruction = String(new FormData(event.target).get('instruction') || '').trim();
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!context || !selection?.text.trim() || !instruction || !button) return;
+    button.disabled = true;
+    try {
+      const current = await api(`/api/v1/roots/${encodeURIComponent(context.rootId)}/preview?path=${encodeURIComponent(context.path)}`);
+      if (current.etag !== context.etag) throw new Error('The source changed after you selected this text. Reload it before starting the review.');
+      const suffix = `${Date.now().toString(36)}${randomIdentifier().replace(/[^a-zA-Z0-9]/g, '').slice(-12)}`;
+      const id = `lrv_${suffix}`;
+      const paths = latexReviewArtifactPaths(id);
+      const review = {
+        id,
+        rootId: context.rootId,
+        agentId: state.selectedAgent.id,
+        agentTitle: state.selectedAgent.title || state.selectedAgent.profile_name,
+        threadId: state.selectedAgent.active_thread_id,
+        path: context.path,
+        basePath: paths.basePath,
+        proposalPath: paths.proposalPath,
+        baseEtag: current.etag,
+        selection: {
+          from: selection.from, to: selection.to,
+          fromLine: selection.fromLine, fromColumn: selection.fromColumn,
+          toLine: selection.toLine, toColumn: selection.toColumn,
+        },
+        instruction,
+        status: 'waiting',
+        decisions: {},
+        createdAt: new Date().toISOString(),
+      };
+      await Promise.all([
+        uploadWorkspaceText(context.rootId, '.webspider/LATEX_REVIEW.md', LATEX_REVIEW_PROTOCOL, 'overwrite'),
+        uploadWorkspaceText(context.rootId, review.basePath, current.content, 'error'),
+      ]);
+      state.latexReviews.push(review);
+      saveLatexReviews();
+      try {
+        await api(`/api/v1/threads/${encodeURIComponent(review.threadId)}/messages`, {
+          method: 'POST',
+          headers: { 'idempotency-key': randomIdentifier() },
+          body: { parts: [{ type: 'text', text: latexReviewMessage(review) }], delivery_role: 'user', wake_policy: 'ensure_running' },
+        });
+      } catch (error) {
+        review.status = 'delivery_failed';
+        review.error = friendlyError(error);
+        saveLatexReviews();
+        throw error;
+      }
+      closeModal();
+      state.pendingLatexSelection = null;
+      renderLatexReviewPanel();
+      startLatexProposalPolling();
+      toast(`Review sent to ${review.agentTitle}. Your source remains unchanged.`);
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
+    return;
+  }
+  if (event.target.id === 'latex-revision-form') {
+    event.preventDefault();
+    const pending = state.pendingLatexRevision;
+    const instruction = String(new FormData(event.target).get('instruction') || '').trim();
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!pending?.review || !pending.chunk || !instruction || !button) return;
+    button.disabled = true;
+    const { review, chunk } = pending;
+    try {
+      const message = `[WebSpider LaTeX review revision]\nReview: ${review.id}\nFollow .webspider/LATEX_REVIEW.md (protocol v1).\nTarget remains unchanged: ${review.path}\nImmutable base: ${review.basePath}\nRevise the complete proposal in place: ${review.proposalPath}\nReconsider change near source line ${chunk.lineA}.\nRequest: ${instruction}\nDo not modify the target file. Reply with “LaTeX review ${review.id} ready” only after replacing the proposal file.`;
+      await api(`/api/v1/threads/${encodeURIComponent(review.threadId)}/messages`, {
+        method: 'POST',
+        headers: { 'idempotency-key': randomIdentifier() },
+        body: { parts: [{ type: 'text', text: message }], delivery_role: 'user', wake_policy: 'ensure_running' },
+      });
+      review.status = 'revising';
+      review.error = null;
+      review.decisions = {};
+      state.latexProposalCache.delete(review.id);
+      saveLatexReviews();
+      closeModal();
+      state.pendingLatexRevision = null;
+      renderLatexReviewPanel();
+      startLatexProposalPolling();
+      toast('Revision request sent.');
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
+    return;
+  }
   if (event.target.id === 'chat-message-form') {
     event.preventDefault();
     const body = String(new FormData(event.target).get('body') || '').trim();

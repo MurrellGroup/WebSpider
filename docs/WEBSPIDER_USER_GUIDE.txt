@@ -74,6 +74,9 @@ Attach a file
 Upload a workspace file without sending a message
     Open the agent's Files tab, enter the destination folder, and choose Upload files. Select stop, keep both, or replace for name conflicts. The browser streams each file in bounded chunks and resumes from the workstation's last confirmed byte after a transient request failure. This route does not create a message, wake the agent, or treat the file as an instruction. Files may be up to 64 GiB.
 
+Edit LaTeX with agent review
+    Select a `.tex` file in a Sub-Spider's Files tab to open the source editor. Select the exact source to change, choose Ask agent about selection, and describe the revision. The current generic Sub-Spider writes a separate proposal; it never edits the source for this request. Review each diff hunk with Accept, Reject, or Ask to revise, then choose Apply accepted. Only accepted hunks are written. Source, PDF, and Split switch between editing and the compiled preview. Compile uses `latexmk` or `tectonic` on the owning machine when installed. Review requests point to the compact protocol in `.webspider/LATEX_REVIEW.md`, so the selected source is not duplicated into the conversation.
+
 Preview a molecular structure
     In an agent's Files tab, select a `.pdb`, `.cif`, or `.mmcif` file. WebSpider loads its local Mol* renderer only for that preview. Choose one chain or All, set a color or restore Distinct chains, and toggle Cartoon, Surface, or Side chains for the selected chain set. Drag to rotate and scroll to zoom. Structure bytes stay on the authenticated WebSpider path; no external viewer or CDN receives them.
 

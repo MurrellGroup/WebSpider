@@ -264,6 +264,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .file-page-content { width: min(1540px, 100%); }
 .file-layout { display: grid; grid-template-columns: minmax(380px, .85fr) minmax(560px, 1.35fr); gap: 14px; min-height: 570px; }
+.file-layout.latex-open { grid-template-columns: minmax(220px, .42fr) minmax(0, 1.58fr); }
 .file-pane, .preview-pane { border: 1px solid var(--line-soft); background: var(--surface); border-radius: 12px; overflow: hidden; min-width: 0; }
 .file-toolbar { min-height: 45px; display: flex; align-items: center; gap: 8px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); overflow: hidden; }
 .file-location { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
@@ -313,6 +314,61 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .preview-mode-switch { display: flex; border: 1px solid var(--line); border-radius: 7px; padding: 2px; }
 .preview-mode-switch button { padding: 4px 7px; border-radius: 5px; }
 .preview-mode-switch button.selected { color: #07110d; background: var(--mint); }
+
+.latex-preview { min-height: 720px; padding: 0; overflow: hidden; }
+.latex-workspace { height: 100%; min-height: 720px; display: grid; grid-template-rows: auto minmax(480px, 1fr) auto; background: #080b10; }
+.latex-editor-toolbar { min-height: 45px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--line-soft); background: #10141c; }
+.latex-editor-toolbar > * { flex: 0 0 auto; }
+.latex-editor-toolbar > span { margin-right: auto; color: var(--muted-2); font-size: 10px; }
+.latex-editor-toolbar button { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; }
+.latex-editor-toolbar button:hover { border-color: var(--mint); color: var(--text); }
+.latex-editor-toolbar button.primary { background: var(--mint); color: #07110d; border-color: var(--mint); }
+.latex-editor-toolbar button:disabled { opacity: .45; cursor: default; }
+.latex-stage { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.latex-workspace[data-view="split"] .latex-stage { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.latex-editor-host, .latex-pdf-host { min-width: 0; min-height: 0; overflow: hidden; }
+.latex-editor-host .cm-editor { height: 100%; }
+.latex-editor-host .cm-scroller { overflow: auto; }
+.latex-pdf-host { display: none; position: relative; background: #e7e8e9; }
+.latex-workspace[data-view="pdf"] .latex-editor-host { display: none; }
+.latex-workspace[data-view="pdf"] .latex-pdf-host, .latex-workspace[data-view="split"] .latex-pdf-host { display: block; }
+.latex-workspace[data-view="split"] .latex-pdf-host { border-left: 1px solid var(--line); }
+.latex-pdf-frame { width: 100%; height: 100%; min-height: 620px; border: 0; background: #fff; }
+.latex-pdf-empty { height: 100%; min-height: 480px; padding: 24px; display: grid; place-content: center; justify-items: center; gap: 8px; color: #27303d; text-align: center; }
+.latex-pdf-empty span { max-width: 440px; color: #536172; font-size: 11px; }
+.latex-pdf-empty div { display: flex; gap: 8px; margin-top: 7px; }
+.latex-pdf-empty button { padding: 7px 10px; border: 1px solid #8b98a7; border-radius: 6px; background: #fff; color: #27303d; cursor: pointer; }
+.latex-review-panel { max-height: 48vh; overflow-y: auto; border-top: 1px solid var(--line); background: #0d1118; }
+.latex-review-empty { min-height: 58px; padding: 12px 14px; display: flex; align-items: baseline; gap: 10px; color: var(--muted); font-size: 10px; }
+.latex-review-empty strong { color: var(--text); }
+.latex-review { border-bottom: 1px solid var(--line-soft); }
+.latex-review:last-child { border-bottom: 0; }
+.latex-review-head { min-height: 58px; padding: 9px 12px; display: flex; align-items: center; gap: 12px; background: #111721; }
+.latex-review-head > div:first-child { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.latex-review-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
+.latex-review-head span { color: var(--muted-2); font-size: 9px; }
+.latex-review-head > div:last-child { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.latex-review-head button, .latex-diff-card button { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+.latex-review-head button.primary { border-color: var(--mint); background: var(--mint); color: #07110d; }
+.latex-review-head button:disabled { opacity: .42; cursor: default; }
+.latex-diff-card { margin: 9px 11px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #080b10; }
+.latex-diff-card.accepted { border-color: rgb(103 232 183 / 48%); }
+.latex-diff-card.rejected { border-color: rgb(251 125 136 / 38%); opacity: .72; }
+.latex-diff-card header, .latex-diff-card footer { min-height: 37px; padding: 6px 8px; display: flex; align-items: center; gap: 7px; background: #121822; }
+.latex-diff-card header button { border: 0; padding-left: 0; color: var(--blue); }
+.latex-diff-card header span { margin-left: auto; color: var(--muted-2); font-size: 9px; text-transform: uppercase; }
+.latex-diff-card footer { justify-content: flex-end; border-top: 1px solid var(--line-soft); }
+.latex-diff-card footer .accept { border-color: rgb(103 232 183 / 50%); color: var(--mint); }
+.latex-diff-card footer .reject { margin-right: auto; border-color: rgb(251 125 136 / 45%); color: var(--red); }
+.latex-diff-lines { max-height: 310px; margin: 0; padding: 7px 0; overflow: auto; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.latex-diff-lines > span { min-width: max-content; display: grid; grid-template-columns: 22px minmax(0, 1fr); padding: 1px 9px 1px 0; white-space: pre; }
+.latex-diff-lines i { padding-right: 6px; text-align: right; font-style: normal; user-select: none; }
+.latex-diff-lines .removed { background: rgb(251 125 136 / 10%); color: #f4b5ba; }
+.latex-diff-lines .removed i { color: var(--red); }
+.latex-diff-lines .added { background: rgb(103 232 183 / 10%); color: #b9ebd7; }
+.latex-diff-lines .added i { color: var(--mint); }
+.latex-diff-lines .diff-omitted { display: block; padding: 5px 10px; color: var(--muted-2); }
+.latex-selection-preview { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: #080b10; color: #cbd5dd; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .markdown-body { color: #d3dbe2; font-size: 13px; line-height: 1.68; overflow-wrap: anywhere; }
 .markdown-body > :first-child { margin-top: 0; }
@@ -494,6 +550,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .summary-strip { grid-template-columns: repeat(3, 1fr); }
   .steer-card { grid-template-columns: 1fr; }
   .file-layout { grid-template-columns: 1fr; }
+  .file-layout.latex-open { grid-template-columns: 1fr; }
   .structure-preview { min-height: 500px; }
   .chat-owner-layout { grid-template-columns: 180px minmax(0, 1fr); }
   .chat-owner-settings { grid-column: 1 / -1; border: 1px solid var(--line-soft); display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -540,6 +597,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .instruction-actions { align-items: stretch; flex-direction: column; }
   .instruction-actions > div { justify-content: flex-end; margin-left: 0; flex-wrap: wrap; }
   .preview-pane { min-height: 380px; }
+  .latex-preview, .latex-workspace { min-height: 640px; }
+  .latex-editor-toolbar { align-items: stretch; }
+  .latex-workspace[data-view="split"] .latex-stage { grid-template-columns: 1fr; grid-template-rows: minmax(420px, 1fr) minmax(420px, 1fr); }
+  .latex-workspace[data-view="split"] .latex-pdf-host { border-left: 0; border-top: 1px solid var(--line); }
+  .latex-review-head { align-items: stretch; flex-direction: column; }
+  .latex-review-head > div:last-child { justify-content: flex-start; }
   .structure-controls { align-items: flex-end; }
   .structure-mode-group { width: 100%; margin-left: 0; }
   .structure-mode-group .structure-toggle { flex: 1; }
