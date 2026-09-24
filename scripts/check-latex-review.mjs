@@ -50,6 +50,11 @@ const waitFor = async (description, predicate) => {
   const file = await waitFor('LaTeX file row', () => document.querySelector('[data-file-path="main.tex"]'));
   file.click();
   await waitFor('CodeMirror editor', () => document.querySelector('.latex-editor-host .cm-editor'));
+  await waitFor('Overleaf status', () => document.querySelector('.overleaf-summary')?.textContent.includes('project123'));
+  await fetch('/api/v1/roots/root-one/overleaf/versions?directory=&file=main.tex');
+  document.querySelector('[data-overleaf-diff-file="main.tex"]').click();
+  for (let index = 0; index < 50 && !document.querySelector('.overleaf-version-grid'); index += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  if (!document.querySelector('.overleaf-version-grid')) throw new Error('Overleaf diff failed: '+(document.querySelector('#overleaf-diff-host')?.textContent || 'missing host'));
   const cards = await waitFor('two review chunks', () => document.querySelectorAll('.latex-diff-card').length === 2 && [...document.querySelectorAll('.latex-diff-card')]);
   cards[0].querySelector('[data-decision="accepted"]').click();
   document.querySelectorAll('.latex-diff-card')[1].querySelector('[data-decision="rejected"]').click();
@@ -73,8 +78,10 @@ const waitFor = async (description, predicate) => {
     keptRejectedText: saved.source.includes('Closing sentence.') && !saved.source.includes('A stronger closing sentence.'),
     applied: document.querySelector('[data-review="lrv_browser"] .latex-review-head')?.textContent.includes('Applied'),
     compactRequest: delivered.message.includes('Follow .webspider/LATEX_REVIEW.md (protocol v1).') && !delivered.message.includes('\\documentclass'),
+    overleafDiff: document.querySelectorAll('.overleaf-version-grid pre').length === 2,
   });
   document.body.append(result);
+  document.querySelector('.overleaf-version-grid')?.scrollIntoView({ block: 'center' });
 })().catch(error => { const result = document.createElement('pre'); result.id = 'latex-review-error'; result.textContent = error.stack; document.body.append(result); });
 </script>`;
 
@@ -93,6 +100,13 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/v1/fleet-updates/latest') return sendJSON(response, { update: null });
   if (url.pathname === '/api/v1/agent-instances/agent-one/roots') return sendJSON(response, { roots: [{ id: 'root-one', logical_name: 'workspace' }] });
   if (url.pathname === '/api/v1/roots/root-one/entries') return sendJSON(response, { entries: [{ name: 'main.tex', kind: 'file', size: base.length, mtime: new Date().toISOString() }] });
+  if (url.pathname === '/api/v1/roots/root-one/overleaf/status') return sendJSON(response, {
+    connected: true, directory: '', project_id: 'project123', project_url: 'https://www.overleaf.com/project/project123',
+    remote_branch: 'main', local_branch: 'main', local_head: 'abc123', remote_head: 'def456',
+    fetched_at: new Date().toISOString(), ahead: 1, behind: 1, dirty: [], incoming: ['main.tex'],
+    outgoing: ['main.tex'], comparison: ['main.tex'], conflicts: ['main.tex'], credential_available: true,
+  });
+  if (url.pathname === '/api/v1/roots/root-one/overleaf/versions') return sendJSON(response, { file: 'main.tex', local: currentSource, remote: proposal, remote_ref: 'refs/remotes/overleaf/main' });
   if (url.pathname === '/api/v1/roots/root-one/preview') {
     const selected = url.searchParams.get('path');
     if (selected === 'main.tex') return sendJSON(response, { path: selected, content: currentSource, etag: currentEtag });
@@ -158,7 +172,7 @@ try {
   const match = dom.match(/<pre id="latex-review-result">([^<]+)<\/pre>/);
   assert.ok(match, 'browser completed LaTeX review interaction');
   const result = JSON.parse(match[1].replaceAll('&quot;', '"'));
-  assert.deepEqual(result, { editor: true, chunks: 2, keptRejectedText: true, applied: true, compactRequest: true });
+  assert.deepEqual(result, { editor: true, chunks: 2, keptRejectedText: true, applied: true, compactRequest: true, overleafDiff: true });
   console.log(result);
 } finally {
   server.close(); fs.rmSync(profile, { recursive: true, force: true });

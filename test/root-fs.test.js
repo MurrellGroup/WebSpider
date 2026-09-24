@@ -35,6 +35,20 @@ test('relative path validation rejects traversal and host paths', () => {
   }
 });
 
+test('rooted directory resolution creates only real directories inside the workspace', (t) => {
+  const value = fixture();
+  t.after(() => {
+    value.service.close();
+    fs.rmSync(value.base, { recursive: true, force: true });
+  });
+  const created = value.service.resolveDirectory('awr_test', 'manuscript/source', { create: true });
+  assert.equal(created, path.join(value.root, 'manuscript', 'source'));
+  assert.equal(fs.statSync(created).isDirectory(), true);
+  assert.throws(() => value.service.resolveDirectory('awr_test', '../outside'), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
+  fs.symlinkSync(value.outside, path.join(value.root, 'linked-directory'));
+  assert.throws(() => value.service.resolveDirectory('awr_test', 'linked-directory'), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
+});
+
 test('rooted reads, listings, preview, and search stay inside the registered root', async (t) => {
   const value = fixture();
   t.after(() => {

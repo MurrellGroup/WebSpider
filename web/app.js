@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.28';
+const PORTAL_VERSION = '0.6.29';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -222,6 +222,12 @@ const state = {
   latexContext: null,
   latexGeneration: 0,
   latexPollTimer: null,
+  latexDiffView: null,
+  overleafStatus: null,
+  overleafError: null,
+  overleafBusy: false,
+  overleafDiffKind: 'comparison',
+  overleafDiffFile: null,
   latexReviews: loadLatexReviews(),
   latexProposalCache: new Map(),
   pendingLatexSelection: null,
@@ -320,6 +326,12 @@ function friendlyError(error) {
     WS_RECOVERY_STALE: 'That surviving process changed or exited. Refresh the recovery panel.',
     WS_RECOVERY_CONFLICT: 'The selected recovery target cannot safely claim this process.',
     WS_RECOVERY_PENDING: 'This replacement is held to prevent duplicate work. Resolve its surviving process from Nodes first.',
+    WS_OVERLEAF_AUTH_REQUIRED: 'Reconnect your Overleaf token on this workstation.',
+    WS_OVERLEAF_DIRECTORY_NOT_EMPTY: 'Choose an empty directory or the top level of an existing Git repository.',
+    WS_OVERLEAF_DIRTY: 'Commit the local manuscript changes before pulling, or enter a commit message when pushing.',
+    WS_OVERLEAF_BEHIND: 'Overleaf has newer changes. Review and pull them before pushing.',
+    WS_OVERLEAF_DIVERGED: 'The local and Overleaf histories overlap. Review the conflicting files before merging.',
+    WS_OVERLEAF_RESERVED_TRACKED: 'Remove `.webspider` from Git tracking before pushing to Overleaf.',
   };
   return messages[error?.code] || error?.message || 'WebSpider could not complete that action.';
 }
@@ -1809,6 +1821,8 @@ async function renderTerminal(agent) {
 
 async function renderFiles(agent) {
   closeLatexWorkspace();
+  state.overleafStatus = null;
+  state.overleafError = null;
   const data = await api(`/api/v1/agent-instances/${encodeURIComponent(agent.id)}/roots`);
   state.activeRoot = data.roots[0] || null;
   if (!state.activeRoot) {
@@ -1835,6 +1849,7 @@ async function renderFiles(agent) {
   }
   if (state.fileSearchQuery) await searchFiles(state.fileSearchQuery);
   if (state.previewPath) await previewFile('', { relativePath: state.previewPath, preferredMode: state.previewMode });
+  if (!state.latexContext) void refreshOverleafStatus({ silent: true });
 }
 
 function rememberFileBrowserState() {
@@ -1866,7 +1881,7 @@ async function loadDirectory() {
   const data = await api(`/api/v1/roots/${encodeURIComponent(root.id)}/entries?path=${encodeURIComponent(state.filePath)}&hidden=${state.fileShowHidden}`);
   const parts = state.filePath ? state.filePath.split('/') : [];
   const crumbs = [{ name: root.logical_name, path: '' }, ...parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join('/') }))];
-  $('#file-toolbar').innerHTML = `<div class="file-location" aria-label="Current workspace path">${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}</div><div class="file-toolbar-actions"><button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" value="${h(state.fileSearchQuery)}" placeholder="Search" aria-label="Search files"></div>`;
+  $('#file-toolbar').innerHTML = `<div class="file-location" aria-label="Current workspace path">${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}</div><div class="file-toolbar-actions"><button data-action="connect-overleaf" title="Connect this workspace to an Overleaf project">${state.overleafStatus?.connected ? 'Overleaf' : 'Connect Overleaf'}</button><button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" value="${h(state.fileSearchQuery)}" placeholder="Search" aria-label="Search files"></div>`;
   $('#file-rows').innerHTML = data.entries.length ? data.entries.map((entry) => {
     const relative = state.filePath ? `${state.filePath}/${entry.name}` : entry.name;
     return `<button class="file-row ${h(entry.kind)} ${relative === state.previewPath ? 'selected' : ''}" data-file-name="${h(entry.name)}" data-file-path="${h(relative)}" data-file-kind="${h(entry.kind)}">
@@ -1927,7 +1942,9 @@ function closeLatexWorkspace() {
   clearInterval(state.latexPollTimer);
   state.latexPollTimer = null;
   state.latexEditor?.destroy?.();
+  state.latexDiffView?.destroy?.();
   state.latexEditor = null;
+  state.latexDiffView = null;
   state.latexContext = null;
   state.pendingLatexSelection = null;
   state.pendingLatexRevision = null;
@@ -2053,6 +2070,148 @@ async function refreshLatexPdf() {
   }
 }
 
+function overleafTextFiles(status, kind) {
+  const names = kind === 'local' ? (status.dirty || []).map((entry) => entry.path) : status[kind] || [];
+  return [...new Set(names)].filter((name) => /\.(?:tex|bib|sty|cls|txt|md|markdown)$/i.test(name)).sort();
+}
+
+function overleafHighlightedVersion(text, chunks, side) {
+  const source = String(text || '');
+  let cursor = 0;
+  let output = '';
+  for (const chunk of chunks) {
+    const from = side === 'local' ? chunk.fromA : chunk.fromB;
+    const to = side === 'local' ? chunk.toA : chunk.toB;
+    output += h(source.slice(cursor, from));
+    output += `<mark>${h(source.slice(from, to) || ' ')}</mark>`;
+    cursor = to;
+  }
+  return output + h(source.slice(cursor));
+}
+
+function renderOverleafPanel() {
+  const panel = $('#overleaf-panel');
+  if (!panel) return;
+  const status = state.overleafStatus;
+  if (!status?.connected) {
+    const unavailable = state.overleafError?.code === 'WS_NODE_COMMAND_UNSUPPORTED';
+    panel.innerHTML = `<div class="overleaf-summary"><div><strong>Overleaf sync</strong><span>${unavailable ? 'This workstation needs the Overleaf-capable WebSpider node update.' : 'Connect a hosted Overleaf project to this workspace.'}</span></div><button data-action="connect-overleaf" ${unavailable ? 'disabled' : ''}>Connect Overleaf</button></div>`;
+    return;
+  }
+  const kinds = [
+    ['comparison', 'Local ↔ Overleaf', status.comparison?.length || 0],
+    ['incoming', 'Incoming', status.incoming?.length || 0],
+    ['outgoing', 'Outgoing', status.outgoing?.length || 0],
+    ['local', 'Uncommitted', status.dirty?.length || 0],
+  ];
+  const selectedKind = state.overleafDiffKind;
+  const files = overleafTextFiles(status, selectedKind);
+  panel.innerHTML = `<div class="overleaf-summary"><div><strong>Overleaf · ${h(status.project_id)}</strong><span>${h(status.local_branch)} ${status.local_head ? `@ ${h(status.local_head)}` : 'has no commit'} · fetched ${h(status.fetched_at ? formatTime(status.fetched_at, true) : 'never')}</span></div><div class="overleaf-counts"><span>↑ ${h(status.ahead)} outgoing</span><span>↓ ${h(status.behind)} incoming</span>${status.conflicts?.length ? `<span class="bad">${h(status.conflicts.length)} overlapping</span>` : ''}</div><div class="overleaf-actions"><a href="${h(status.project_url)}" target="_blank" rel="noopener">Open Overleaf</a><button data-action="connect-overleaf">Settings</button><button data-action="fetch-overleaf" ${state.overleafBusy ? 'disabled' : ''}>Fetch</button><button data-action="pull-overleaf" ${state.overleafBusy || !status.behind ? 'disabled' : ''}>Pull</button><button class="primary" data-action="push-overleaf" ${state.overleafBusy || (!status.ahead && !status.dirty?.length) ? 'disabled' : ''}>${status.dirty?.length ? 'Commit & push' : 'Push'}</button></div></div>
+    <div class="overleaf-diff-tools">${kinds.map(([kind, label, count]) => `<button data-overleaf-diff-kind="${kind}" class="${kind === selectedKind ? 'selected' : ''}">${h(label)} <span>${h(count)}</span></button>`).join('')}</div>
+    <div class="overleaf-files">${files.length ? files.map((file) => `<button data-overleaf-diff-file="${h(file)}" class="${file === state.overleafDiffFile ? 'selected' : ''}">${h(file)}</button>`).join('') : `<span>No text-file changes in this view.</span>`}</div>
+    <div id="overleaf-diff-host" class="overleaf-diff-host">${state.overleafDiffFile ? '<div class="loading compact">Loading local and fetched Overleaf versions…</div>' : '<div class="overleaf-diff-empty">Choose a changed source file to compare it side by side.</div>'}</div>`;
+}
+
+async function refreshOverleafStatus({ silent = false, fetch = false } = {}) {
+  const root = state.activeRoot;
+  if (!root) return null;
+  state.overleafBusy = fetch;
+  renderOverleafPanel();
+  try {
+    const status = fetch
+      ? await api(`/api/v1/roots/${encodeURIComponent(root.id)}/overleaf/fetch`, { method: 'POST', body: { directory: state.overleafStatus?.directory ?? null } })
+      : await api(`/api/v1/roots/${encodeURIComponent(root.id)}/overleaf/status`);
+    if (state.activeRoot?.id !== root.id) return null;
+    state.overleafStatus = status;
+    state.overleafError = null;
+    state.overleafBusy = false;
+    const toolbarButton = $('[data-action="connect-overleaf"]');
+    if (toolbarButton && toolbarButton.closest('#file-toolbar')) toolbarButton.textContent = 'Overleaf';
+    renderOverleafPanel();
+    if (!silent) toast(fetch ? 'Fetched the current Overleaf state.' : 'Overleaf status refreshed.');
+    return status;
+  } catch (error) {
+    if (state.activeRoot?.id !== root.id) return null;
+    state.overleafStatus = null;
+    state.overleafError = error;
+    state.overleafBusy = false;
+    renderOverleafPanel();
+    if (!silent && !['WS_OVERLEAF_GIT_FAILED', 'WS_NOT_FOUND'].includes(error.code)) toast(friendlyError(error), true);
+    return null;
+  }
+}
+
+function showOverleafConnectForm() {
+  if (!state.activeRoot) return;
+  const status = state.overleafStatus;
+  openModal(`<div class="modal-header"><div><h2>Connect Overleaf</h2><p>The token is sent once to this workstation and never shown to the agent.</p></div><button data-action="close-modal">×</button></div><form id="overleaf-connect-form" class="modal-body form-grid"><label>Overleaf project URL<input name="project_url" type="url" required value="${h(status?.project_url || '')}" placeholder="https://www.overleaf.com/project/…"></label><label>Directory within this project<input name="directory" value="${h(status?.directory || '')}" placeholder="Project base directory"></label><p class="form-hint">Leave blank for the project base directory. Empty directories are initialized automatically; existing Git repositories are connected without replacing their history.</p><label>Overleaf Git authentication token<input name="token" type="password" autocomplete="new-password" placeholder="${status?.credential_available ? 'Leave blank to reuse the saved token' : 'Paste token'}"></label><label class="check-row"><input name="remember" type="checkbox" checked> Remember securely on this workstation</label><div class="modal-actions"><a href="https://www.overleaf.com/user/settings" target="_blank" rel="noopener">Get Overleaf token</a><button type="button" data-action="close-modal">Cancel</button><button type="submit" class="primary">Connect and fetch</button></div></form>`);
+}
+
+async function showOverleafDiff(file) {
+  const status = state.overleafStatus;
+  if (!status || !state.activeRoot) return;
+  state.overleafDiffView?.destroy?.();
+  state.overleafDiffView = null;
+  state.overleafDiffFile = file;
+  renderOverleafPanel();
+  const host = $('#overleaf-diff-host');
+  try {
+    const versions = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/overleaf/versions?directory=${encodeURIComponent(status.directory || '')}&file=${encodeURIComponent(file)}`);
+    if (!host?.isConnected || state.overleafDiffFile !== file) return;
+    const local = versions.local || '';
+    const remote = versions.remote || '';
+    const chunks = state.latexContext?.module?.latexDiffChunks(local, remote) || [];
+    host.innerHTML = `<div class="overleaf-version-grid"><section><strong>Local working copy</strong><pre data-overleaf-version="local">${overleafHighlightedVersion(local, chunks, 'local')}</pre></section><section><strong>Fetched Overleaf</strong><pre data-overleaf-version="remote">${overleafHighlightedVersion(remote, chunks, 'remote')}</pre></section></div>`;
+    const panes = [...host.querySelectorAll('[data-overleaf-version]')];
+    let syncing = false;
+    for (const [pane, other] of [[panes[0], panes[1]], [panes[1], panes[0]]]) pane.addEventListener('scroll', () => {
+      if (syncing) return;
+      syncing = true;
+      const extent = pane.scrollHeight - pane.clientHeight;
+      other.scrollTop = extent > 0 ? pane.scrollTop / extent * (other.scrollHeight - other.clientHeight) : pane.scrollTop;
+      other.scrollLeft = pane.scrollLeft;
+      requestAnimationFrame(() => { syncing = false; });
+    });
+  } catch (error) {
+    if (host?.isConnected) host.innerHTML = `<p class="form-error">${h(friendlyError(error))}</p>`;
+  }
+}
+
+async function runOverleafSync(action) {
+  const status = state.overleafStatus;
+  const context = state.latexContext;
+  if (!status || !state.activeRoot || state.overleafBusy) return;
+  if (context?.dirty) return toast('Save the open LaTeX source before synchronizing with Overleaf.', true);
+  if (action === 'pull' && !confirm(`Fast-forward the local ${status.local_branch} branch with ${status.behind} incoming Overleaf commit${status.behind === 1 ? '' : 's'}?`)) return;
+  let commitMessage = '';
+  if (action === 'push' && status.dirty?.length) {
+    commitMessage = prompt('Commit message for the local manuscript changes:', 'Update manuscript from WebSpider')?.trim() || '';
+    if (!commitMessage) return;
+    if (!confirm(`Commit ${status.dirty.length} working-tree change${status.dirty.length === 1 ? '' : 's'} and push to Overleaf?`)) return;
+  } else if (action === 'push' && !confirm(`Push ${status.ahead} local commit${status.ahead === 1 ? '' : 's'} to Overleaf?`)) return;
+  state.overleafBusy = true;
+  renderOverleafPanel();
+  try {
+    const result = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/overleaf/${action}`, {
+      method: 'POST', body: { directory: status.directory, commit_message: commitMessage },
+    });
+    state.overleafStatus = result;
+    state.overleafError = null;
+    state.overleafBusy = false;
+    state.overleafDiffFile = null;
+    renderOverleafPanel();
+    toast(action === 'pull' ? 'Pulled the current Overleaf state.' : 'Pushed local manuscript changes to Overleaf.');
+    if (action === 'pull') {
+      await loadDirectory();
+      if (context?.path) await previewFile('', { relativePath: context.path, preferredMode: 'source' });
+    }
+  } catch (error) {
+    state.overleafBusy = false;
+    renderOverleafPanel();
+    toast(friendlyError(error), true);
+  }
+}
+
 async function renderLatexWorkspace(preview, relative) {
   const generation = ++state.latexGeneration;
   const content = $('#preview-content');
@@ -2061,6 +2220,7 @@ async function renderLatexWorkspace(preview, relative) {
   content.innerHTML = `<div id="latex-workspace" class="latex-workspace" data-view="source">
     <div class="latex-editor-toolbar"><div class="preview-mode-switch"><button data-latex-view="source" class="selected">Source</button><button data-latex-view="pdf">PDF</button><button data-latex-view="split">Split</button></div><span id="latex-source-status">Saved source</span><button data-action="set-latex-pdf" title="Choose a compiled PDF path">${h(pdfPath)}</button><button data-action="compile-latex">Compile</button><button class="primary" data-action="ask-latex-agent">Ask agent about selection</button><button id="latex-save" data-action="save-latex-source" disabled>Save source</button></div>
     <div class="latex-stage"><div id="latex-editor-host" class="latex-editor-host"></div><div id="latex-pdf-host" class="latex-pdf-host"></div></div>
+    <section id="overleaf-panel" class="overleaf-panel"></section>
     <aside id="latex-review-panel" class="latex-review-panel"></aside>
   </div>`;
   $('.file-layout')?.classList.add('latex-open');
@@ -2089,6 +2249,8 @@ async function renderLatexWorkspace(preview, relative) {
     },
   });
   renderLatexReviewPanel();
+  renderOverleafPanel();
+  void refreshOverleafStatus({ silent: true });
   applyLatexWorkspaceView();
   if (latexReviewsForCurrentFile().some((review) => ['waiting', 'revising'].includes(review.status))) startLatexProposalPolling();
 }
@@ -2532,6 +2694,17 @@ document.addEventListener('click', async (event) => {
   }
   const previewMode = event.target.closest('[data-preview-mode]');
   if (previewMode) return setPreviewMode(previewMode.dataset.previewMode);
+  const overleafDiffKind = event.target.closest('[data-overleaf-diff-kind]');
+  if (overleafDiffKind) {
+    state.latexDiffView?.destroy?.();
+    state.latexDiffView = null;
+    state.overleafDiffKind = overleafDiffKind.dataset.overleafDiffKind;
+    state.overleafDiffFile = null;
+    renderOverleafPanel();
+    return;
+  }
+  const overleafDiffFile = event.target.closest('[data-overleaf-diff-file]');
+  if (overleafDiffFile) return showOverleafDiff(overleafDiffFile.dataset.overleafDiffFile);
   const latexView = event.target.closest('[data-latex-view]');
   if (latexView && state.latexContext) {
     state.latexContext.view = latexView.dataset.latexView;
@@ -2587,6 +2760,10 @@ document.addEventListener('click', async (event) => {
     if (action === 'add-terminal') return showTerminalForm();
     if (action === 'choose-terminal-files') return $('#terminal-file-input')?.click();
     if (action === 'choose-workspace-files') return $('#workspace-file-input')?.click();
+    if (action === 'connect-overleaf') return showOverleafConnectForm();
+    if (action === 'fetch-overleaf') return refreshOverleafStatus({ fetch: true });
+    if (action === 'pull-overleaf') return runOverleafSync('pull');
+    if (action === 'push-overleaf') return runOverleafSync('push');
     if (action === 'ask-latex-agent') return showLatexReviewForm();
     if (action === 'save-latex-source') return saveLatexSource();
     if (action === 'compile-latex') return compileLatexSource();
@@ -2915,6 +3092,33 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'overleaf-connect-form') {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!state.activeRoot || !button) return;
+    button.disabled = true;
+    try {
+      const status = await api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/overleaf/connect`, {
+        method: 'POST',
+        body: {
+          project_url: String(form.get('project_url') || '').trim(),
+          directory: String(form.get('directory') || '').trim().replaceAll('\\', '/').replace(/^\/+|\/+$/g, ''),
+          token: String(form.get('token') || ''),
+          remember: Boolean(form.get('remember')),
+        },
+      });
+      state.overleafStatus = status;
+      state.overleafError = null;
+      state.overleafDiffFile = null;
+      closeModal();
+      await loadDirectory();
+      renderOverleafPanel();
+      toast(`Connected Overleaf project ${status.project_id}.`);
+    } catch (error) { toast(friendlyError(error), true); }
+    finally { button.disabled = false; }
+    return;
+  }
   if (event.target.id === 'latex-review-form') {
     event.preventDefault();
     const context = state.latexContext;

@@ -397,4 +397,11 @@ test('LaTeX files open a source editor with agent review and per-hunk decisions'
   assert.match(app, /current\.etag !== review\.baseEtag/);
   assert.match(styles, /\.latex-workspace\[data-view="split"\]/);
   assert.match(styles, /\.latex-diff-card\.accepted/);
+  assert.match(app, /data-action="connect-overleaf"/);
+  assert.match(app, /data-action="fetch-overleaf"/);
+  assert.match(app, /data-action="pull-overleaf"/);
+  assert.match(app, /data-action="push-overleaf"/);
+  assert.match(app, /Local working copy/);
+  assert.match(app, /Fetched Overleaf/);
+  assert.match(styles, /\.overleaf-version-grid/);
 });

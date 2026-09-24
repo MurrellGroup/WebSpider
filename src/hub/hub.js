@@ -1931,6 +1931,37 @@ export class Hub {
       options: { content: ctx.url.searchParams.get('content') !== 'false' },
     }, 'files.search'));
     route('GET', '/api/v1/roots/:id/git-status', async (ctx) => this.#fileRequest(ctx, 'files.git-status', { path: ctx.url.searchParams.get('path') || '' }, 'files.git_status'));
+    route('POST', '/api/v1/roots/:id/overleaf/connect', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      return this.#overleafRequest(ctx, 'overleaf.connect', {
+        directory: body.directory || '', project_url: body.project_url,
+        token: body.token || '', remember: body.remember !== false,
+      }, 'overleaf.connect');
+    });
+    route('GET', '/api/v1/roots/:id/overleaf/status', async (ctx) => this.#overleafRequest(ctx, 'overleaf.status', {
+      directory: ctx.url.searchParams.get('directory'),
+    }, 'overleaf.status'));
+    route('POST', '/api/v1/roots/:id/overleaf/fetch', async (ctx) => {
+      const body = await readJSON(ctx.request, 4_096);
+      return this.#overleafRequest(ctx, 'overleaf.fetch', { directory: body.directory ?? null }, 'overleaf.fetch');
+    });
+    route('GET', '/api/v1/roots/:id/overleaf/diff', async (ctx) => this.#overleafRequest(ctx, 'overleaf.diff', {
+      directory: ctx.url.searchParams.get('directory') || '', kind: ctx.url.searchParams.get('kind') || 'comparison',
+      file: ctx.url.searchParams.get('file') || '',
+    }, 'overleaf.diff'));
+    route('GET', '/api/v1/roots/:id/overleaf/versions', async (ctx) => this.#overleafRequest(ctx, 'overleaf.versions', {
+      directory: ctx.url.searchParams.get('directory') || '', file: ctx.url.searchParams.get('file'),
+    }, 'overleaf.versions'));
+    route('POST', '/api/v1/roots/:id/overleaf/pull', async (ctx) => {
+      const body = await readJSON(ctx.request, 4_096);
+      return this.#overleafRequest(ctx, 'overleaf.pull', { directory: body.directory ?? null }, 'overleaf.pull');
+    });
+    route('POST', '/api/v1/roots/:id/overleaf/push', async (ctx) => {
+      const body = await readJSON(ctx.request, 4_096);
+      return this.#overleafRequest(ctx, 'overleaf.push', {
+        directory: body.directory ?? null, commit_message: body.commit_message || '',
+      }, 'overleaf.push');
+    });
     route('POST', '/api/v1/roots/:id/file-transfers', async (ctx) => {
       const body = await readJSON(ctx.request, 16_384);
       const root = this.database.getRoot(ctx.params.id);
@@ -3499,6 +3530,29 @@ export class Hub {
     } catch (error) {
       decision = 'denied';
       this.database.audit({ actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id, projectId: root.project_id, decision, newState: { relative_path: payload.path || '', error: error.code } });
+      throw error;
+    }
+  }
+
+  async #overleafRequest(ctx, command, payload, auditAction) {
+    const root = this.database.getRoot(ctx.params.id);
+    invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+    invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The manuscript workstation must be online.', 503);
+    const auditState = { directory: payload.directory || '', operation: command };
+    try {
+      const result = await this.broker.requestTransient(root.node_id, command, {
+        root_id: root.node_root_id, ...payload,
+      }, { timeoutMs: 240_000 });
+      this.database.audit({
+        actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id,
+        projectId: root.project_id, decision: 'allowed', newState: auditState,
+      });
+      return result;
+    } catch (error) {
+      this.database.audit({
+        actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id,
+        projectId: root.project_id, decision: 'denied', newState: { ...auditState, error: error.code },
+      });
       throw error;
     }
   }

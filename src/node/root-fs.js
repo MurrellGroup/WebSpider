@@ -182,6 +182,28 @@ export class RootedFileService {
     return root;
   }
 
+  resolveDirectory(rootId, relativePath = '', { create = false } = {}) {
+    const root = this.getRoot(rootId);
+    const parts = validateRelativePath(relativePath);
+    const rootPath = this.#currentRoot(root);
+    let current = root.anchor;
+    for (const part of parts) {
+      current = path.join(current, part);
+      try {
+        const stat = fs.lstatSync(current);
+        invariant(stat.isDirectory() && !stat.isSymbolicLink(), 'WS_PATH_ESCAPE_BLOCKED',
+          'The requested workspace path is not a real directory.', 403);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        if (!create) throw new WebSpiderError('WS_NOT_FOUND', 'Directory not found.', 404);
+        fs.mkdirSync(current, { mode: 0o755 });
+      }
+      invariant(within(rootPath, fs.realpathSync(current)), 'WS_PATH_ESCAPE_BLOCKED',
+        'The requested directory escaped the workspace root.', 403);
+    }
+    return fs.realpathSync(current);
+  }
+
   writeInbox(rootId, { documentId, filename, bytes, sha256 }) {
     const root = this.getRoot(rootId);
     invariant(typeof documentId === 'string' && /^doc_[A-Za-z0-9_-]{8,80}$/.test(documentId),

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { NodeDatabase } from '../db/node-database.js';
 import { RootedFileService } from './root-fs.js';
+import { OverleafService } from './overleaf-service.js';
 import { ProcessSupervisor } from './process-supervisor.js';
 import { makeId, nowISO } from '../lib/ids.js';
 import { signNodeHello } from '../lib/security.js';
@@ -98,6 +99,9 @@ export class NodeDaemon extends EventEmitter {
     this.reconnect = reconnect;
     this.database = new NodeDatabase(path.join(stateDir, 'node.db'));
     this.rootService = new RootedFileService(roots);
+    this.overleafService = new OverleafService({
+      stateDir: path.join(stateDir, 'overleaf'), rootService: this.rootService, secret: privateKey,
+    });
     this.supervisor = new ProcessSupervisor({ stateDir, database: this.database, rootService: this.rootService });
     this.socket = null;
     this.epoch = 0;
@@ -218,6 +222,7 @@ export class NodeDaemon extends EventEmitter {
       arch: process.arch,
       runtime: `node-${process.version}`,
       rooted_files: true,
+      overleaf_git: executableAvailable('git'),
       detached_processes: process.platform !== 'win32',
       terminal_transport: 'script+fifo',
       shell: process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
@@ -333,6 +338,29 @@ export class NodeDaemon extends EventEmitter {
         return this.rootService.search(payload.root_id, payload.query, payload.path || '', payload.options || {});
       case 'files.git-status':
         return this.rootService.gitStatus(payload.root_id, payload.path || '');
+      case 'overleaf.connect':
+        return this.overleafService.serialized(() => this.overleafService.connect({
+          rootId: payload.root_id, directory: payload.directory || '', projectURL: payload.project_url,
+          token: payload.token || '', remember: payload.remember !== false,
+        }));
+      case 'overleaf.status':
+        return this.overleafService.serialized(() => this.overleafService.status({ rootId: payload.root_id, directory: payload.directory ?? null, fetch: false }));
+      case 'overleaf.fetch':
+        return this.overleafService.serialized(() => this.overleafService.status({ rootId: payload.root_id, directory: payload.directory ?? null, fetch: true }));
+      case 'overleaf.diff':
+        return this.overleafService.serialized(() => this.overleafService.diff({
+          rootId: payload.root_id, directory: payload.directory ?? null, kind: payload.kind, file: payload.file || '',
+        }));
+      case 'overleaf.versions':
+        return this.overleafService.serialized(() => this.overleafService.versions({
+          rootId: payload.root_id, directory: payload.directory ?? null, file: payload.file,
+        }));
+      case 'overleaf.pull':
+        return this.overleafService.serialized(() => this.overleafService.pull({ rootId: payload.root_id, directory: payload.directory ?? null }));
+      case 'overleaf.push':
+        return this.overleafService.serialized(() => this.overleafService.push({
+          rootId: payload.root_id, directory: payload.directory ?? null, commitMessage: payload.commit_message || '',
+        }));
       case 'files.upload-image':
         return this.rootService.writeImageUpload(payload.root_id, {
           uploadId: payload.upload_id,
