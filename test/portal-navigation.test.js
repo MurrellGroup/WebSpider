@@ -207,6 +207,20 @@ test('project navigation does not intercept controls inside project forms', () =
   assert.doesNotMatch(app, /closest\('\[data-project-id\]:not\(\[data-action\]\)'\)/);
 });
 
+test('sidebar projects can be reordered and cosmetically inactivated with browser-local persistence', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /webspider_project_organizer_v1/);
+  assert.match(app, /localStorage\.setItem\(PROJECT_ORGANIZER_STORAGE_KEY/);
+  assert.match(app, /class="project-drag-handle" draggable="true"/);
+  assert.match(app, /data-action="deactivate-sidebar-project"/);
+  assert.match(app, /data-action="reactivate-sidebar-project"/);
+  assert.match(app, /Its agents keep running normally/);
+  assert.match(app, /document\.addEventListener\('dragstart'/);
+  assert.match(app, /document\.addEventListener\('pointermove'/);
+  assert.match(app, /\['ArrowUp', 'ArrowDown'\]/);
+  assert.match(styles, /\.inactive-projects\.drop-target/);
+});
+
 test('terminal pages begin in watch mode and acquire control only on interaction', () => {
   const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
   const terminalInput = fs.readFileSync(path.join(repository, 'web', 'terminal-input.js'), 'utf8');

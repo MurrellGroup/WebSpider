@@ -15,6 +15,7 @@ const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
 const FILE_BROWSER_STORAGE_KEY = 'webspider_file_browser_states_v1';
+const PROJECT_ORGANIZER_STORAGE_KEY = 'webspider_project_organizer_v1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const terminalKeyState = createTerminalKeyState();
@@ -44,6 +45,84 @@ function loadFileBrowserStates() {
 
 function fileBrowserStateKey(agentId, rootId) {
   return `${encodeURIComponent(agentId || '')}:${encodeURIComponent(rootId || '')}`;
+}
+
+function loadProjectOrganizer() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_ORGANIZER_STORAGE_KEY) || '{}');
+    return {
+      order: Array.isArray(parsed.order) ? parsed.order.filter((id) => typeof id === 'string') : [],
+      inactive: Array.isArray(parsed.inactive) ? parsed.inactive.filter((id) => typeof id === 'string') : [],
+    };
+  } catch {
+    return { order: [], inactive: [] };
+  }
+}
+
+function saveProjectOrganizer() {
+  try { localStorage.setItem(PROJECT_ORGANIZER_STORAGE_KEY, JSON.stringify(state.projectOrganizer)); } catch {}
+}
+
+function reconcileProjectOrganizer() {
+  const projectIds = state.projects.map((project) => project.id);
+  const known = new Set(projectIds);
+  const order = [...new Set(state.projectOrganizer.order.filter((id) => known.has(id)))];
+  for (const id of projectIds) if (!order.includes(id)) order.push(id);
+  const inactive = [...new Set(state.projectOrganizer.inactive.filter((id) => known.has(id)))];
+  const changed = order.join('\0') !== state.projectOrganizer.order.join('\0')
+    || inactive.join('\0') !== state.projectOrganizer.inactive.join('\0');
+  state.projectOrganizer = { order, inactive };
+  if (changed) saveProjectOrganizer();
+}
+
+function organizedProjects() {
+  reconcileProjectOrganizer();
+  const byId = new Map(state.projects.map((project) => [project.id, project]));
+  const inactive = new Set(state.projectOrganizer.inactive);
+  return {
+    active: state.projectOrganizer.order.map((id) => byId.get(id)).filter((project) => project && !inactive.has(project.id)),
+    inactive: state.projectOrganizer.order.map((id) => byId.get(id)).filter((project) => project && inactive.has(project.id)),
+  };
+}
+
+function setProjectOrganizerInactive(projectId, inactive) {
+  reconcileProjectOrganizer();
+  const hidden = new Set(state.projectOrganizer.inactive);
+  if (inactive) hidden.add(projectId);
+  else hidden.delete(projectId);
+  state.projectOrganizer.inactive = [...hidden];
+  if (!inactive) {
+    state.projectOrganizer.order = state.projectOrganizer.order.filter((id) => id !== projectId);
+    state.projectOrganizer.order.push(projectId);
+  }
+  saveProjectOrganizer();
+}
+
+function reorderActiveProject(projectId, targetId, after = false) {
+  const { active, inactive } = organizedProjects();
+  if (!active.some((project) => project.id === projectId)) return false;
+  if (projectId === targetId) return false;
+  const activeIds = active.map((project) => project.id).filter((id) => id !== projectId);
+  let index = targetId ? activeIds.indexOf(targetId) : activeIds.length;
+  if (index < 0) index = activeIds.length;
+  else if (after) index += 1;
+  activeIds.splice(index, 0, projectId);
+  state.projectOrganizer.order = [...activeIds, ...inactive.map((project) => project.id)];
+  saveProjectOrganizer();
+  return true;
+}
+
+function moveActiveProject(projectId, offset) {
+  const active = organizedProjects().active.map((project) => project.id);
+  const from = active.indexOf(projectId);
+  const to = Math.max(0, Math.min(active.length - 1, from + offset));
+  if (from < 0 || from === to) return false;
+  active.splice(from, 1);
+  active.splice(to, 0, projectId);
+  const inactive = state.projectOrganizer.order.filter((id) => state.projectOrganizer.inactive.includes(id));
+  state.projectOrganizer.order = [...active, ...inactive];
+  saveProjectOrganizer();
+  return true;
 }
 
 const state = {
@@ -107,6 +186,8 @@ const state = {
   fileShowHidden: false,
   fileSearchQuery: '',
   fileBrowserStates: loadFileBrowserStates(),
+  projectOrganizer: loadProjectOrganizer(),
+  inactiveProjectsOpen: false,
   workspacePendingFiles: [],
   workspaceUploadBusy: false,
   activeRoot: null,
@@ -444,10 +525,17 @@ async function loadData() {
 }
 
 function renderSidebar() {
-  $('#project-tree').innerHTML = state.projects.map((project) => {
+  const existingInactiveList = $('#inactive-projects');
+  if (existingInactiveList?.matches('details')) state.inactiveProjectsOpen = existingInactiveList.open;
+  const projects = organizedProjects();
+  const activeMarkup = projects.active.map((project) => {
     const agents = state.agents.filter((agent) => agent.project_id === project.id);
-    return `<section class="project-group">
-      <button class="project-heading ${state.selectedProject?.id === project.id ? 'selected' : ''}" data-project-id="${h(project.id)}">${h(project.name)}</button>
+    return `<section class="project-group" data-sidebar-project-id="${h(project.id)}">
+      <div class="project-heading-row">
+        <button class="project-drag-handle" draggable="true" data-project-drag-id="${h(project.id)}" type="button" aria-label="Reorder ${h(project.name)}" title="Drag to reorder; use arrow keys for precise movement">⠿</button>
+        <button class="project-heading ${state.selectedProject?.id === project.id ? 'selected' : ''}" data-project-id="${h(project.id)}">${h(project.name)}</button>
+        <button class="project-inactive-action" data-action="deactivate-sidebar-project" data-project-id="${h(project.id)}" type="button" aria-label="Move ${h(project.name)} to inactive projects" title="Move to inactive projects">−</button>
+      </div>
       ${agents.map((agent) => `<button class="agent-link ${state.selectedAgent?.id === agent.id ? 'selected' : ''}" data-agent-id="${h(agent.id)}">
         <i class="state-dot ${h(agent.state)}"></i>
         <span class="name">${h(agent.title || agent.profile_name)}</span>
@@ -455,6 +543,13 @@ function renderSidebar() {
       </button>`).join('') || '<div class="muted" style="font-size:10px;padding:8px 27px">No agents</div>'}
     </section>`;
   }).join('');
+  const inactiveMarkup = projects.inactive.length ? `<details id="inactive-projects" class="inactive-projects" ${state.inactiveProjectsOpen ? 'open' : ''}>
+    <summary><span>Inactive projects</span><span class="inactive-count">${projects.inactive.length}</span></summary>
+    <div class="inactive-project-list">
+      ${projects.inactive.map((project) => `<button data-action="reactivate-sidebar-project" data-project-id="${h(project.id)}" type="button"><span>${h(project.name)}</span><small>Reactivate</small></button>`).join('')}
+    </div>
+  </details>` : `<div id="inactive-projects" class="inactive-projects inactive-project-drop-empty" aria-label="Drop here to make a project inactive">Inactive projects</div>`;
+  $('#project-tree').innerHTML = `<div class="active-project-list" data-active-project-list>${activeMarkup || '<div class="muted project-organizer-empty">No active projects</div>'}</div>${inactiveMarkup}`;
 }
 
 function renderAttention() {
@@ -1932,6 +2027,25 @@ document.addEventListener('click', async (event) => {
   try {
     if (action === 'master') { closeMobileSidebar(); return openMasterTerminal(); }
     if (action === 'overview') { closeMobileSidebar(); return renderHome(); }
+    if (action === 'deactivate-sidebar-project') {
+      const projectId = actionTarget.dataset.projectId;
+      const project = state.projects.find((item) => item.id === projectId);
+      if (!project) return;
+      setProjectOrganizerInactive(projectId, true);
+      state.inactiveProjectsOpen = true;
+      renderSidebar();
+      return toast(`${project.name} moved to the inactive list. Its agents keep running normally.`);
+    }
+    if (action === 'reactivate-sidebar-project') {
+      const projectId = actionTarget.dataset.projectId;
+      const project = state.projects.find((item) => item.id === projectId);
+      if (!project) return;
+      setProjectOrganizerInactive(projectId, false);
+      renderSidebar();
+      closeMobileSidebar();
+      toast(`${project.name} returned to the active list.`);
+      return renderProject(projectId);
+    }
     if (action === 'onboard-project') return showProjectOnboarding();
     if (action === 'connect-project') return showProjectConnection(event.target.closest('[data-project-id]').dataset.projectId);
     if (action === 'add-terminal') return showTerminalForm();
@@ -2525,6 +2639,137 @@ document.addEventListener('change', (event) => {
     event.target.value = '';
     renderChatFileDrafts();
   }
+});
+
+let draggedSidebarProjectId = null;
+let touchedSidebarProject = null;
+
+function clearProjectDropIndicators() {
+  $$('.project-group.drop-before, .project-group.drop-after').forEach((element) => element.classList.remove('drop-before', 'drop-after'));
+  $('#inactive-projects')?.classList.remove('drop-target');
+}
+
+function autoScrollProjectTree(clientY) {
+  const tree = $('#project-tree');
+  if (!tree) return;
+  const bounds = tree.getBoundingClientRect();
+  const edge = Math.min(56, bounds.height / 5);
+  if (clientY < bounds.top + edge) tree.scrollBy({ top: -24, behavior: 'auto' });
+  else if (clientY > bounds.bottom - edge) tree.scrollBy({ top: 24, behavior: 'auto' });
+}
+
+function markProjectDropTarget(clientX, clientY) {
+  clearProjectDropIndicators();
+  const target = document.elementFromPoint(clientX, clientY);
+  const inactive = target?.closest('#inactive-projects');
+  if (inactive) {
+    inactive.classList.add('drop-target');
+    return { inactive: true };
+  }
+  const group = target?.closest('.project-group[data-sidebar-project-id]');
+  if (!group) return target?.closest('[data-active-project-list]') ? { atEnd: true } : null;
+  const after = clientY >= group.getBoundingClientRect().top + group.getBoundingClientRect().height / 2;
+  group.classList.add(after ? 'drop-after' : 'drop-before');
+  return { targetId: group.dataset.sidebarProjectId, after };
+}
+
+function completeProjectDrop(projectId, clientX, clientY) {
+  const target = markProjectDropTarget(clientX, clientY);
+  clearProjectDropIndicators();
+  if (!target) return;
+  if (target.inactive) {
+    const project = state.projects.find((item) => item.id === projectId);
+    setProjectOrganizerInactive(projectId, true);
+    state.inactiveProjectsOpen = true;
+    renderSidebar();
+    toast(`${project?.name || 'Project'} moved to the inactive list. Its agents keep running normally.`);
+    return;
+  }
+  if (reorderActiveProject(projectId, target.targetId || null, target.after)) renderSidebar();
+}
+
+document.addEventListener('dragstart', (event) => {
+  const handle = event.target.closest('.project-drag-handle[data-project-drag-id]');
+  if (!handle) return;
+  draggedSidebarProjectId = handle.dataset.projectDragId;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', draggedSidebarProjectId);
+  requestAnimationFrame(() => handle.closest('.project-group')?.classList.add('dragging'));
+});
+
+document.addEventListener('dragover', (event) => {
+  if (!draggedSidebarProjectId) return;
+  autoScrollProjectTree(event.clientY);
+  const target = markProjectDropTarget(event.clientX, event.clientY);
+  if (!target) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+});
+
+document.addEventListener('drop', (event) => {
+  if (!draggedSidebarProjectId) return;
+  event.preventDefault();
+  completeProjectDrop(draggedSidebarProjectId, event.clientX, event.clientY);
+});
+
+document.addEventListener('dragend', () => {
+  $('.project-group.dragging')?.classList.remove('dragging');
+  clearProjectDropIndicators();
+  draggedSidebarProjectId = null;
+});
+
+document.addEventListener('pointerdown', (event) => {
+  const handle = event.target.closest('.project-drag-handle[data-project-drag-id]');
+  if (!handle || event.pointerType === 'mouse') return;
+  touchedSidebarProject = {
+    id: handle.dataset.projectDragId,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    dragging: false,
+    handle,
+  };
+  handle.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+});
+
+document.addEventListener('pointermove', (event) => {
+  if (!touchedSidebarProject || event.pointerId !== touchedSidebarProject.pointerId) return;
+  const distance = Math.hypot(event.clientX - touchedSidebarProject.startX, event.clientY - touchedSidebarProject.startY);
+  if (!touchedSidebarProject.dragging && distance < 7) return;
+  touchedSidebarProject.dragging = true;
+  touchedSidebarProject.handle.closest('.project-group')?.classList.add('dragging');
+  autoScrollProjectTree(event.clientY);
+  markProjectDropTarget(event.clientX, event.clientY);
+  event.preventDefault();
+});
+
+document.addEventListener('pointerup', (event) => {
+  if (!touchedSidebarProject || event.pointerId !== touchedSidebarProject.pointerId) return;
+  const touched = touchedSidebarProject;
+  touchedSidebarProject = null;
+  touched.handle.closest('.project-group')?.classList.remove('dragging');
+  if (touched.dragging) {
+    completeProjectDrop(touched.id, event.clientX, event.clientY);
+    event.preventDefault();
+  }
+});
+
+document.addEventListener('pointercancel', () => {
+  touchedSidebarProject?.handle.closest('.project-group')?.classList.remove('dragging');
+  touchedSidebarProject = null;
+  clearProjectDropIndicators();
+});
+
+document.addEventListener('keydown', (event) => {
+  const handle = event.target.closest('.project-drag-handle[data-project-drag-id]');
+  if (!handle || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const offset = event.key === 'ArrowUp' ? -1 : 1;
+  if (!moveActiveProject(handle.dataset.projectDragId, offset)) return;
+  const projectId = handle.dataset.projectDragId;
+  renderSidebar();
+  $(`.project-drag-handle[data-project-drag-id="${CSS.escape(projectId)}"]`)?.focus();
 });
 
 document.addEventListener('input', (event) => {

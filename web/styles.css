@@ -74,9 +74,33 @@ input, textarea, select { background: #0d1119; color: var(--text); border: 1px s
 .sidebar-label button { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .project-tree { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 18px; }
 .project-group { margin: 5px 0 12px; }
-.project-heading { width: 100%; padding: 7px 8px; display: flex; align-items: center; gap: 7px; color: #c2ccd5; font-size: 12px; font-weight: 650; border: 0; background: transparent; border-radius: 7px; cursor: pointer; text-align: left; }
+.project-heading-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 25px; align-items: center; border-radius: 7px; }
+.project-heading { width: 100%; min-width: 0; padding: 7px 3px; display: flex; align-items: center; gap: 7px; color: #c2ccd5; font-size: 12px; font-weight: 650; border: 0; background: transparent; border-radius: 7px; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-heading::before { content: "⌄"; color: var(--muted-2); }
-.project-heading:hover, .project-heading.selected { background: var(--surface-2); color: var(--text); }
+.project-heading-row:has(.project-heading:hover), .project-heading-row:has(.project-heading.selected) { background: var(--surface-2); }
+.project-heading:hover, .project-heading.selected { color: var(--text); }
+.project-drag-handle, .project-inactive-action { width: 22px; height: 27px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted-2); cursor: grab; opacity: .38; touch-action: none; }
+.project-inactive-action { width: 25px; cursor: pointer; font-size: 16px; }
+.project-heading-row:hover .project-drag-handle, .project-heading-row:hover .project-inactive-action, .project-drag-handle:focus-visible, .project-inactive-action:focus-visible { opacity: 1; }
+.project-drag-handle:active { cursor: grabbing; }
+.project-group.dragging { opacity: .42; }
+.project-group.drop-before { box-shadow: inset 0 2px var(--mint); }
+.project-group.drop-after { box-shadow: inset 0 -2px var(--mint); }
+.project-organizer-empty { padding: 12px 8px; font-size: 10px; }
+.inactive-projects { margin: 13px 2px 0; border-top: 1px solid var(--line-soft); color: var(--muted); }
+.inactive-projects > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 8px 7px; border-radius: 7px; cursor: pointer; font-size: 10px; font-weight: 700; letter-spacing: .04em; list-style: none; }
+.inactive-projects > summary::-webkit-details-marker { display: none; }
+.inactive-projects > summary::before { content: "▸"; color: var(--muted-2); }
+.inactive-projects[open] > summary::before { content: "▾"; }
+.inactive-projects > summary > span:first-child { margin-right: auto; }
+.inactive-count { min-width: 20px; padding: 2px 6px; border-radius: 999px; background: var(--surface-2); text-align: center; font-size: 9px; }
+.inactive-project-list { display: grid; gap: 3px; padding: 1px 4px 7px; }
+.inactive-project-list button { width: 100%; min-width: 0; padding: 7px 8px; display: flex; justify-content: space-between; gap: 8px; border: 0; border-radius: 7px; background: transparent; color: #c2ccd5; cursor: pointer; text-align: left; }
+.inactive-project-list button:hover { background: var(--surface-2); color: var(--text); }
+.inactive-project-list button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inactive-project-list button small { color: var(--muted-2); }
+.inactive-project-drop-empty { padding: 11px 8px 7px; font-size: 10px; font-weight: 700; border-radius: 7px; }
+.inactive-projects.drop-target { border-color: var(--mint); background: rgb(142 240 199 / 7%); color: var(--mint); }
 .agent-link { width: 100%; border: 0; background: transparent; border-radius: 8px; padding: 8px 9px 8px 27px; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 8px; text-align: left; cursor: pointer; }
 .agent-link:hover, .agent-link.selected { background: var(--surface-2); }
 .agent-link .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
