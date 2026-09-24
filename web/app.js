@@ -7,11 +7,12 @@ import {
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraft } from './terminal-drafts.js';
-import {
-  applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
-} from './latex-review.js';
 import { Terminal } from './vendor/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit.mjs';
+
+const {
+  applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
+} = globalThis.WebSpiderLatexEditor || {};
 
 const PORTAL_VERSION = '0.6.28';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
@@ -2063,7 +2064,8 @@ async function renderLatexWorkspace(preview, relative) {
     <aside id="latex-review-panel" class="latex-review-panel"></aside>
   </div>`;
   $('.file-layout')?.classList.add('latex-open');
-  const module = await import('./vendor/latex-editor.mjs');
+  const module = globalThis.WebSpiderLatexEditor;
+  if (!module?.createLatexEditor || !module?.latexDiffChunks) throw new Error('The LaTeX editor bundle did not load. Refresh this page and try again.');
   if (generation !== state.latexGeneration || !$('#latex-editor-host')) return;
   const context = {
     generation,

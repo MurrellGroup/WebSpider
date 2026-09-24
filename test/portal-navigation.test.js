@@ -384,7 +384,9 @@ test('file viewer renders safe inline image, SVG, and PDF previews', () => {
 
 test('LaTeX files open a source editor with agent review and per-hunk decisions', () => {
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
-  assert.match(app, /import\('\.\/vendor\/latex-editor\.mjs'\)/);
+  const latexBundle = fs.readFileSync(path.join(repository, 'web', 'mathjax-config.js'), 'utf8');
+  assert.match(app, /globalThis\.WebSpiderLatexEditor/);
+  assert.match(latexBundle, /WebSpiderLatexEditor/);
   assert.match(app, /data-action="ask-latex-agent"/);
   assert.match(app, /data-action="decide-latex-hunk"/);
   assert.match(app, /data-decision="accepted"/);

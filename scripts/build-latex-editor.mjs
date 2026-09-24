@@ -4,18 +4,20 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const vendor = path.join(repository, 'web', 'vendor');
+const web = path.join(repository, 'web');
+const vendor = path.join(web, 'vendor');
 fs.mkdirSync(vendor, { recursive: true });
 
 await build({
-  entryPoints: [path.join(repository, 'scripts', 'latex-editor-entry.js')],
-  outfile: path.join(vendor, 'latex-editor.mjs'),
+  entryPoints: [path.join(repository, 'scripts', 'latex-browser-entry.js')],
+  outfile: path.join(web, 'mathjax-config.js'),
   bundle: true,
-  format: 'esm',
+  format: 'iife',
+  globalName: 'WebSpiderLatexEditor',
   minify: true,
   legalComments: 'none',
   target: ['es2022'],
-  banner: { js: '/* CodeMirror 6 · MIT · see codemirror-LICENSES.txt */' },
+  banner: { js: '/* MathJax configuration + CodeMirror 6 · MIT · see vendor/codemirror-LICENSES.txt */' },
 });
 
 const packages = [
