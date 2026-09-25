@@ -980,7 +980,8 @@ test('the owner can adopt a remote Codex session and WebSpider pins it to the re
   await waitUntil(() => fs.existsSync(path.join(workspace, 'api-adopted-args.txt')));
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'api-adopted-args.txt'), 'utf8').trim().split('\n'), [
     'resume', '-C', canonicalWorkspace, '--ask-for-approval', 'never', '--sandbox', 'danger-full-access',
-    ...CODEX_STABLE_MODEL_ARGUMENTS, '--last',
+    ...CODEX_STABLE_MODEL_ARGUMENTS, '-c',
+    `projects.${JSON.stringify(canonicalWorkspace)}.trust_level="trusted"`, '--last',
   ]);
   const runtime = node.database.getProcessByAgent(bootstrap.agent.id);
   assert.deepEqual(runtime.argv.slice(0, 4), [fakeCodex, 'resume', '-C', canonicalWorkspace]);

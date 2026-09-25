@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
-import { hasStableCodexModelArguments } from '../lib/agent-profile.js';
+import { codexTrustedProjectArguments, hasStableCodexModelArguments } from '../lib/agent-profile.js';
 
 const WEBSPIDER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
 const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
@@ -799,9 +799,10 @@ export class ProcessSupervisor extends EventEmitter {
         argv, environment, agentControl, recoveryContext, codexSession: requestedCodexSession,
       })
       : {};
-    const resumeCodex = requestedCodexSession && codexExecutable(argv)
+    const trustedArgv = kind === 'agent' ? codexTrustedProjectArguments(argv, root.canonical) : argv;
+    const resumeCodex = requestedCodexSession && codexExecutable(trustedArgv)
       && (!requestedCodexSession.automatic || hasCodexSession(policyEnvironment.CODEX_HOME));
-    const launchArgv = resumeCodex ? codexResumeArgv(argv, root.canonical, requestedCodexSession) : argv;
+    const launchArgv = resumeCodex ? codexResumeArgv(trustedArgv, root.canonical, requestedCodexSession) : trustedArgv;
     const wrappedCommand = commandString(launchArgv);
     const scriptCommand = process.platform === 'darwin'
       ? 'expect -f "$4" "$1"'

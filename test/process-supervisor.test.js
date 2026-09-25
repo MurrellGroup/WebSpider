@@ -417,7 +417,9 @@ test('an adopted user Codex session resumes from the registered root with an iso
   });
   assert.equal((await completion).exit_status, 0);
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'adopted-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', canonicalWorkspace, '--sandbox', 'danger-full-access', '01a00000-0000-0000-0000-000000000001',
+    'resume', '-C', canonicalWorkspace, '--sandbox', 'danger-full-access', '-c',
+    `projects.${JSON.stringify(canonicalWorkspace)}.trust_level="trusted"`,
+    '01a00000-0000-0000-0000-000000000001',
   ]);
   assert.equal(fs.readFileSync(path.join(workspace, 'adopted-cwd.txt'), 'utf8').trim(), canonicalWorkspace);
   const adoptedHome = fs.readFileSync(path.join(workspace, 'adopted-home.txt'), 'utf8');
@@ -462,7 +464,8 @@ test('a lost managed Codex process automatically resumes its latest dedicated se
   });
   assert.equal((await completion).exit_status, 0);
   assert.deepEqual(fs.readFileSync(path.join(workspace, 'crash-resume-args.txt'), 'utf8').trim().split('\n'), [
-    'resume', '-C', canonicalWorkspace, '--last',
+    'resume', '-C', canonicalWorkspace, '-c',
+    `projects.${JSON.stringify(canonicalWorkspace)}.trust_level="trusted"`, '--last',
   ]);
 });
 

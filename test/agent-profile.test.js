@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  agentLaunchArguments, CODEX_STABLE_MODEL_ARGUMENTS, hasStableCodexModelArguments,
+  agentLaunchArguments, CODEX_STABLE_MODEL_ARGUMENTS, codexTrustedProjectArguments, hasStableCodexModelArguments,
 } from '../src/lib/agent-profile.js';
 
 test('existing Codex profiles with empty arguments receive unattended launch defaults', () => {
@@ -35,4 +35,17 @@ test('stable-model safeguards override conflicting profile config and remain ide
   assert.deepEqual(agentLaunchArguments('codex', ['--', 'literal prompt']), [
     ...CODEX_STABLE_MODEL_ARGUMENTS, '--', 'literal prompt',
   ]);
+});
+
+test('managed Codex agents trust exactly their registered project root', () => {
+  const root = '/extra/research/DeletionOnlyFSBF';
+  assert.deepEqual(codexTrustedProjectArguments(['codex', '--sandbox', 'danger-full-access'], root), [
+    'codex', '--sandbox', 'danger-full-access', '-c', 'projects."/extra/research/DeletionOnlyFSBF".trust_level="trusted"',
+  ]);
+  assert.deepEqual(codexTrustedProjectArguments([
+    'codex', '-c', 'projects."/extra/research/DeletionOnlyFSBF".trust_level="untrusted"', '--', 'prompt',
+  ], root), [
+    'codex', '-c', 'projects."/extra/research/DeletionOnlyFSBF".trust_level="trusted"', '--', 'prompt',
+  ]);
+  assert.deepEqual(codexTrustedProjectArguments(['/bin/bash', '-l'], root), ['/bin/bash', '-l']);
 });

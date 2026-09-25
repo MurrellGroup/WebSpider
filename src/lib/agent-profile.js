@@ -52,3 +52,24 @@ export function agentLaunchArguments(executable, argumentsList = []) {
   if (separator < 0) return [...cleaned, ...CODEX_STABLE_MODEL_ARGUMENTS];
   return [...cleaned.slice(0, separator), ...CODEX_STABLE_MODEL_ARGUMENTS, ...cleaned.slice(separator)];
 }
+
+export function codexTrustedProjectArguments(argv, rootPath) {
+  if (!Array.isArray(argv) || !argv.length || !path.basename(String(argv[0] || '')).toLowerCase().includes('codex')) {
+    return Array.isArray(argv) ? [...argv] : [];
+  }
+  const canonical = path.resolve(String(rootPath || ''));
+  const key = `projects.${JSON.stringify(canonical)}.trust_level`;
+  const cleaned = [argv[0]];
+  for (let index = 1; index < argv.length; index += 1) {
+    const value = String(argv[index + 1] || '');
+    if (['-c', '--config'].includes(argv[index]) && value.slice(0, value.indexOf('=')).trim() === key) {
+      index += 1;
+      continue;
+    }
+    cleaned.push(argv[index]);
+  }
+  const trust = ['-c', `${key}="trusted"`];
+  const separator = cleaned.indexOf('--');
+  if (separator < 0) return [...cleaned, ...trust];
+  return [...cleaned.slice(0, separator), ...trust, ...cleaned.slice(separator)];
+}
