@@ -1660,6 +1660,26 @@ function handleTerminalSocketFrame(context, socket, frame) {
       const button = $('#terminal-control');
       if (button) button.textContent = 'Take control';
     }
+    if (frame.code === 'WS_TERMINAL_INPUT_UNCERTAIN') {
+      // Input ordering is only uncertain for this portal WebSocket's pipeline.
+      // Never replay the failed bytes, but replace the poisoned connection so
+      // a restarted/recovered PTY can accept later user input normally.
+      state.terminalPendingInput = [];
+      state.terminalInputBuffer = '';
+      clearTimeout(state.terminalInputTimer);
+      state.terminalInputTimer = null;
+      state.terminalLease = null;
+      state.terminalLeaseRequested = false;
+      context.lease = null;
+      evictTerminalContext(context);
+      toast(`${frame.code}: ${frame.message || 'Terminal input delivery was uncertain.'} Reconnecting the terminal; the failed input was not repeated.`, true);
+      queueMicrotask(() => {
+        if (state.selectedAgent?.id === context.agentId && state.selectedTerminalId === context.terminalId) {
+          void renderTerminal(state.selectedAgent);
+        }
+      });
+      return;
+    }
     toast(`${frame.code}: ${frame.message || 'Terminal error'}`, true);
   }
 }

@@ -249,6 +249,8 @@ test('terminal pages begin in watch mode and acquire control only on interaction
   assert.match(hub, /connection\.on\('close'.*releaseTerminalLease/s);
   assert.match(hub, /new TerminalInputPipeline/);
   assert.doesNotMatch(hub, /let terminalQueue = Promise\.resolve/);
+  assert.match(app, /frame\.code === 'WS_TERMINAL_INPUT_UNCERTAIN'[\s\S]*evictTerminalContext\(context\)[\s\S]*renderTerminal\(state\.selectedAgent\)/);
+  assert.match(app, /the failed input was not repeated/);
   assert.match(hub, /frame\.type === 'HEARTBEAT'[\s\S]*HEARTBEAT_ACK[\s\S]*frame\.type === 'RESIZE'/);
 });
 
