@@ -1202,6 +1202,10 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   const list = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/entries`, listening.ownerToken);
   assert.equal(list.response.status, 200);
   assert(list.body.entries.some((entry) => entry.name === 'report.txt'));
+  const fastaModule = await fetch(`${listening.url}/fasta-preview.js`);
+  assert.equal(fastaModule.status, 200);
+  assert.match(fastaModule.headers.get('content-type'), /javascript/);
+  assert.match(await fastaModule.text(), /createFastaPreview/);
 
   const svgPreview = await fetch(`${listening.url}/api/v1/roots/awr_e2e/media-preview?path=diagram.svg`, {
     headers: { authorization: `Bearer ${listening.ownerToken}` },

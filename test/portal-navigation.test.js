@@ -197,6 +197,7 @@ test('PDB and CIF files use a lazy local Mol* preview with compact chain control
 });
 
 test('FASTA files use bounded explicit sampling and a canvas alignment viewer', () => {
+  const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
   const source = fs.readFileSync(path.join(repository, 'web', 'fasta-preview.js'), 'utf8');
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
   assert.match(app, /fasta-sample\?path=/);
@@ -209,6 +210,7 @@ test('FASTA files use bounded explicit sampling and a canvas alignment viewer', 
   assert.match(source, /Clustal/);
   assert.match(source, /Chemistry/);
   assert.match(source, /Zappo/);
+  assert.match(hub, /'fasta-preview\.js'/);
   assert.match(styles, /\.fasta-alignment-scroll/);
 });
 

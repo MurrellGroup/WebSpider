@@ -2179,7 +2179,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'chat.html', 'chat.js', 'chat.css', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'chat.html', 'chat.js', 'chat.css', 'fasta-preview.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
