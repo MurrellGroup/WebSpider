@@ -1168,6 +1168,8 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   fs.writeFileSync(path.join(workspace, 'report.txt'), 'durable result\n');
   fs.writeFileSync(path.join(workspace, 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><circle r="4"/></svg>');
   fs.writeFileSync(path.join(workspace, 'paper.pdf'), Buffer.from('%PDF-1.4\n%%EOF\n'));
+  fs.writeFileSync(path.join(workspace, 'sample.fasta'), Array.from({ length: 320 }, (_, index) =>
+    `>sequence-${index}\n${'ACGT'.repeat(1024)}\n`).join(''));
   const identity = generateNodeIdentity();
   const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
   const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_e2e', publicKey: identity.publicKey, workspace, rootId: 'awr_e2e' });
@@ -1216,6 +1218,16 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(pdfPreview.status, 200);
   assert.equal(pdfPreview.headers.get('content-type'), 'application/pdf');
   assert.match(Buffer.from(await pdfPreview.arrayBuffer()).toString('utf8'), /^%PDF/);
+
+  const fastaSample = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/fasta-sample?path=sample.fasta&mode=uniform&windows=4&window_bytes=16384`, listening.ownerToken);
+  assert.equal(fastaSample.response.status, 200);
+  assert.equal(fastaSample.body.sampling.windows, 4);
+  assert.equal(fastaSample.body.sampling.bytes_loaded, 4 * 16_384);
+  assert.equal(fastaSample.body.sampling.complete_file, false);
+  assert.equal(fastaSample.body.windows[0].offset, 0);
+  assert.equal(fastaSample.body.windows.at(-1).eof, true);
+  assert.match(fastaSample.body.windows[0].text, /^>sequence-0/);
+  assert(fastaSample.body.windows[1].offset > fastaSample.body.windows[0].size_bytes);
 
   const unauthenticated = await fetch(`${listening.url}/api/v1/projects`);
   assert.equal(unauthenticated.status, 401);

@@ -62,6 +62,10 @@ const WORKER_AGENT_CONTROL_SCOPES = [
   'updates:write:self',
 ];
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
+const FASTA_EXTENSIONS = new Set(['.fa', '.fasta', '.fas', '.fna', '.ffn', '.faa', '.frn']);
+const FASTA_SAMPLE_MAX_BYTES = 8 * 1024 * 1024;
+const FASTA_SAMPLE_MAX_WINDOWS = 32;
+const FASTA_SAMPLE_MAX_WINDOW_BYTES = 1024 * 1024;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -1904,6 +1908,7 @@ export class Hub {
     }, 'files.list'));
     route('GET', '/api/v1/roots/:id/stat', async (ctx) => this.#fileRequest(ctx, 'files.stat', { path: ctx.url.searchParams.get('path') || '' }, 'files.stat'));
     route('GET', '/api/v1/roots/:id/preview', async (ctx) => this.#fileRequest(ctx, 'files.preview', { path: ctx.url.searchParams.get('path') }, 'files.preview'));
+    route('GET', '/api/v1/roots/:id/fasta-sample', async (ctx) => this.#fastaSample(ctx));
     route('GET', '/api/v1/roots/:id/media-preview', async (ctx) => {
       const relativePath = ctx.url.searchParams.get('path');
       const result = await this.#fileRequest(ctx, 'files.preview-media', {
@@ -3532,6 +3537,92 @@ export class Hub {
       this.database.audit({ actorId: ctx.principal.principal_id, action: auditAction, targetType: 'workspace_root', targetId: root.id, projectId: root.project_id, decision, newState: { relative_path: payload.path || '', error: error.code } });
       throw error;
     }
+  }
+
+  async #fastaSample(ctx) {
+    const root = this.database.getRoot(ctx.params.id);
+    invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+    invariant(root.allow_preview, 'WS_FORBIDDEN', 'Preview is disabled for this root.', 403);
+    invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation must be online to preview this FASTA file.', 503);
+    const relativePath = ctx.url.searchParams.get('path');
+    invariant(typeof relativePath === 'string' && FASTA_EXTENSIONS.has(path.extname(relativePath).toLowerCase()),
+      'WS_PREVIEW_UNSUPPORTED', 'This endpoint previews FASTA sequence files only.', 415);
+    const mode = ctx.url.searchParams.get('mode') || 'uniform';
+    invariant(['head', 'uniform'].includes(mode), 'WS_VALIDATION', 'FASTA sampling mode must be head or uniform.');
+    const requestedWindows = Math.max(1, parsePositiveInt(ctx.url.searchParams.get('windows'), 8, FASTA_SAMPLE_MAX_WINDOWS));
+    const windowBytes = Math.max(16 * 1024,
+      parsePositiveInt(ctx.url.searchParams.get('window_bytes'), 256 * 1024, FASTA_SAMPLE_MAX_WINDOW_BYTES));
+    const windowCount = mode === 'head' ? 1 : requestedWindows;
+    invariant(windowCount * windowBytes <= FASTA_SAMPLE_MAX_BYTES, 'WS_REQUEST_TOO_LARGE',
+      'FASTA samples may read at most 8 MiB per request.', 413);
+    const description = await this.broker.requestTransient(root.node_id, 'files.transfer-source', {
+      root_id: root.node_root_id,
+      path: relativePath,
+    }, { timeoutMs: 60_000 });
+    const sizeBytes = Number(description.size_bytes);
+    invariant(Number.isSafeInteger(sizeBytes) && sizeBytes >= 0, 'WS_TRANSFER_INVALID',
+      'The workstation returned invalid FASTA file metadata.', 502);
+    let offsets = [];
+    if (sizeBytes > 0) {
+      const actualWindowBytes = Math.min(windowBytes, sizeBytes);
+      if (mode === 'head') {
+        offsets = [0];
+      } else if (sizeBytes <= windowCount * windowBytes) {
+        for (let offset = 0; offset < sizeBytes; offset += windowBytes) offsets.push(offset);
+      } else if (windowCount === 1) {
+        offsets = [0];
+      } else {
+        const finalOffset = sizeBytes - actualWindowBytes;
+        for (let index = 0; index < windowCount; index += 1) {
+          offsets.push(Math.round((finalOffset * index) / (windowCount - 1)));
+        }
+      }
+    }
+    offsets = [...new Set(offsets)];
+    const windows = [];
+    let loadedBytes = 0;
+    for (const offset of offsets) {
+      const requestedLength = Math.min(windowBytes, sizeBytes - offset);
+      const result = await this.broker.requestTransient(root.node_id, 'files.transfer-read', {
+        root_id: root.node_root_id,
+        path: description.path,
+        version: description.version,
+        offset,
+        length: requestedLength,
+      }, { timeoutMs: 60_000 });
+      const bytes = decodeTransferChunk(result.data_base64);
+      invariant(result.offset === offset && result.size_bytes === bytes.length && bytes.length === requestedLength,
+        'WS_TRANSFER_INVALID', 'The workstation returned an invalid FASTA sample window.', 502);
+      invariant(createHash('sha256').update(bytes).digest('hex') === result.sha256,
+        'WS_TRANSFER_INVALID', 'The FASTA sample window checksum does not match.', 502);
+      const text = new TextDecoder('utf-8').decode(bytes);
+      invariant(!text.includes('\0'), 'WS_PREVIEW_UNSUPPORTED', 'This FASTA file contains binary data.', 415);
+      loadedBytes += bytes.length;
+      windows.push({ offset, size_bytes: bytes.length, eof: offset + bytes.length === sizeBytes, text });
+    }
+    this.database.audit({
+      actorId: ctx.principal.principal_id,
+      action: 'files.preview_fasta',
+      targetType: 'workspace_root', targetId: root.id, projectId: root.project_id,
+      decision: 'allowed',
+      newState: { relative_path: relativePath, mode, windows: windows.length, bytes: loadedBytes, size_bytes: sizeBytes },
+    });
+    return {
+      root_id: root.id,
+      path: relativePath,
+      size_bytes: sizeBytes,
+      mtime: description.mtime,
+      version: description.version,
+      sampling: {
+        mode,
+        window_bytes: windowBytes,
+        windows: windows.length,
+        bytes_loaded: loadedBytes,
+        coverage_fraction: sizeBytes ? loadedBytes / sizeBytes : 1,
+        complete_file: loadedBytes === sizeBytes,
+      },
+      windows,
+    };
   }
 
   async #overleafRequest(ctx, command, payload, auditAction) {

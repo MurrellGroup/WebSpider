@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.33';
+const PORTAL_VERSION = '0.6.34';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1899,7 +1899,7 @@ async function renderFiles(agent) {
   state.fileSearchQuery = restored.searchQuery;
   state.previewPath = restored.previewPath;
   state.previewMode = restored.previewMode;
-  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout ${state.filePaneCollapsed ? 'file-pane-collapsed' : ''}"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><div class="panel-resizer file-pane-resizer" data-panel-resizer="files" role="separator" aria-orientation="vertical" aria-label="Resize file browser"></div><section class="preview-pane"><div id="preview-header" class="preview-header"><button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select a text, image, SVG, PDF, PDB, or CIF file to preview it here. Markdown and math are rendered automatically; source is always one click away.</div></section></div>`;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout ${state.filePaneCollapsed ? 'file-pane-collapsed' : ''}"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><div class="panel-resizer file-pane-resizer" data-panel-resizer="files" role="separator" aria-orientation="vertical" aria-label="Resize file browser"></div><section class="preview-pane"><div id="preview-header" class="preview-header"><button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select text, FASTA, image, SVG, PDF, PDB, or CIF files to preview them here. Large FASTA files use explicit bounded sampling.</div></section></div>`;
   try {
     await loadDirectory();
   } catch (error) {
@@ -2544,12 +2544,31 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
   const pdf = /\.pdf$/i.test(relative);
   const latex = /\.tex$/i.test(relative);
   const structure = /\.(?:pdb|cif|mmcif)$/i.test(relative);
+  const fasta = /\.(?:fa|fasta|fas|fna|ffn|faa|frn)$/i.test(relative);
   state.previewMode = markdown && ['source', 'rendered'].includes(preferredMode) ? preferredMode : markdown ? 'rendered' : 'source';
   rememberFileBrowserState();
   $$('.file-row').forEach((row) => row.classList.toggle('selected', row.dataset.filePath === relative));
   $('#preview-header').innerHTML = `<button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path" title="${h(relative)}">${h(relative)}</strong><div class="preview-actions">${markdown ? `<div class="preview-mode-switch"><button data-preview-mode="rendered" class="${state.previewMode === 'rendered' ? 'selected' : ''}">Readable</button><button data-preview-mode="source" class="${state.previewMode === 'source' ? 'selected' : ''}">Source</button></div>` : ''}<button data-action="promote-artifact">Keep as artifact</button><a href="/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}">Download</a></div>`;
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
+  if (fasta) {
+    content.className = 'preview-content fasta-preview-host';
+    try {
+      const module = await import('./fasta-preview.js');
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      const viewer = await module.createFastaPreview(content, {
+        path: relative,
+        loadSample: ({ mode, windows, windowBytes }) => api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/fasta-sample?path=${encodeURIComponent(relative)}&mode=${encodeURIComponent(mode)}&windows=${encodeURIComponent(windows)}&window_bytes=${encodeURIComponent(windowBytes)}`),
+      });
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) viewer.dispose();
+      else state.structurePreview = viewer;
+    } catch (error) {
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      content.className = 'preview-content source-preview';
+      content.textContent = friendlyError(error);
+    }
+    return;
+  }
   if (structure) {
     const source = `/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/download?path=${encodeURIComponent(relative)}`;
     content.className = 'preview-content structure-preview-host';

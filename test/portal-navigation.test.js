@@ -196,6 +196,22 @@ test('PDB and CIF files use a lazy local Mol* preview with compact chain control
   assert(vendor.size > 100_000 && vendor.size < 4_000_000);
 });
 
+test('FASTA files use bounded explicit sampling and a canvas alignment viewer', () => {
+  const source = fs.readFileSync(path.join(repository, 'web', 'fasta-preview.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /fasta-sample\?path=/);
+  assert.match(app, /import\('\.\/fasta-preview\.js'\)/);
+  assert.match(source, /MAX_STORED_RESIDUES = 6_000_000/);
+  assert.match(source, /getContext\('2d'/);
+  assert.match(source, /Across file/);
+  assert.match(source, /Classic bases/);
+  assert.match(source, /Purine \/ pyrimidine/);
+  assert.match(source, /Clustal/);
+  assert.match(source, /Chemistry/);
+  assert.match(source, /Zappo/);
+  assert.match(styles, /\.fasta-alignment-scroll/);
+});
+
 test('note editor clicks do not reopen the note and discard the active draft', () => {
   assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
   assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);
