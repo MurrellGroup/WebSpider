@@ -66,6 +66,8 @@ const FASTA_EXTENSIONS = new Set(['.fa', '.fasta', '.fas', '.fna', '.ffn', '.faa
 const FASTA_SAMPLE_MAX_BYTES = 8 * 1024 * 1024;
 const FASTA_SAMPLE_MAX_WINDOWS = 32;
 const FASTA_SAMPLE_MAX_WINDOW_BYTES = 1024 * 1024;
+const FASTA_DIRECT_LOAD_MAX_BYTES = 4 * 1024 * 1024;
+const FASTA_SAMPLE_READ_CONCURRENCY = 4;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -3547,12 +3549,12 @@ export class Hub {
     const relativePath = ctx.url.searchParams.get('path');
     invariant(typeof relativePath === 'string' && FASTA_EXTENSIONS.has(path.extname(relativePath).toLowerCase()),
       'WS_PREVIEW_UNSUPPORTED', 'This endpoint previews FASTA sequence files only.', 415);
-    const mode = ctx.url.searchParams.get('mode') || 'uniform';
-    invariant(['head', 'uniform'].includes(mode), 'WS_VALIDATION', 'FASTA sampling mode must be head or uniform.');
+    const requestedMode = ctx.url.searchParams.get('mode') || 'auto';
+    invariant(['auto', 'head', 'uniform'].includes(requestedMode), 'WS_VALIDATION', 'FASTA sampling mode must be auto, head, or uniform.');
     const requestedWindows = Math.max(1, parsePositiveInt(ctx.url.searchParams.get('windows'), 8, FASTA_SAMPLE_MAX_WINDOWS));
     const windowBytes = Math.max(16 * 1024,
       parsePositiveInt(ctx.url.searchParams.get('window_bytes'), 256 * 1024, FASTA_SAMPLE_MAX_WINDOW_BYTES));
-    const windowCount = mode === 'head' ? 1 : requestedWindows;
+    const windowCount = requestedMode === 'head' ? 1 : requestedWindows;
     invariant(windowCount * windowBytes <= FASTA_SAMPLE_MAX_BYTES, 'WS_REQUEST_TOO_LARGE',
       'FASTA samples may read at most 8 MiB per request.', 413);
     const description = await this.broker.requestTransient(root.node_id, 'files.transfer-source', {
@@ -3562,13 +3564,17 @@ export class Hub {
     const sizeBytes = Number(description.size_bytes);
     invariant(Number.isSafeInteger(sizeBytes) && sizeBytes >= 0, 'WS_TRANSFER_INVALID',
       'The workstation returned invalid FASTA file metadata.', 502);
+    const mode = requestedMode === 'auto'
+      ? (sizeBytes <= FASTA_DIRECT_LOAD_MAX_BYTES ? 'complete' : 'uniform')
+      : requestedMode;
+    const readWindowBytes = mode === 'complete' ? sizeBytes : windowBytes;
     let offsets = [];
     if (sizeBytes > 0) {
-      const actualWindowBytes = Math.min(windowBytes, sizeBytes);
-      if (mode === 'head') {
+      const actualWindowBytes = Math.min(readWindowBytes, sizeBytes);
+      if (mode === 'head' || mode === 'complete') {
         offsets = [0];
-      } else if (sizeBytes <= windowCount * windowBytes) {
-        for (let offset = 0; offset < sizeBytes; offset += windowBytes) offsets.push(offset);
+      } else if (sizeBytes <= windowCount * readWindowBytes) {
+        for (let offset = 0; offset < sizeBytes; offset += readWindowBytes) offsets.push(offset);
       } else if (windowCount === 1) {
         offsets = [0];
       } else {
@@ -3579,10 +3585,8 @@ export class Hub {
       }
     }
     offsets = [...new Set(offsets)];
-    const windows = [];
-    let loadedBytes = 0;
-    for (const offset of offsets) {
-      const requestedLength = Math.min(windowBytes, sizeBytes - offset);
+    const readWindow = async (offset) => {
+      const requestedLength = Math.min(readWindowBytes, sizeBytes - offset);
       const result = await this.broker.requestTransient(root.node_id, 'files.transfer-read', {
         root_id: root.node_root_id,
         path: description.path,
@@ -3597,15 +3601,19 @@ export class Hub {
         'WS_TRANSFER_INVALID', 'The FASTA sample window checksum does not match.', 502);
       const text = new TextDecoder('utf-8').decode(bytes);
       invariant(!text.includes('\0'), 'WS_PREVIEW_UNSUPPORTED', 'This FASTA file contains binary data.', 415);
-      loadedBytes += bytes.length;
-      windows.push({ offset, size_bytes: bytes.length, eof: offset + bytes.length === sizeBytes, text });
+      return { offset, size_bytes: bytes.length, eof: offset + bytes.length === sizeBytes, text };
+    };
+    const windows = [];
+    for (let index = 0; index < offsets.length; index += FASTA_SAMPLE_READ_CONCURRENCY) {
+      windows.push(...await Promise.all(offsets.slice(index, index + FASTA_SAMPLE_READ_CONCURRENCY).map(readWindow)));
     }
+    const loadedBytes = windows.reduce((total, window) => total + window.size_bytes, 0);
     this.database.audit({
       actorId: ctx.principal.principal_id,
       action: 'files.preview_fasta',
       targetType: 'workspace_root', targetId: root.id, projectId: root.project_id,
       decision: 'allowed',
-      newState: { relative_path: relativePath, mode, windows: windows.length, bytes: loadedBytes, size_bytes: sizeBytes },
+      newState: { relative_path: relativePath, mode, requested_mode: requestedMode, windows: windows.length, bytes: loadedBytes, size_bytes: sizeBytes },
     });
     return {
       root_id: root.id,
@@ -3615,7 +3623,8 @@ export class Hub {
       version: description.version,
       sampling: {
         mode,
-        window_bytes: windowBytes,
+        requested_mode: requestedMode,
+        window_bytes: readWindowBytes,
         windows: windows.length,
         bytes_loaded: loadedBytes,
         coverage_fraction: sizeBytes ? loadedBytes / sizeBytes : 1,

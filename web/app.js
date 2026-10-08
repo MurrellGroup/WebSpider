@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.35';
+const PORTAL_VERSION = '0.6.36';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -625,6 +625,9 @@ function closeStructurePreview() {
   state.structurePreviewGeneration += 1;
   state.structurePreview?.dispose();
   state.structurePreview = null;
+  $('.file-layout')?.classList.remove('fasta-open');
+  $('#agent-content')?.classList.remove('fasta-file-content');
+  $('#agent-content')?.closest('.page')?.classList.remove('fasta-file-page');
 }
 
 function consumeAccessToken() {
@@ -2552,6 +2555,9 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
   const content = $('#preview-content');
   content.textContent = 'Loading preview…';
   if (fasta) {
+    $('.file-layout')?.classList.add('fasta-open');
+    $('#agent-content')?.classList.add('fasta-file-content');
+    $('#agent-content')?.closest('.page')?.classList.add('fasta-file-page');
     content.className = 'preview-content fasta-preview-host';
     try {
       const module = await import('./fasta-preview.js');

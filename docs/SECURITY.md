@@ -52,7 +52,7 @@ Directory listings may show symlink metadata, but a blocked target is not follow
 - Inbound agent envelopes use hub-generated ISO UTC timestamps and elapsed durations. Display sources are flattened to one bounded line before delivery; stored user content is not rewritten.
 - Conversation and Markdown-file rendering use the same dependency-free escaping pipeline; arbitrary HTML and image embedding are not supported.
 - PDB/CIF previews fetch bytes through the existing authenticated, root-confined attachment route and parse/render them locally with a pinned, lazy-loaded Mol* library bundle. No structure bytes are sent to a CDN or hosted viewer, and the standard Mol* application UI is not exposed. Preview loading is capped at 64 MiB.
-- FASTA previews reuse the authenticated, root-confined, version-fenced chunk reader. A request reads at most 32 explicit windows and 8 MiB total, verifies every chunk checksum, marks boundary fragments, retains at most 6 million sampled residues, and draws only the visible canvas viewport. No sequence bytes leave WebSpider or reach a third-party renderer.
+- FASTA previews reuse the authenticated, root-confined, version-fenced chunk reader. Auto mode reads files up to 4 MiB in one verified chunk and samples larger files; every request remains capped at 8 MiB. Sample reads use at most 32 windows with bounded concurrency, verify every chunk checksum, mark boundary fragments, retain at most 6 million sampled residues, and draw only the visible canvas viewport. No sequence bytes leave WebSpider or reach a third-party renderer.
 - Terminal titles, automatic links, clipboard control, and same-origin active file rendering are not implemented.
 
 ## Threat assumptions and limitations

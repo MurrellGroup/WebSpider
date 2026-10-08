@@ -205,6 +205,8 @@ test('FASTA files use bounded explicit sampling and a canvas alignment viewer', 
   assert.match(source, /MAX_STORED_RESIDUES = 6_000_000/);
   assert.match(source, /getContext\('2d'/);
   assert.match(source, /Across file/);
+  assert.match(source, /\['auto', 'Auto'\]/);
+  assert.match(source, /fasta-alignment-viewport/);
   assert.match(source, /Classic bases/);
   assert.match(source, /Purine \/ pyrimidine/);
   assert.match(source, /Clustal/);
@@ -212,6 +214,7 @@ test('FASTA files use bounded explicit sampling and a canvas alignment viewer', 
   assert.match(source, /Zappo/);
   assert.match(hub, /'fasta-preview\.js'/);
   assert.match(styles, /\.fasta-alignment-scroll/);
+  assert.match(styles, /\.file-layout\.fasta-open/);
 });
 
 test('note editor clicks do not reopen the note and discard the active draft', () => {

@@ -4,6 +4,7 @@ const LABEL_WIDTH = 230;
 const HEADER_HEIGHT = 28;
 const ROW_HEIGHT = 21;
 const MAX_SCROLL_WIDTH = 20_000_000;
+const DIRECT_LOAD_MAX_BYTES = 4 * 1024 * 1024;
 
 const PALETTES = {
   nucleotide: [
@@ -132,9 +133,13 @@ function detectAlphabet(records) {
 
 function paletteColor(palette, residue) {
   if (residue === '-' || residue === '.') return '#202833';
-  if (palette.colors) return palette.colors[residue] || '#59636f';
-  for (const [members, color] of palette.groups) if (members.includes(residue)) return color;
-  return '#59636f';
+  if (!palette.lookup) {
+    palette.lookup = { ...(palette.colors || {}) };
+    for (const [members, color] of palette.groups || []) {
+      for (const member of members) palette.lookup[member] = color;
+    }
+  }
+  return palette.lookup[residue] || '#59636f';
 }
 
 function textColor(background) {
@@ -172,14 +177,16 @@ function createCanvasViewer(host, records, initialAlphabet) {
     alignment.aligned ? `${alignment.complete.length} × ${alignment.complete[0].sequence.length.toLocaleString()} alignment` : 'Sequence browser');
   toolbar.append(alphabetLabel, paletteLabel, minus, plus, badge);
 
+  const viewport = element('div', 'fasta-alignment-viewport');
   const scroll = element('div', 'fasta-alignment-scroll');
   scroll.tabIndex = 0;
   scroll.setAttribute('aria-label', 'Scrollable FASTA sequence viewer');
   const spacer = element('div', 'fasta-alignment-spacer');
   const canvas = element('canvas', 'fasta-alignment-canvas');
-  scroll.append(spacer, canvas);
+  scroll.append(spacer);
+  viewport.append(canvas, scroll);
   const selection = element('div', 'fasta-selection-status', 'Click a row for its full identifier. Scroll in either direction to inspect the sampled residues.');
-  wrap.append(toolbar, scroll, selection);
+  wrap.append(toolbar, viewport, selection);
   host.append(wrap);
 
   let disposed = false;
@@ -188,6 +195,8 @@ function createCanvasViewer(host, records, initialAlphabet) {
   let detectedAlphabet = initialAlphabet;
   let alphabetMode = detectedAlphabet;
   let selectedRow = -1;
+  const longest = records.reduce((maximum, record) => Math.max(maximum, record.sequence.length), 0);
+  const textColors = new Map();
 
   const refreshPaletteOptions = () => {
     alphabetMode = alphabet.value === 'auto' ? detectedAlphabet : alphabet.value;
@@ -200,24 +209,22 @@ function createCanvasViewer(host, records, initialAlphabet) {
   };
 
   const updateSpace = () => {
-    const longest = records.reduce((maximum, record) => Math.max(maximum, record.sequence.length), 0);
     spacer.style.width = `${Math.min(MAX_SCROLL_WIDTH, LABEL_WIDTH + longest * cellWidth)}px`;
-    spacer.style.height = `${Math.max(scroll.clientHeight, HEADER_HEIGHT + records.length * ROW_HEIGHT + 2)}px`;
+    spacer.style.height = `${Math.max(viewport.clientHeight, HEADER_HEIGHT + records.length * ROW_HEIGHT + 2)}px`;
   };
 
   const render = () => {
     frame = null;
     if (disposed || !scroll.isConnected) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const width = Math.max(1, scroll.clientWidth);
-    const height = Math.max(1, scroll.clientHeight);
+    const width = Math.max(1, viewport.clientWidth);
+    const height = Math.max(1, viewport.clientHeight);
     const pixelWidth = Math.round(width * ratio);
     const pixelHeight = Math.round(height * ratio);
     if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
       canvas.width = pixelWidth; canvas.height = pixelHeight;
       canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
     }
-    canvas.style.transform = `translate(${scroll.scrollLeft}px, ${scroll.scrollTop}px)`;
     const context = canvas.getContext('2d', { alpha: false });
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.fillStyle = '#090d12'; context.fillRect(0, 0, width, height);
@@ -250,7 +257,8 @@ function createCanvasViewer(host, records, initialAlphabet) {
         context.fillStyle = background;
         context.fillRect(x + 0.5, y + 1, Math.max(1, cellWidth - 1), ROW_HEIGHT - 2);
         if (cellWidth >= 10) {
-          context.fillStyle = textColor(background);
+          if (!textColors.has(background)) textColors.set(background, textColor(background));
+          context.fillStyle = textColors.get(background);
           context.textAlign = 'center';
           context.fillText(residue, x + cellWidth / 2, y + ROW_HEIGHT / 2);
           context.textAlign = 'start';
@@ -261,10 +269,11 @@ function createCanvasViewer(host, records, initialAlphabet) {
 
   const schedule = () => { if (frame == null) frame = requestAnimationFrame(render); };
   const resize = new ResizeObserver(() => { updateSpace(); schedule(); });
-  resize.observe(scroll);
+  resize.observe(viewport);
   scroll.addEventListener('scroll', schedule, { passive: true });
-  canvas.addEventListener('click', (event) => {
-    const row = Math.floor((event.offsetY - HEADER_HEIGHT + scroll.scrollTop) / ROW_HEIGHT);
+  scroll.addEventListener('click', (event) => {
+    const bounds = viewport.getBoundingClientRect();
+    const row = Math.floor((event.clientY - bounds.top - HEADER_HEIGHT + scroll.scrollTop) / ROW_HEIGHT);
     if (row < 0 || row >= records.length) return;
     selectedRow = row;
     const record = records[row];
@@ -295,7 +304,7 @@ export async function createFastaPreview(host, { path, loadSample }) {
   const controls = element('form', 'fasta-controls');
   const strategyLabel = element('label'); strategyLabel.append(element('span', '', 'Sample'));
   const strategy = element('select');
-  for (const [value, label] of [['uniform', 'Across file'], ['head', 'From start']]) {
+  for (const [value, label] of [['auto', 'Auto'], ['uniform', 'Across file'], ['head', 'From start']]) {
     const option = element('option', '', label); option.value = value; strategy.append(option);
   }
   strategyLabel.append(strategy);
@@ -318,10 +327,13 @@ export async function createFastaPreview(host, { path, loadSample }) {
   host.replaceChildren(shell);
 
   const updateBudget = () => {
+    const automatic = strategy.value === 'auto';
     const count = strategy.value === 'head' ? 1 : Number(windows.value);
     windowsLabel.classList.toggle('disabled', strategy.value === 'head');
     windows.disabled = strategy.value === 'head';
-    budget.textContent = `maximum read ${formatBytes(count * Number(windowBytes.value))}`;
+    budget.textContent = automatic
+      ? `whole file up to ${formatBytes(DIRECT_LOAD_MAX_BYTES)}; otherwise ${formatBytes(count * Number(windowBytes.value))} sample`
+      : `maximum read ${formatBytes(count * Number(windowBytes.value))}`;
     load.disabled = count * Number(windowBytes.value) > 8 * 1024 * 1024;
   };
 

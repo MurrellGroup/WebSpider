@@ -1232,6 +1232,13 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(fastaSample.body.windows.at(-1).eof, true);
   assert.match(fastaSample.body.windows[0].text, /^>sequence-0/);
   assert(fastaSample.body.windows[1].offset > fastaSample.body.windows[0].size_bytes);
+  const completeFasta = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/fasta-sample?path=sample.fasta&mode=auto&windows=8&window_bytes=262144`, listening.ownerToken);
+  assert.equal(completeFasta.response.status, 200);
+  assert.equal(completeFasta.body.sampling.requested_mode, 'auto');
+  assert.equal(completeFasta.body.sampling.mode, 'complete');
+  assert.equal(completeFasta.body.sampling.windows, 1);
+  assert.equal(completeFasta.body.sampling.complete_file, true);
+  assert.equal(completeFasta.body.sampling.bytes_loaded, completeFasta.body.size_bytes);
 
   const unauthenticated = await fetch(`${listening.url}/api/v1/projects`);
   assert.equal(unauthenticated.status, 401);
