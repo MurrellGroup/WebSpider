@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFastaSample } from '../web/fasta-preview.js';
+import { formatFastaRecords, parseFastaSample } from '../web/fasta-preview.js';
 
 test('FASTA samples join contiguous windows without inventing partial records', () => {
   const result = parseFastaSample({ windows: [
@@ -26,4 +26,12 @@ test('disjoint FASTA windows label boundary fragments explicitly', () => {
   assert.equal(result.records[1].header, 'whole');
   assert.equal(result.records[1].partialStart, false);
   assert.equal(result.records[1].partialEnd, true);
+});
+
+test('copied alignment records are valid wrapped FASTA and identify sampled fragments', () => {
+  const text = formatFastaRecords([
+    { header: '>alpha\nunsafe', sequence: 'acgt acgtac', partialStart: false, partialEnd: false },
+    { header: 'sample fragment', sequence: 'MKWV', partialStart: true, partialEnd: false },
+  ], 4);
+  assert.equal(text, '>alpha unsafe\nACGT\nACGT\nAC\n>sample fragment [partial sample]\nMKWV\n');
 });

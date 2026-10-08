@@ -118,6 +118,41 @@ export function parseFastaSample(sample) {
   return { records, storedResidues, omittedRecords, clippedResidues };
 }
 
+export function formatFastaRecords(records, lineWidth = 80) {
+  const width = Number.isInteger(lineWidth) && lineWidth > 0 ? lineWidth : 80;
+  return records.map((record, index) => {
+    const header = String(record.header || `sequence_${index + 1}`).replace(/[\r\n]+/gu, ' ').replace(/^>+\s*/u, '').trim() || `sequence_${index + 1}`;
+    const partial = record.partialStart || record.partialEnd ? ' [partial sample]' : '';
+    const sequence = String(record.sequence || '').replace(/\s+/gu, '').toUpperCase();
+    const lines = [];
+    for (let offset = 0; offset < sequence.length; offset += width) lines.push(sequence.slice(offset, offset + width));
+    return `>${header}${partial}\n${lines.join('\n')}\n`;
+  }).join('');
+}
+
+function legacyClipboardCopy(text) {
+  const control = document.createElement('textarea');
+  control.value = text;
+  control.readOnly = true;
+  control.style.position = 'fixed';
+  control.style.left = '-10000px';
+  control.style.top = '0';
+  document.body.append(control);
+  control.select();
+  control.setSelectionRange(0, control.value.length);
+  const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+  control.remove();
+  return copied;
+}
+
+async function copyFasta(records) {
+  const text = formatFastaRecords(records);
+  if (globalThis.isSecureContext && navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* fall through for private HTTP and denied permissions */ }
+  }
+  if (!legacyClipboardCopy(text)) throw new Error('Clipboard access was denied by the browser.');
+}
+
 function detectAlphabet(records) {
   let nucleotide = 0;
   let informative = 0;
@@ -172,10 +207,13 @@ function createCanvasViewer(host, records, initialAlphabet) {
   paletteLabel.append(paletteSelect);
   const minus = element('button', 'fasta-icon-button', '−'); minus.type = 'button'; minus.title = 'Show more columns';
   const plus = element('button', 'fasta-icon-button', '+'); plus.type = 'button'; plus.title = 'Enlarge residues';
+  const copyAlignment = element('button', 'fasta-copy-button', 'Copy alignment');
+  copyAlignment.type = 'button';
+  copyAlignment.title = 'Copy all loaded records as FASTA';
   const alignment = alignmentState(records);
   const badge = element('span', `fasta-alignment-badge ${alignment.aligned ? 'aligned' : ''}`,
     alignment.aligned ? `${alignment.complete.length} × ${alignment.complete[0].sequence.length.toLocaleString()} alignment` : 'Sequence browser');
-  toolbar.append(alphabetLabel, paletteLabel, minus, plus, badge);
+  toolbar.append(alphabetLabel, paletteLabel, minus, plus, copyAlignment, badge);
 
   const viewport = element('div', 'fasta-alignment-viewport');
   const scroll = element('div', 'fasta-alignment-scroll');
@@ -183,9 +221,15 @@ function createCanvasViewer(host, records, initialAlphabet) {
   scroll.setAttribute('aria-label', 'Scrollable FASTA sequence viewer');
   const spacer = element('div', 'fasta-alignment-spacer');
   const canvas = element('canvas', 'fasta-alignment-canvas');
+  const rowMenu = element('div', 'fasta-row-menu');
+  rowMenu.hidden = true;
+  const rowMenuTitle = element('strong');
+  const copySequence = element('button', '', 'Copy sequence as FASTA');
+  copySequence.type = 'button';
+  rowMenu.append(rowMenuTitle, copySequence);
   scroll.append(spacer);
-  viewport.append(canvas, scroll);
-  const selection = element('div', 'fasta-selection-status', 'Click a row for its full identifier. Scroll in either direction to inspect the sampled residues.');
+  viewport.append(canvas, scroll, rowMenu);
+  const selection = element('div', 'fasta-selection-status', 'Click a sequence label for copy options. Scroll in either direction to inspect the loaded residues.');
   wrap.append(toolbar, viewport, selection);
   host.append(wrap);
 
@@ -195,6 +239,7 @@ function createCanvasViewer(host, records, initialAlphabet) {
   let detectedAlphabet = initialAlphabet;
   let alphabetMode = detectedAlphabet;
   let selectedRow = -1;
+  let menuRow = -1;
   const longest = records.reduce((maximum, record) => Math.max(maximum, record.sequence.length), 0);
   const textColors = new Map();
 
@@ -270,15 +315,48 @@ function createCanvasViewer(host, records, initialAlphabet) {
   const schedule = () => { if (frame == null) frame = requestAnimationFrame(render); };
   const resize = new ResizeObserver(() => { updateSpace(); schedule(); });
   resize.observe(viewport);
-  scroll.addEventListener('scroll', schedule, { passive: true });
+  scroll.addEventListener('scroll', () => { rowMenu.hidden = true; schedule(); }, { passive: true });
   scroll.addEventListener('click', (event) => {
     const bounds = viewport.getBoundingClientRect();
     const row = Math.floor((event.clientY - bounds.top - HEADER_HEIGHT + scroll.scrollTop) / ROW_HEIGHT);
     if (row < 0 || row >= records.length) return;
     selectedRow = row;
     const record = records[row];
-    selection.textContent = `${record.header} · ${record.sequence.length.toLocaleString()} sampled residues${record.partialStart || record.partialEnd ? ' · partial record' : ''}`;
+    selection.textContent = `${record.header} · ${record.sequence.length.toLocaleString()} loaded residues${record.partialStart || record.partialEnd ? ' · partial sampled record' : ''}`;
+    if (event.clientX - bounds.left <= LABEL_WIDTH) {
+      menuRow = row;
+      rowMenuTitle.textContent = record.header;
+      rowMenu.style.top = `${Math.max(6, Math.min(viewport.clientHeight - 70, event.clientY - bounds.top + 5))}px`;
+      rowMenu.hidden = false;
+    } else {
+      rowMenu.hidden = true;
+    }
     schedule();
+  });
+  copySequence.addEventListener('click', async () => {
+    const record = records[menuRow];
+    if (!record) return;
+    copySequence.disabled = true;
+    try {
+      await copyFasta([record]);
+      selection.textContent = `Copied ${record.header} as FASTA.`;
+      rowMenu.hidden = true;
+    } catch (error) {
+      selection.textContent = error?.message || 'Could not copy the sequence.';
+    } finally {
+      copySequence.disabled = false;
+    }
+  });
+  copyAlignment.addEventListener('click', async () => {
+    copyAlignment.disabled = true;
+    try {
+      await copyFasta(records);
+      selection.textContent = `Copied ${records.length.toLocaleString()} loaded record${records.length === 1 ? '' : 's'} as FASTA.`;
+    } catch (error) {
+      selection.textContent = error?.message || 'Could not copy the alignment.';
+    } finally {
+      copyAlignment.disabled = false;
+    }
   });
   alphabet.addEventListener('change', () => { refreshPaletteOptions(); schedule(); });
   paletteSelect.addEventListener('change', schedule);

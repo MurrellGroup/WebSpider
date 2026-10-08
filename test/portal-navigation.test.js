@@ -207,6 +207,9 @@ test('FASTA files use bounded explicit sampling and a canvas alignment viewer', 
   assert.match(source, /Across file/);
   assert.match(source, /\['auto', 'Auto'\]/);
   assert.match(source, /fasta-alignment-viewport/);
+  assert.match(source, /Copy alignment/);
+  assert.match(source, /Copy sequence as FASTA/);
+  assert.match(source, /document\.execCommand\('copy'\)/);
   assert.match(source, /Classic bases/);
   assert.match(source, /Purine \/ pyrimidine/);
   assert.match(source, /Clustal/);

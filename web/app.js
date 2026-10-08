@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.36';
+const PORTAL_VERSION = '0.6.37';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
