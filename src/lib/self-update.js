@@ -1,6 +1,6 @@
 import { invariant } from './errors.js';
 
-export const WEBSPIDER_VERSION = '0.6.37';
+export const WEBSPIDER_VERSION = '0.6.38';
 export const WEBSPIDER_REPOSITORY = 'MurrellGroup/WebSpider';
 export const WEBSPIDER_UPDATE_PROTOCOL = 1;
 

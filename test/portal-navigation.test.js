@@ -220,6 +220,20 @@ test('FASTA files use bounded explicit sampling and a canvas alignment viewer', 
   assert.match(styles, /\.file-layout\.fasta-open/);
 });
 
+test('CSV and TSV files use a bounded, independently scrolling table preview', () => {
+  const hub = fs.readFileSync(path.join(repository, 'src', 'hub', 'hub.js'), 'utf8');
+  const source = fs.readFileSync(path.join(repository, 'web', 'table-preview.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /tabular-sample\?path=/);
+  assert.match(app, /import\('\.\/table-preview\.js'\)/);
+  assert.match(source, /MAX_RENDERED_CELLS = 30_000/);
+  assert.match(source, /First row is header/);
+  assert.match(source, /detectDelimiter/);
+  assert.match(hub, /'table-preview\.js'/);
+  assert.match(styles, /\.table-grid-scroll/);
+  assert.match(styles, /\.file-layout\.table-open/);
+});
+
 test('note editor clicks do not reopen the note and discard the active draft', () => {
   assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
   assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);

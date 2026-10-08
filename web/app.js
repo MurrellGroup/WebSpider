@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.37';
+const PORTAL_VERSION = '0.6.38';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -625,7 +625,7 @@ function closeStructurePreview() {
   state.structurePreviewGeneration += 1;
   state.structurePreview?.dispose();
   state.structurePreview = null;
-  $('.file-layout')?.classList.remove('fasta-open');
+  $('.file-layout')?.classList.remove('fasta-open', 'table-open');
   $('#agent-content')?.classList.remove('fasta-file-content');
   $('#agent-content')?.closest('.page')?.classList.remove('fasta-file-page');
 }
@@ -1902,7 +1902,7 @@ async function renderFiles(agent) {
   state.fileSearchQuery = restored.searchQuery;
   state.previewPath = restored.previewPath;
   state.previewMode = restored.previewMode;
-  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout ${state.filePaneCollapsed ? 'file-pane-collapsed' : ''}"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><div class="panel-resizer file-pane-resizer" data-panel-resizer="files" role="separator" aria-orientation="vertical" aria-label="Resize file browser"></div><section class="preview-pane"><div id="preview-header" class="preview-header"><button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select text, FASTA, image, SVG, PDF, PDB, or CIF files to preview them here. Large FASTA files use explicit bounded sampling.</div></section></div>`;
+  $('#agent-content').innerHTML = `<input id="workspace-file-input" class="hidden" type="file" multiple aria-label="Choose workspace files to upload"><div class="file-layout ${state.filePaneCollapsed ? 'file-pane-collapsed' : ''}"><section class="file-pane"><div id="file-toolbar" class="file-toolbar"></div><div id="file-rows" class="file-rows"></div></section><div class="panel-resizer file-pane-resizer" data-panel-resizer="files" role="separator" aria-orientation="vertical" aria-label="Resize file browser"></div><section class="preview-pane"><div id="preview-header" class="preview-header"><button data-action="toggle-file-pane">${state.filePaneCollapsed ? 'Show files' : 'Hide files'}</button><strong class="preview-path">No file selected</strong></div><div id="preview-content" class="preview-content source-preview">Select text, CSV/TSV, FASTA, image, SVG, PDF, PDB, or CIF files to preview them here. Large datasets use bounded previews.</div></section></div>`;
   try {
     await loadDirectory();
   } catch (error) {
@@ -2548,6 +2548,7 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
   const latex = /\.tex$/i.test(relative);
   const structure = /\.(?:pdb|cif|mmcif)$/i.test(relative);
   const fasta = /\.(?:fa|fasta|fas|fna|ffn|faa|frn)$/i.test(relative);
+  const tabular = /\.(?:csv|tsv)$/i.test(relative);
   state.previewMode = markdown && ['source', 'rendered'].includes(preferredMode) ? preferredMode : markdown ? 'rendered' : 'source';
   rememberFileBrowserState();
   $$('.file-row').forEach((row) => row.classList.toggle('selected', row.dataset.filePath === relative));
@@ -2565,6 +2566,28 @@ async function previewFile(name, { relativePath = null, preferredMode = null } =
       const viewer = await module.createFastaPreview(content, {
         path: relative,
         loadSample: ({ mode, windows, windowBytes }) => api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/fasta-sample?path=${encodeURIComponent(relative)}&mode=${encodeURIComponent(mode)}&windows=${encodeURIComponent(windows)}&window_bytes=${encodeURIComponent(windowBytes)}`),
+      });
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) viewer.dispose();
+      else state.structurePreview = viewer;
+    } catch (error) {
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      content.className = 'preview-content source-preview';
+      content.textContent = friendlyError(error);
+    }
+    return;
+  }
+  if (tabular) {
+    $('.file-layout')?.classList.add('table-open');
+    $('#agent-content')?.classList.add('fasta-file-content');
+    $('#agent-content')?.closest('.page')?.classList.add('fasta-file-page');
+    content.className = 'preview-content table-preview-host';
+    try {
+      const module = await import('./table-preview.js');
+      if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) return;
+      const viewer = await module.createTablePreview(content, {
+        path: relative,
+        format: /\.tsv$/i.test(relative) ? 'tsv' : 'csv',
+        loadSample: ({ maxBytes }) => api(`/api/v1/roots/${encodeURIComponent(state.activeRoot.id)}/tabular-sample?path=${encodeURIComponent(relative)}&max_bytes=${encodeURIComponent(maxBytes)}`),
       });
       if (previewGeneration !== state.structurePreviewGeneration || !content.isConnected) viewer.dispose();
       else state.structurePreview = viewer;

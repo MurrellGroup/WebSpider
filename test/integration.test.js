@@ -1170,6 +1170,9 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   fs.writeFileSync(path.join(workspace, 'paper.pdf'), Buffer.from('%PDF-1.4\n%%EOF\n'));
   fs.writeFileSync(path.join(workspace, 'sample.fasta'), Array.from({ length: 320 }, (_, index) =>
     `>sequence-${index}\n${'ACGT'.repeat(1024)}\n`).join(''));
+  fs.writeFileSync(path.join(workspace, 'sample.csv'), 'name,note,value\nalpha,"hello, world",1\nbeta,"line one\nline two",2\n');
+  fs.writeFileSync(path.join(workspace, 'sample.tsv'), 'name\tnote\tvalue\nalpha\thello\t1\n');
+  fs.writeFileSync(path.join(workspace, 'utf8-boundary.csv'), `name\n${'a'.repeat(65_530)}é\n`);
   const identity = generateNodeIdentity();
   const hub = new Hub({ stateDir: path.join(directory, 'hub'), listenPort: 0 });
   const bootstrap = hub.bootstrapLocal({ nodeId: 'nod_e2e', publicKey: identity.publicKey, workspace, rootId: 'awr_e2e' });
@@ -1206,6 +1209,10 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(fastaModule.status, 200);
   assert.match(fastaModule.headers.get('content-type'), /javascript/);
   assert.match(await fastaModule.text(), /createFastaPreview/);
+  const tableModule = await fetch(`${listening.url}/table-preview.js`);
+  assert.equal(tableModule.status, 200);
+  assert.match(tableModule.headers.get('content-type'), /javascript/);
+  assert.match(await tableModule.text(), /createTablePreview/);
 
   const svgPreview = await fetch(`${listening.url}/api/v1/roots/awr_e2e/media-preview?path=diagram.svg`, {
     headers: { authorization: `Bearer ${listening.ownerToken}` },
@@ -1239,6 +1246,21 @@ test('hub and outbound node provide a root-confined end-to-end API', async (t) =
   assert.equal(completeFasta.body.sampling.windows, 1);
   assert.equal(completeFasta.body.sampling.complete_file, true);
   assert.equal(completeFasta.body.sampling.bytes_loaded, completeFasta.body.size_bytes);
+  const csvSample = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/tabular-sample?path=sample.csv&max_bytes=262144`, listening.ownerToken);
+  assert.equal(csvSample.response.status, 200);
+  assert.equal(csvSample.body.format, 'csv');
+  assert.equal(csvSample.body.complete_file, true);
+  assert.equal(csvSample.body.bytes_loaded, csvSample.body.size_bytes);
+  assert.match(csvSample.body.text, /"hello, world"/);
+  const tsvSample = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/tabular-sample?path=sample.tsv&max_bytes=262144`, listening.ownerToken);
+  assert.equal(tsvSample.response.status, 200);
+  assert.equal(tsvSample.body.format, 'tsv');
+  assert.match(tsvSample.body.text, /name\tnote\tvalue/);
+  const utf8Boundary = await jsonFetch(`${listening.url}/api/v1/roots/awr_e2e/tabular-sample?path=utf8-boundary.csv&max_bytes=65536`, listening.ownerToken);
+  assert.equal(utf8Boundary.response.status, 200);
+  assert.equal(utf8Boundary.body.complete_file, false);
+  assert.equal(utf8Boundary.body.bytes_loaded, 65_535);
+  assert.match(utf8Boundary.body.text, /a$/);
 
   const unauthenticated = await fetch(`${listening.url}/api/v1/projects`);
   assert.equal(unauthenticated.status, 401);

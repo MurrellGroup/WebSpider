@@ -63,11 +63,13 @@ const WORKER_AGENT_CONTROL_SCOPES = [
 ];
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const FASTA_EXTENSIONS = new Set(['.fa', '.fasta', '.fas', '.fna', '.ffn', '.faa', '.frn']);
+const TABULAR_EXTENSIONS = new Set(['.csv', '.tsv']);
 const FASTA_SAMPLE_MAX_BYTES = 8 * 1024 * 1024;
 const FASTA_SAMPLE_MAX_WINDOWS = 32;
 const FASTA_SAMPLE_MAX_WINDOW_BYTES = 1024 * 1024;
 const FASTA_DIRECT_LOAD_MAX_BYTES = 4 * 1024 * 1024;
 const FASTA_SAMPLE_READ_CONCURRENCY = 4;
+const TABULAR_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -86,6 +88,7 @@ const MIME = new Map([
   ['.md', 'text/markdown; charset=utf-8'],
   ['.txt', 'text/plain; charset=utf-8'],
   ['.csv', 'text/csv; charset=utf-8'],
+  ['.tsv', 'text/tab-separated-values; charset=utf-8'],
   ['.woff', 'font/woff'],
   ['.woff2', 'font/woff2'],
 ]);
@@ -1911,6 +1914,7 @@ export class Hub {
     route('GET', '/api/v1/roots/:id/stat', async (ctx) => this.#fileRequest(ctx, 'files.stat', { path: ctx.url.searchParams.get('path') || '' }, 'files.stat'));
     route('GET', '/api/v1/roots/:id/preview', async (ctx) => this.#fileRequest(ctx, 'files.preview', { path: ctx.url.searchParams.get('path') }, 'files.preview'));
     route('GET', '/api/v1/roots/:id/fasta-sample', async (ctx) => this.#fastaSample(ctx));
+    route('GET', '/api/v1/roots/:id/tabular-sample', async (ctx) => this.#tabularSample(ctx));
     route('GET', '/api/v1/roots/:id/media-preview', async (ctx) => {
       const relativePath = ctx.url.searchParams.get('path');
       const result = await this.#fileRequest(ctx, 'files.preview-media', {
@@ -2181,7 +2185,7 @@ export class Hub {
   #serveStatic(pathname, response) {
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const mathJaxFontAsset = /^vendor\/mathjax-fonts\/woff-v2\/[A-Za-z0-9_-]+\.woff$/.test(relative);
-    if (!mathJaxFontAsset && !['index.html', 'app.js', 'chat.html', 'chat.js', 'chat.css', 'fasta-preview.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
+    if (!mathJaxFontAsset && !['index.html', 'app.js', 'chat.html', 'chat.js', 'chat.css', 'fasta-preview.js', 'table-preview.js', 'markdown.js', 'terminal-input.js', 'terminal-output.js', 'terminal-maths.js', 'terminal-drafts.js', 'mathjax-config.js', 'random.js', 'vendor/mathjax.js', 'vendor/mathjax.LICENSE', 'vendor/xterm.mjs', 'vendor/xterm.css', 'vendor/xterm.LICENSE', 'vendor/addon-fit.mjs', 'vendor/addon-fit.LICENSE', 'vendor/molstar-preview.mjs', 'vendor/molstar.LICENSE', 'vendor/molstar-THIRD-PARTY-LICENSES.txt', 'styles.css', 'manifest.webmanifest', 'icon.svg'].includes(relative)) {
       const body = Buffer.from('Not found');
       response.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length });
       response.end(body);
@@ -3631,6 +3635,76 @@ export class Hub {
         complete_file: loadedBytes === sizeBytes,
       },
       windows,
+    };
+  }
+
+  async #tabularSample(ctx) {
+    const root = this.database.getRoot(ctx.params.id);
+    invariant(root && !root.revoked_at, 'WS_ROOT_NOT_FOUND', 'Workspace root not found.', 404);
+    invariant(root.allow_preview, 'WS_FORBIDDEN', 'Preview is disabled for this root.', 403);
+    invariant(this.broker.isOnline(root.node_id), 'WS_NODE_OFFLINE', 'The workstation must be online to preview this table.', 503);
+    const relativePath = ctx.url.searchParams.get('path');
+    invariant(typeof relativePath === 'string' && TABULAR_EXTENSIONS.has(path.extname(relativePath).toLowerCase()),
+      'WS_PREVIEW_UNSUPPORTED', 'This endpoint previews CSV and TSV files only.', 415);
+    const maxBytes = Math.max(64 * 1024,
+      parsePositiveInt(ctx.url.searchParams.get('max_bytes'), 1024 * 1024, TABULAR_PREVIEW_MAX_BYTES));
+    const description = await this.broker.requestTransient(root.node_id, 'files.transfer-source', {
+      root_id: root.node_root_id,
+      path: relativePath,
+    }, { timeoutMs: 60_000 });
+    const sizeBytes = Number(description.size_bytes);
+    invariant(Number.isSafeInteger(sizeBytes) && sizeBytes >= 0, 'WS_TRANSFER_INVALID',
+      'The workstation returned invalid table metadata.', 502);
+    let text = '';
+    let loadedBytes = 0;
+    if (sizeBytes > 0) {
+      const requestedLength = Math.min(maxBytes, sizeBytes);
+      const result = await this.broker.requestTransient(root.node_id, 'files.transfer-read', {
+        root_id: root.node_root_id,
+        path: description.path,
+        version: description.version,
+        offset: 0,
+        length: requestedLength,
+      }, { timeoutMs: 60_000 });
+      const bytes = decodeTransferChunk(result.data_base64);
+      invariant(result.offset === 0 && result.size_bytes === bytes.length && bytes.length === requestedLength,
+        'WS_TRANSFER_INVALID', 'The workstation returned an invalid table preview.', 502);
+      invariant(createHash('sha256').update(bytes).digest('hex') === result.sha256,
+        'WS_TRANSFER_INVALID', 'The table preview checksum does not match.', 502);
+      const attempts = result.eof || bytes.length === 0
+        ? [bytes]
+        : [bytes, bytes.subarray(0, -1), bytes.subarray(0, -2), bytes.subarray(0, -3)];
+      let decodedBytes = bytes;
+      let decodeError = null;
+      for (const candidate of attempts) {
+        try {
+          text = new TextDecoder('utf-8', { fatal: true }).decode(candidate);
+          decodedBytes = candidate;
+          decodeError = null;
+          break;
+        } catch (error) { decodeError = error; }
+      }
+      if (decodeError) throw new WebSpiderError('WS_PREVIEW_UNSUPPORTED', 'This table is not valid UTF-8 text.', 415);
+      invariant(!text.includes('\0'), 'WS_PREVIEW_UNSUPPORTED', 'This table contains binary data.', 415);
+      loadedBytes = decodedBytes.length;
+    }
+    this.database.audit({
+      actorId: ctx.principal.principal_id,
+      action: 'files.preview_tabular',
+      targetType: 'workspace_root', targetId: root.id, projectId: root.project_id,
+      decision: 'allowed',
+      newState: { relative_path: relativePath, bytes: loadedBytes, size_bytes: sizeBytes },
+    });
+    return {
+      root_id: root.id,
+      path: relativePath,
+      format: path.extname(relativePath).toLowerCase() === '.tsv' ? 'tsv' : 'csv',
+      size_bytes: sizeBytes,
+      bytes_loaded: loadedBytes,
+      complete_file: loadedBytes === sizeBytes,
+      mtime: description.mtime,
+      version: description.version,
+      text,
     };
   }
 
