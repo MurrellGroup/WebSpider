@@ -3,7 +3,7 @@ import { randomIdentifier } from './random.js';
 import { prepareTerminalMaths, terminalBufferText } from './terminal-maths.js';
 import {
   attachTerminalTouchScrolling, clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
-  resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
+  replayTerminalHistory, resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from './terminal-input.js';
 import { orderTerminalOutputFrames, reconcileTerminalOutput } from './terminal-output.js';
 import { clearTerminalDraft, loadTerminalDrafts, saveTerminalDraft, terminalDraft } from './terminal-drafts.js';
@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.38';
+const PORTAL_VERSION = '0.6.39';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1486,7 +1486,7 @@ function applyTerminalSnapshot(snapshot) {
   state.terminalText = snapshot?.text || '';
   observeTerminalProtocol(state.terminalText);
   state.terminalEmulator.reset();
-  state.terminalEmulator.write(state.terminalText, () => updateTerminalMaths(true));
+  replayTerminalHistory(state.terminalEmulator, state.terminalText, () => updateTerminalMaths(true));
   state.terminalSequence = sequence;
   const output = $('#terminal-output');
   if (output) output.dataset.outputSequence = String(sequence);

@@ -91,6 +91,46 @@ export function enqueueTerminalData(data, {
   return true;
 }
 
+// Replaying a saved PTY transcript can replay old device-status and colour
+// queries. xterm answers those queries through onData, which must not be sent
+// back into the live PTY as if they were new input. disableStdin suppresses
+// both user and generated onData events while xterm parses the historical
+// bytes. A per-terminal depth keeps overlapping queued writes fenced until
+// the final replay callback runs.
+const terminalReplayStates = new WeakMap();
+
+export function replayTerminalHistory(terminal, data, onComplete) {
+  if (!terminal?.options || typeof terminal.write !== 'function') return false;
+  let replay = terminalReplayStates.get(terminal);
+  if (!replay) {
+    replay = { depth: 0, originalDisableStdin: false };
+    terminalReplayStates.set(terminal, replay);
+  }
+  if (replay.depth === 0) {
+    replay.originalDisableStdin = Boolean(terminal.options.disableStdin);
+    terminal.options.disableStdin = true;
+  }
+  replay.depth += 1;
+  let completed = false;
+  const finish = () => {
+    if (completed) return;
+    completed = true;
+    replay.depth = Math.max(0, replay.depth - 1);
+    if (replay.depth === 0) {
+      terminal.options.disableStdin = replay.originalDisableStdin;
+      terminalReplayStates.delete(terminal);
+    }
+    onComplete?.();
+  };
+  try {
+    terminal.write(data, finish);
+  } catch (error) {
+    finish();
+    throw error;
+  }
+  return true;
+}
+
 export function attachTerminalTouchScrolling(element, terminal) {
   if (!element || !terminal) return { dispose() {} };
   let touchIdentifier = null;

@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   attachTerminalTouchScrolling, clipboardCopyShortcut, clipboardPasteShortcut, createTerminalKeyState, directKeyInput, enqueueTerminalData, kittySequence,
-  resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
+  replayTerminalHistory, resetTerminalKeyState, terminalAttachmentCommitKey, terminalComposeEnterAction, trackTerminalKey,
 } from '../web/terminal-input.js';
+import { Terminal } from '../web/vendor/xterm.mjs';
 
 function touchEvent(type, { touches = [], changedTouches = touches } = {}) {
   const event = new Event(type, { cancelable: true });
@@ -109,6 +110,57 @@ test('terminal data always queues and requests control when no precursor event d
   });
   assert.deepEqual(events, ['data:def']);
   assert.equal(enqueueTerminalData('', { enqueue: () => events.push('unexpected') }), false);
+});
+
+test('historical terminal replay suppresses synthetic replies until every queued write completes', () => {
+  const completions = [];
+  const syntheticReplies = [];
+  const terminal = {
+    options: { disableStdin: false },
+    write(data, complete) {
+      if (!this.options.disableStdin && data.includes('device-query')) syntheticReplies.push('device-reply');
+      completions.push(complete);
+    },
+  };
+
+  assert.equal(replayTerminalHistory(terminal, 'old-device-query'), true);
+  assert.equal(terminal.options.disableStdin, true);
+  assert.deepEqual(syntheticReplies, []);
+  replayTerminalHistory(terminal, 'another-old-device-query');
+  assert.equal(terminal.options.disableStdin, true);
+
+  completions.shift()();
+  assert.equal(terminal.options.disableStdin, true);
+  completions.shift()();
+  assert.equal(terminal.options.disableStdin, false);
+
+  terminal.write('fresh-device-query', () => {});
+  assert.deepEqual(syntheticReplies, ['device-reply']);
+});
+
+test('historical terminal replay restores an existing stdin setting after failure', () => {
+  const terminal = {
+    options: { disableStdin: true },
+    write() { throw new Error('parse failed'); },
+  };
+  assert.throws(() => replayTerminalHistory(terminal, 'history'), /parse failed/);
+  assert.equal(terminal.options.disableStdin, true);
+  assert.equal(replayTerminalHistory(null, 'history'), false);
+});
+
+test('xterm answers live capability queries but never queries replayed from history', async () => {
+  const terminal = new Terminal();
+  const replies = [];
+  terminal.onData((data) => replies.push(data));
+  try {
+    await new Promise((resolve) => replayTerminalHistory(terminal, '\u001b[c', resolve));
+    assert.deepEqual(replies, []);
+
+    await new Promise((resolve) => terminal.write('\u001b[c', resolve));
+    assert.deepEqual(replies, ['\u001b[?1;2c']);
+  } finally {
+    terminal.dispose();
+  }
 });
 
 test('touch swipes scroll terminal history by rows and can be disposed', () => {
