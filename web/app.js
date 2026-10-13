@@ -14,7 +14,7 @@ const {
   applyLatexReviewDecisions, latexReviewArtifactPaths, latexReviewMessage, LATEX_REVIEW_PROTOCOL,
 } = globalThis.WebSpiderLatexEditor || {};
 
-const PORTAL_VERSION = '0.6.39';
+const PORTAL_VERSION = '0.6.40';
 const PORTAL_BUILD = document.querySelector('meta[name="webspider-portal-build"]')?.content || '';
 const FILE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024;
@@ -1948,14 +1948,45 @@ async function loadDirectory() {
   const data = await api(`/api/v1/roots/${encodeURIComponent(root.id)}/entries?path=${encodeURIComponent(state.filePath)}&hidden=${state.fileShowHidden}`);
   const parts = state.filePath ? state.filePath.split('/') : [];
   const crumbs = [{ name: root.logical_name, path: '' }, ...parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join('/') }))];
-  $('#file-toolbar').innerHTML = `<div class="file-location" aria-label="Current workspace path">${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}</div><div class="file-toolbar-actions"><button data-action="connect-overleaf" title="Connect this workspace to an Overleaf project">${state.overleafStatus?.connected ? 'Overleaf' : 'Connect Overleaf'}</button><button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" value="${h(state.fileSearchQuery)}" placeholder="Search" aria-label="Search files"></div>`;
+  $('#file-toolbar').innerHTML = `<div class="file-toolbar-actions"><button data-action="connect-overleaf" title="Connect this workspace to an Overleaf project">${state.overleafStatus?.connected ? 'Overleaf' : 'Connect Overleaf'}</button><button class="file-hidden-toggle ${state.fileShowHidden ? 'selected' : ''}" data-action="toggle-hidden-files" aria-pressed="${state.fileShowHidden}">${state.fileShowHidden ? 'Hide hidden' : 'Show hidden'}</button><button data-action="choose-workspace-files" title="Upload files into this folder without messaging the agent">Upload files</button><input id="file-search" class="file-search" value="${h(state.fileSearchQuery)}" placeholder="Search" aria-label="Search files"></div><div class="file-location" aria-label="Current workspace path">${crumbs.map((crumb) => `<button class="breadcrumb" data-file-dir="${h(crumb.path)}">${h(crumb.name)}</button>`).join('<span class="muted">/</span>')}</div>`;
   $('#file-rows').innerHTML = data.entries.length ? data.entries.map((entry) => {
     const relative = state.filePath ? `${state.filePath}/${entry.name}` : entry.name;
-    return `<button class="file-row ${h(entry.kind)} ${relative === state.previewPath ? 'selected' : ''}" data-file-name="${h(entry.name)}" data-file-path="${h(relative)}" data-file-kind="${h(entry.kind)}">
+    return `<button class="file-row ${h(entry.kind)} ${relative === state.previewPath ? 'selected' : ''}" data-file-name="${h(entry.name)}" data-file-path="${h(relative)}" data-file-kind="${h(entry.kind)}" data-file-link-scope="${h(entry.link_scope || '')}">
       <span class="file-icon">${entry.kind === 'directory' ? '▰' : entry.kind === 'symlink' ? '↗' : '▤'}</span><span class="file-name" title="${h(relative)}">${h(entry.name)}</span><span class="file-size">${h(formatBytes(entry.size))}</span><span class="file-date">${h(formatTime(entry.mtime))}</span>
     </button>`;
   }).join('') : '<div class="empty"><div><strong>Empty directory</strong><p>No visible entries in this workspace path.</p></div></div>';
   rememberFileBrowserState();
+}
+
+async function openFileBrowserEntry(relative, kind, { fromSearch = false } = {}) {
+  if (kind === 'directory') return openFileDirectory(relative);
+  const slash = relative.lastIndexOf('/');
+  const parent = slash < 0 ? '' : relative.slice(0, slash);
+  const name = slash < 0 ? relative : relative.slice(slash + 1);
+  if (kind === 'symlink') {
+    try {
+      // A listing deliberately reports the link itself as a symlink. Probe it as
+      // a directory first so contained directory links behave like folders.
+      return await openFileDirectory(relative);
+    } catch (error) {
+      state.filePath = parent;
+      state.fileSearchQuery = '';
+      rememberFileBrowserState();
+      if (error?.code !== 'WS_PATH_INVALID') {
+        await loadDirectory().catch(() => {});
+        throw error;
+      }
+      // A contained link that is not a directory may still be a regular file.
+      await loadDirectory();
+      return previewFile(name, { relativePath: relative });
+    }
+  }
+  if (fromSearch) {
+    state.filePath = parent;
+    state.fileSearchQuery = '';
+    await loadDirectory();
+  }
+  return previewFile(name, { relativePath: relative });
 }
 
 async function retryWorkspaceUploadRequest(path, options) {
@@ -2939,18 +2970,13 @@ document.addEventListener('click', async (event) => {
   if (directory) return openFileDirectory(directory.dataset.fileDir);
   const searchResult = event.target.closest('[data-search-path]');
   if (searchResult) {
-    const relative = searchResult.dataset.searchPath;
-    if (searchResult.dataset.searchKind === 'directory') return openFileDirectory(relative);
-    const slash = relative.lastIndexOf('/');
-    state.filePath = slash < 0 ? '' : relative.slice(0, slash);
-    state.fileSearchQuery = '';
-    await loadDirectory();
-    return previewFile(slash < 0 ? relative : relative.slice(slash + 1));
+    return openFileBrowserEntry(searchResult.dataset.searchPath, searchResult.dataset.searchKind, { fromSearch: true })
+      .catch((error) => toast(friendlyError(error), true));
   }
   const file = event.target.closest('[data-file-name]');
   if (file) {
-    if (file.dataset.fileKind === 'directory') return openFileDirectory(file.dataset.filePath);
-    return previewFile(file.dataset.fileName);
+    return openFileBrowserEntry(file.dataset.filePath, file.dataset.fileKind)
+      .catch((error) => toast(friendlyError(error), true));
   }
   const actionTarget = event.target.closest('[data-action]');
   const action = actionTarget?.dataset.action;

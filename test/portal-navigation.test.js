@@ -234,6 +234,19 @@ test('CSV and TSV files use a bounded, independently scrolling table preview', (
   assert.match(styles, /\.file-layout\.table-open/);
 });
 
+test('the file browser opens contained directory symlinks and keeps breadcrumbs below actions', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(app, /data-file-link-scope="\$\{h\(entry\.link_scope \|\| ''\)\}"/);
+  assert.match(app, /async function openFileBrowserEntry\(relative, kind/);
+  assert.match(app, /if \(kind === 'symlink'\)[\s\S]*return await openFileDirectory\(relative\)/);
+  assert.match(app, /error\?\.code !== 'WS_PATH_INVALID'/);
+  assert.match(app, /return previewFile\(name, \{ relativePath: relative \}\)/);
+  assert.match(app, /openFileBrowserEntry\(file\.dataset\.filePath, file\.dataset\.fileKind\)/);
+  assert.match(app, /file-toolbar-actions[\s\S]*file-location/);
+  assert.match(styles, /\.file-toolbar \{[^}]*flex-direction: column;/);
+  assert.match(styles, /\.file-location \{[^}]*border-top: 1px solid var\(--line-soft\);/);
+});
+
 test('note editor clicks do not reopen the note and discard the active draft', () => {
   assert.match(app, /event\.target\.closest\('\.note-row\[data-note-id\]'\)/);
   assert.doesNotMatch(app, /event\.target\.closest\('\[data-note-id\]'\)/);

@@ -108,6 +108,7 @@ test('media previews are root-confined and allow images, SVG, and PDF without tr
 
 test('contained-only policy may follow an internal symlink but never an external one', async (t) => {
   const value = fixture();
+  fs.symlinkSync(path.join(value.root, 'results'), path.join(value.root, 'internal-directory'));
   value.service.close();
   value.service = new RootedFileService([{ id: 'awr_test', path: value.root, symlink_policy: 'contained_only' }]);
   t.after(() => {
@@ -116,6 +117,9 @@ test('contained-only policy may follow an internal symlink but never an external
   });
   const internal = await value.service.readFile('awr_test', 'internal-link');
   assert.match(internal.bytes.toString('utf8'), /Workspace/);
+  const linkedDirectory = await value.service.entries('awr_test', 'internal-directory');
+  assert(linkedDirectory.entries.some((entry) => entry.name === 'summary.txt'));
+  await assert.rejects(() => value.service.entries('awr_test', 'internal-link'), (error) => error.code === 'WS_PATH_INVALID');
   await assert.rejects(() => value.service.readFile('awr_test', 'external-link'), (error) => error.code === 'WS_PATH_ESCAPE_BLOCKED');
 });
 
