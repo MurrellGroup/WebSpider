@@ -30,7 +30,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); overscroll-behavior-x: none; }
 body { min-height: 100vh; overflow: hidden; }
 body.panel-resizing { cursor: col-resize; user-select: none; }
 button, input, textarea, select { font: inherit; }

@@ -140,6 +140,13 @@ test('mobile navigation keeps project actions available and More opens the navig
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.main-view \{[^}]*height: calc\(100dvh[^}]*overflow-y: auto;/);
 });
 
+test('the main portal disables browser back and forward overscroll gestures', () => {
+  const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
+  assert.match(styles, /html, body \{[^}]*overscroll-behavior-x: none;/);
+  assert.match(styles, /\.file-name \{[^}]*overflow-x: auto;/);
+  assert.match(styles, /\.preview-path \{[^}]*overflow-x: auto;/);
+});
+
 test('mobile terminal stays inside the keyboard-resized viewport with reachable controls', () => {
   const styles = fs.readFileSync(path.join(repository, 'web', 'styles.css'), 'utf8');
   assert.match(page, /interactive-widget=resizes-content/);
