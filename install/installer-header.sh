@@ -86,7 +86,50 @@ if [ "$runtime_target" != "$expected_target" ]; then
 fi
 
 stage="$install_root.stage.$$"
-previous="$install_root.previous"
+retained="$install_root.retained.$(date +%s).$$"
+
+runtime_in_use() {
+  retained_candidate=$1
+  if [ "$platform" = linux ]; then
+    for retained_executable in /proc/[0-9]*/exe; do
+      retained_target=$(readlink "$retained_executable" 2>/dev/null || true)
+      case "$retained_target" in
+        "$retained_candidate"/*) return 0 ;;
+      esac
+    done
+    return 1
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof +D "$retained_candidate" >/dev/null 2>&1
+    return $?
+  fi
+  # Without a reliable process census, retaining an old runtime is safer than
+  # removing helpers that a long-lived agent may still need.
+  return 0
+}
+
+cleanup_retained_runtimes() {
+  for retained_candidate_path in "$install_root.previous" "$install_root".retained.*; do
+    [ -d "$retained_candidate_path" ] || continue
+    if ! runtime_in_use "$retained_candidate_path"; then rm -rf "$retained_candidate_path"; fi
+  done
+}
+
+preserve_codex_runtime() {
+  source_root=$1
+  destination_root=$2
+  codex_bin="$source_root/runtime/bin/codex"
+  codex_modules="$source_root/runtime/lib/node_modules/@openai"
+  if [ -e "$codex_bin" ] || [ -L "$codex_bin" ]; then
+    mkdir -p "$destination_root/runtime/bin"
+    cp -P "$codex_bin" "$destination_root/runtime/bin/codex"
+  fi
+  if [ -d "$codex_modules" ]; then
+    mkdir -p "$destination_root/runtime/lib/node_modules/@openai"
+    cp -R "$codex_modules/." "$destination_root/runtime/lib/node_modules/@openai/"
+  fi
+}
+
 rm -rf "$stage"
 mkdir -p "$stage/app" "$stage/runtime/bin"
 cp -R "$temporary/payload/app/." "$stage/app/"
@@ -98,11 +141,12 @@ for helper in script mkfifo; do
     chmod 755 "$stage/runtime/bin/$helper"
   fi
 done
+if [ -d "$install_root/app" ]; then preserve_codex_runtime "$install_root" "$stage"; fi
 
 mkdir -p "$(dirname "$install_root")" "$bin_dir" "${XDG_CONFIG_HOME:-$HOME/.config}/webspider" "$state_dir"
-rm -rf "$previous"
+cleanup_retained_runtimes
 if [ -d "$install_root/app" ]; then
-  mv "$install_root" "$previous"
+  mv "$install_root" "$retained"
 fi
 mv "$stage" "$install_root"
 cp "$install_root/app/install/webspider-launcher.sh" "$bin_dir/webspider"
@@ -171,7 +215,7 @@ elif [ "$install_service" -eq 1 ]; then
   "$bin_dir/webspider" "$@"
 fi
 
-if [ -d "$previous" ]; then rm -rf "$previous"; fi
+cleanup_retained_runtimes
 
 echo "WebSpider $product_version installed."
 echo "Command: $bin_dir/webspider"

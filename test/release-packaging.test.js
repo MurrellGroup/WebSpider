@@ -27,6 +27,9 @@ test('GitHub Actions builds every supported native target before publishing a ta
   assert.match(workflow, /npm ci/);
   assert.match(workflow, /npm run build:molstar/);
   assert.match(workflow, /git diff --exit-code -- web\/vendor\/molstar-preview\.mjs[\s\S]*molstar-THIRD-PARTY-LICENSES\.txt/);
+  assert.match(workflow, /live_runtime_pid=\$!/);
+  assert.match(workflow, /install\.retained\.\*/);
+  assert.match(workflow, /runtime-sentinel/);
   assert.match(readme, /i=\$\(mktemp\);curl --http1\.1 -fL --retry 5 -o "\$i"/);
   assert.match(readme, /https:\/\/github\.com\/MurrellGroup\/WebSpider\/releases\/latest\/download\/WebSpider_Install\.run/);
   assert.match(readme, /&&sh "\$i" --workspace "\$PWD"/);
@@ -76,4 +79,16 @@ test('native installer rejects a stale running hub version', () => {
   assert.match(installer, /x\.version===process\.env\.WEBSPIDER_EXPECTED_VERSION/);
   assert.match(installer, /hub_ready=1/);
   assert.match(installer, /hub service did not start WebSpider \$product_version/);
+});
+
+test('native installer retains live runtimes and carries a managed Codex toolchain forward', () => {
+  const installer = fs.readFileSync(path.join(repository, 'install/installer-header.sh'), 'utf8');
+  assert.match(installer, /runtime_in_use\(\)/);
+  assert.match(installer, /for retained_executable in \/proc\/\[0-9\]\*\/exe/);
+  assert.match(installer, /"\$retained_candidate"\/\*\) return 0/);
+  assert.match(installer, /retained="\$install_root\.retained\./);
+  assert.match(installer, /preserve_codex_runtime\(\)/);
+  assert.match(installer, /runtime\/bin\/codex/);
+  assert.match(installer, /runtime\/lib\/node_modules\/@openai/);
+  assert.doesNotMatch(installer, /rm -rf "\$previous"/);
 });

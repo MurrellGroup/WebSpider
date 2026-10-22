@@ -85,6 +85,36 @@ jobs:
           HOME="$smoke/home" \
           XDG_CONFIG_HOME="$smoke/home/config" \
             "$smoke/bin/webspider" doctor --state-dir "$smoke/state"
+          mkdir -p "$smoke/install/runtime/lib/node_modules/@openai"
+          printf '#!/bin/sh\nexit 0\n' > "$smoke/install/runtime/bin/codex"
+          chmod 0755 "$smoke/install/runtime/bin/codex"
+          printf 'preserved\n' > "$smoke/install/runtime/lib/node_modules/@openai/runtime-sentinel"
+          "$smoke/install/runtime/bin/node" -e 'setInterval(() => {}, 1000)' &
+          live_runtime_pid=$!
+          HOME="$smoke/home" \
+          XDG_CONFIG_HOME="$smoke/home/config" \
+          XDG_DATA_HOME="$smoke/home/data" \
+            sh "$installer" \
+              --workspace "$smoke/workspace" \
+              --install-dir "$smoke/install" \
+              --bin-dir "$smoke/bin" \
+              --state-dir "$smoke/state" \
+              --no-service
+          test -x "$smoke/install/runtime/bin/codex"
+          grep -F preserved "$smoke/install/runtime/lib/node_modules/@openai/runtime-sentinel"
+          find "$smoke" -maxdepth 1 -type d -name 'install.retained.*' | grep -q .
+          kill "$live_runtime_pid"
+          wait "$live_runtime_pid" || true
+          HOME="$smoke/home" \
+          XDG_CONFIG_HOME="$smoke/home/config" \
+          XDG_DATA_HOME="$smoke/home/data" \
+            sh "$installer" \
+              --workspace "$smoke/workspace" \
+              --install-dir "$smoke/install" \
+              --bin-dir "$smoke/bin" \
+              --state-dir "$smoke/state" \
+              --no-service
+          test -z "$(find "$smoke" -maxdepth 1 -type d -name 'install.retained.*' -print -quit)"
           version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",/\1/p' package.json)
           grep -F "WebSpider $version" "$smoke/version.txt"
 
