@@ -102,7 +102,7 @@ jobs:
               --no-service
           test -x "$smoke/install/runtime/bin/codex"
           grep -F preserved "$smoke/install/runtime/lib/node_modules/@openai/runtime-sentinel"
-          find "$smoke" -maxdepth 1 -type d -name 'install.retained.*' | grep -q .
+          test -n "$(find "$smoke" -maxdepth 1 -type d -name 'install.retained.*' -print -quit)"
           kill "$live_runtime_pid"
           wait "$live_runtime_pid" || true
           HOME="$smoke/home" \
