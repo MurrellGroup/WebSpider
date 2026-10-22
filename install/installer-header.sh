@@ -90,6 +90,14 @@ retained="$install_root.retained.$(date +%s).$$"
 
 runtime_in_use() {
   retained_candidate=$1
+  retained_pid_marker="$retained_candidate/.webspider-live-pids"
+  if [ -f "$retained_pid_marker" ]; then
+    while IFS= read -r retained_pid; do
+      case "$retained_pid" in *[!0-9]*|'') continue ;; esac
+      if kill -0 "$retained_pid" 2>/dev/null; then return 0; fi
+    done < "$retained_pid_marker"
+    rm -f "$retained_pid_marker"
+  fi
   if [ "$platform" = linux ]; then
     for retained_executable in /proc/[0-9]*/exe; do
       retained_target=$(readlink "$retained_executable" 2>/dev/null || true)
@@ -106,6 +114,20 @@ runtime_in_use() {
   # Without a reliable process census, retaining an old runtime is safer than
   # removing helpers that a long-lived agent may still need.
   return 0
+}
+
+record_runtime_users() {
+  runtime_user_root=$1
+  [ "$platform" = darwin ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  runtime_user_marker="$runtime_user_root/.webspider-live-pids"
+  runtime_user_temporary="$runtime_user_marker.$$"
+  lsof -t +D "$runtime_user_root" 2>/dev/null | sort -u > "$runtime_user_temporary"
+  if [ -s "$runtime_user_temporary" ]; then
+    mv "$runtime_user_temporary" "$runtime_user_marker"
+  else
+    rm -f "$runtime_user_temporary"
+  fi
 }
 
 cleanup_retained_runtimes() {
@@ -146,6 +168,7 @@ if [ -d "$install_root/app" ]; then preserve_codex_runtime "$install_root" "$sta
 mkdir -p "$(dirname "$install_root")" "$bin_dir" "${XDG_CONFIG_HOME:-$HOME/.config}/webspider" "$state_dir"
 cleanup_retained_runtimes
 if [ -d "$install_root/app" ]; then
+  record_runtime_users "$install_root"
   mv "$install_root" "$retained"
 fi
 mv "$stage" "$install_root"
