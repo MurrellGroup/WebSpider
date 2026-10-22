@@ -476,6 +476,12 @@ test('agent launch materializes the inherited project agreement without workspac
   const inheritedCodexHome = path.join(directory, 'original-codex-home');
   fs.mkdirSync(inheritedCodexHome);
   fs.writeFileSync(path.join(inheritedCodexHome, 'AGENTS.md'), '# User defaults\nPreserve the user rule.');
+  const inheritedConfig = 'model = "gpt-6.1-sol"\n';
+  fs.writeFileSync(path.join(inheritedCodexHome, 'config.toml'), inheritedConfig);
+  const managedHome = path.join(directory, 'agent-context', 'agt_context', 'codex-home');
+  fs.mkdirSync(managedHome, { recursive: true });
+  // Older WebSpider releases linked the user config into this isolated home.
+  fs.symlinkSync(path.join(inheritedCodexHome, 'config.toml'), path.join(managedHome, 'config.toml'));
   const fakeCodex = path.join(directory, 'codex');
   fs.writeFileSync(fakeCodex, '#!/bin/sh\ntest -n "$HOME" && test -n "$USER" && test -n "$LOGNAME" && test -n "$SHELL" && test -f "$WEBSPIDER_PROJECT_RULES" && grep -q "Reduce user burden" "$WEBSPIDER_PROJECT_RULES" && grep -q "Preserve the user rule" "$CODEX_HOME/AGENTS.md" && grep -q "Reduce user burden" "$CODEX_HOME/AGENTS.md" && test "$WEBSPIDER_AGENT_ROLE" = "main" && test -f "$WEBSPIDER_USER_GUIDE" && grep -q "Master Spider" "$WEBSPIDER_USER_GUIDE" && test -x "$WEBSPIDER_CONTROL" && test "$WEBSPIDER_CONTROL_URL" = "http://127.0.0.1:7340/api/v1/agent-control" && test "$WEBSPIDER_AGENT_TOKEN" = "wsa_test" && test "$WEBSPIDER_WORKSPACE_ROOT" = "$PWD"\n');
   fs.chmodSync(fakeCodex, 0o700);
@@ -512,6 +518,15 @@ test('agent launch materializes the inherited project agreement without workspac
   const managedAgents = fs.readFileSync(path.join(directory, 'agent-context', 'agt_context', 'codex-home', 'AGENTS.md'), 'utf8');
   assert.match(managedAgents, /Preserve the user rule/);
   assert.match(managedAgents, /Reduce user burden/);
+  const managedConfigPath = path.join(managedHome, 'config.toml');
+  assert.equal(fs.lstatSync(managedConfigPath).isSymbolicLink(), false);
+  const managedConfig = fs.readFileSync(managedConfigPath, 'utf8');
+  assert.match(managedConfig, /model = "gpt-6\.1-sol"/);
+  assert.equal(managedConfig.includes(
+    `[projects.${JSON.stringify(fs.realpathSync(workspace))}]\ntrust_level = "trusted"`,
+  ), true);
+  assert.equal(fs.statSync(managedConfigPath).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(path.join(inheritedCodexHome, 'config.toml'), 'utf8'), inheritedConfig);
   assert.match(fs.readFileSync(path.join(workspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'), /Master Spider/);
   const controlScriptPath = path.join(directory, 'agent-context', 'agt_context', 'webspider-control');
   const controlScript = fs.readFileSync(controlScriptPath, 'utf8');

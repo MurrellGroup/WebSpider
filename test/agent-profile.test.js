@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  agentLaunchArguments, CODEX_STABLE_MODEL_ARGUMENTS, codexTrustedProjectArguments, hasStableCodexModelArguments,
+  agentLaunchArguments, CODEX_STABLE_MODEL_ARGUMENTS, codexTrustedProjectArguments,
+  codexTrustedProjectConfig, hasStableCodexModelArguments,
 } from '../src/lib/agent-profile.js';
 
 test('existing Codex profiles with empty arguments receive unattended launch defaults', () => {
@@ -48,4 +49,33 @@ test('managed Codex agents trust exactly their registered project root', () => {
     'codex', '-c', 'projects."/extra/research/DeletionOnlyFSBF".trust_level="trusted"', '--', 'prompt',
   ]);
   assert.deepEqual(codexTrustedProjectArguments(['/bin/bash', '-l'], root), ['/bin/bash', '-l']);
+});
+
+test('managed Codex config persistently trusts only its registered project root', () => {
+  const root = '/extra/research/SurfaceTargets';
+  assert.equal(codexTrustedProjectConfig('model = "gpt-6.1-sol"\n', root), [
+    'model = "gpt-6.1-sol"',
+    '',
+    '[projects."/extra/research/SurfaceTargets"]',
+    'trust_level = "trusted"',
+    '',
+  ].join('\n'));
+  assert.equal(codexTrustedProjectConfig([
+    '[projects."/extra/research/SurfaceTargets"]',
+    'trust_level = "untrusted" # stale value',
+    '',
+    '[projects."/extra/research/Other"]',
+    'trust_level = "untrusted"',
+    '',
+  ].join('\n'), root), [
+    '[projects."/extra/research/SurfaceTargets"]',
+    'trust_level = "trusted"',
+    '',
+    '[projects."/extra/research/Other"]',
+    'trust_level = "untrusted"',
+    '',
+  ].join('\n'));
+  assert.equal(codexTrustedProjectConfig(
+    'projects."/extra/research/SurfaceTargets".trust_level = "untrusted"\n', root,
+  ), 'projects."/extra/research/SurfaceTargets".trust_level = "trusted"\n');
 });

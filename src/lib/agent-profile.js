@@ -73,3 +73,36 @@ export function codexTrustedProjectArguments(argv, rootPath) {
   if (separator < 0) return [...cleaned, ...trust];
   return [...cleaned.slice(0, separator), ...trust, ...cleaned.slice(separator)];
 }
+
+export function codexTrustedProjectConfig(contents, rootPath) {
+  const canonical = path.resolve(String(rootPath || ''));
+  const quoted = JSON.stringify(canonical);
+  const table = `[projects.${quoted}]`;
+  const dottedKey = `projects.${quoted}.trust_level`;
+  const lines = String(contents || '').replace(/\r\n?/g, '\n').split('\n');
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const equals = lines[index].indexOf('=');
+    if (equals >= 0 && lines[index].slice(0, equals).trim() === dottedKey) {
+      lines[index] = `${dottedKey} = "trusted"`;
+      return `${lines.join('\n').replace(/\n*$/, '')}\n`;
+    }
+  }
+
+  const tableIndex = lines.findIndex((line) => {
+    const trimmed = line.trim();
+    return trimmed === table || trimmed.startsWith(`${table} #`);
+  });
+  if (tableIndex >= 0) {
+    let end = tableIndex + 1;
+    while (end < lines.length && !/^\s*\[\[?/.test(lines[end])) end += 1;
+    const trustIndex = lines.findIndex((line, index) => index > tableIndex && index < end
+      && /^\s*trust_level\s*=/.test(line));
+    if (trustIndex >= 0) lines[trustIndex] = 'trust_level = "trusted"';
+    else lines.splice(tableIndex + 1, 0, 'trust_level = "trusted"');
+    return `${lines.join('\n').replace(/\n*$/, '')}\n`;
+  }
+
+  const prefix = lines.join('\n').replace(/\n*$/, '');
+  return `${prefix ? `${prefix}\n\n` : ''}${table}\ntrust_level = "trusted"\n`;
+}

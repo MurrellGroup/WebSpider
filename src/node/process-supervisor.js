@@ -6,7 +6,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeId, nowISO } from '../lib/ids.js';
 import { WebSpiderError, invariant } from '../lib/errors.js';
-import { codexTrustedProjectArguments, hasStableCodexModelArguments } from '../lib/agent-profile.js';
+import {
+  codexTrustedProjectArguments, codexTrustedProjectConfig, hasStableCodexModelArguments,
+} from '../lib/agent-profile.js';
 
 const WEBSPIDER_USER_GUIDE = new URL('../../docs/WEBSPIDER_USER_GUIDE.txt', import.meta.url);
 const EXPECT_BRIDGE = fileURLToPath(new URL('../../install/pty-bridge.expect', import.meta.url));
@@ -162,13 +164,15 @@ export function automatedMessagePayload(runtime, text) {
     : `${normalized}\n`);
 }
 
-function materializeCodexHome(contextDirectory, renderedInstructions, environment, { sessionSource = 'managed' } = {}) {
+function materializeCodexHome(contextDirectory, renderedInstructions, environment, {
+  sessionSource = 'managed', projectRoot = null,
+} = {}) {
   const inheritedHome = path.resolve(environment.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
   const managedHome = path.join(contextDirectory, sessionSource === 'user' ? 'codex-home-user-session' : 'codex-home');
   fs.mkdirSync(managedHome, { recursive: true, mode: 0o700 });
   if (fs.existsSync(inheritedHome) && inheritedHome !== managedHome) {
     for (const entry of fs.readdirSync(inheritedHome, { withFileTypes: true })) {
-      if (['AGENTS.md', 'AGENTS.override.md', 'sessions', 'logs', 'tmp'].includes(entry.name)) continue;
+      if (['AGENTS.md', 'AGENTS.override.md', 'config.toml', 'sessions', 'logs', 'tmp'].includes(entry.name)) continue;
       const destination = path.join(managedHome, entry.name);
       if (fs.existsSync(destination)) continue;
       try {
@@ -189,6 +193,13 @@ function materializeCodexHome(contextDirectory, renderedInstructions, environmen
     renderedInstructions,
   ].filter(Boolean).join('\n\n---\n\n');
   fs.writeFileSync(path.join(managedHome, 'AGENTS.md'), combined, { mode: 0o600 });
+  if (projectRoot) {
+    let inheritedConfig = '';
+    try { inheritedConfig = fs.readFileSync(path.join(inheritedHome, 'config.toml'), 'utf8'); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    writePrivateContextFile(managedHome, 'config.toml', codexTrustedProjectConfig(inheritedConfig, projectRoot), 0o600);
+  }
   return managedHome;
 }
 
@@ -660,6 +671,7 @@ function agentContextDirectory(stateDir, agentInstanceId) {
 
 function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
   argv = [], environment = {}, agentControl = null, recoveryContext = null, codexSession = null,
+  workspaceRoot = null,
 } = {}) {
   if (!agentInstanceId || !snapshot?.rendered_instructions) return {};
   const directory = agentContextDirectory(stateDir, agentInstanceId);
@@ -679,7 +691,7 @@ function materializePolicyContext(stateDir, agentInstanceId, snapshot, {
     output.WEBSPIDER_RECOVERY_CONTEXT = recoveryPath;
   }
   output.CODEX_HOME = materializeCodexHome(directory, snapshot.rendered_instructions, environment, {
-    sessionSource: codexSession?.source || 'managed',
+    sessionSource: codexSession?.source || 'managed', projectRoot: workspaceRoot,
   });
   return output;
 }
@@ -797,6 +809,7 @@ export class ProcessSupervisor extends EventEmitter {
     const policyEnvironment = kind === 'agent'
       ? materializePolicyContext(this.stateDir, agentContextId, policySnapshot, {
         argv, environment, agentControl, recoveryContext, codexSession: requestedCodexSession,
+        workspaceRoot: root.canonical,
       })
       : {};
     const trustedArgv = kind === 'agent' ? codexTrustedProjectArguments(argv, root.canonical) : argv;
