@@ -91,7 +91,9 @@ retained="$install_root.retained.$(date +%s).$$"
 runtime_in_use() {
   retained_candidate=$1
   retained_pid_marker="$retained_candidate/.webspider-live-pids"
+  retained_had_pid_marker=0
   if [ -f "$retained_pid_marker" ]; then
+    retained_had_pid_marker=1
     while IFS= read -r retained_pid; do
       case "$retained_pid" in *[!0-9]*|'') continue ;; esac
       if kill -0 "$retained_pid" 2>/dev/null; then return 0; fi
@@ -107,27 +109,25 @@ runtime_in_use() {
     done
     return 1
   fi
-  if command -v lsof >/dev/null 2>&1; then
-    lsof +D "$retained_candidate" >/dev/null 2>&1
-    return $?
-  fi
-  # Without a reliable process census, retaining an old runtime is safer than
-  # removing helpers that a long-lived agent may still need.
+  # New macOS runtimes carry a pre-rename PID census. An unmarked directory is
+  # from an older installer, so retaining it is safer than removing unknown
+  # helpers that a long-lived agent may still need.
+  if [ "$retained_had_pid_marker" -eq 1 ]; then return 1; fi
   return 0
 }
 
 record_runtime_users() {
   runtime_user_root=$1
   [ "$platform" = darwin ] || return 0
-  command -v lsof >/dev/null 2>&1 || return 0
   runtime_user_marker="$runtime_user_root/.webspider-live-pids"
   runtime_user_temporary="$runtime_user_marker.$$"
-  lsof -t +D "$runtime_user_root" 2>/dev/null | sort -u > "$runtime_user_temporary"
-  if [ -s "$runtime_user_temporary" ]; then
+  runtime_user_snapshot="$runtime_user_marker.ps.$$"
+  if ps -axo pid=,command= > "$runtime_user_snapshot"; then
+    awk -v prefix="$runtime_user_root/runtime/" 'index($0, prefix) { print $1 }' \
+      "$runtime_user_snapshot" | sort -u > "$runtime_user_temporary"
     mv "$runtime_user_temporary" "$runtime_user_marker"
-  else
-    rm -f "$runtime_user_temporary"
   fi
+  rm -f "$runtime_user_snapshot" "$runtime_user_temporary"
 }
 
 cleanup_retained_runtimes() {

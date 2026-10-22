@@ -87,6 +87,8 @@ test('native installer retains live runtimes and carries a managed Codex toolcha
   assert.match(installer, /record_runtime_users\(\)/);
   assert.match(installer, /\.webspider-live-pids/);
   assert.match(installer, /kill -0 "\$retained_pid"/);
+  assert.match(installer, /ps -axo pid=,command=/);
+  assert.doesNotMatch(installer, /lsof \+D/);
   assert.match(installer, /for retained_executable in \/proc\/\[0-9\]\*\/exe/);
   assert.match(installer, /"\$retained_candidate"\/\*\) return 0/);
   assert.match(installer, /retained="\$install_root\.retained\./);
