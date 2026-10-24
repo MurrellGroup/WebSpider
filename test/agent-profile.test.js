@@ -27,6 +27,7 @@ test('stable-model safeguards override conflicting profile config and remain ide
     '--profile', 'review',
     '-c', 'notice.hide_rate_limit_model_nudge=false',
     '--config', 'tui.keymap.composer.submit=["enter"]',
+    '-c', 'tui.alternate_screen="always"',
   ];
   const once = agentLaunchArguments('codex', configured);
   const twice = agentLaunchArguments('codex', once);

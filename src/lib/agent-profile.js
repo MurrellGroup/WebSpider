@@ -12,11 +12,14 @@ export const CODEX_STABLE_MODEL_ARGUMENTS = Object.freeze([
   'notice.hide_rate_limit_model_nudge=true',
   '-c',
   'tui.keymap.composer.submit=["enter","ctrl-enter"]',
+  '-c',
+  'tui.alternate_screen="never"',
 ]);
 
 const CODEX_STABLE_MODEL_KEYS = new Set([
   'notice.hide_rate_limit_model_nudge',
   'tui.keymap.composer.submit',
+  'tui.alternate_screen',
 ]);
 
 function withoutOverriddenCodexConfig(argumentsList) {
