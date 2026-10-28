@@ -13,7 +13,9 @@ import { contentDisposition, parsePositiveInt, readJSON, sendError, sendJSON } f
 import { ensurePrivateFile, isSafeOrigin, parseCookies, secureEqual, sessionSecret, sha256, verifyNodeHello } from '../lib/security.js';
 import { makeId, nowISO, randomToken } from '../lib/ids.js';
 import { renderProjectInstructions, summarizeProjectPolicy } from '../lib/project-policy.js';
-import { agentLaunchArguments } from '../lib/agent-profile.js';
+import { agentLaunchArguments, hasStableCodexModelArguments } from '../lib/agent-profile.js';
+import { formatInboundMessage } from '../node/node-daemon.js';
+import { automatedMessagePayload } from '../node/process-supervisor.js';
 import { decodeFileBase64, validateFileUpload } from '../lib/file-upload.js';
 import { decodeImageBase64, validateImageUpload } from '../lib/image-upload.js';
 import {
@@ -1846,6 +1848,14 @@ export class Hub {
       if (!result.duplicate) queueMicrotask(() => this.#dispatchMessage(result.message.id).catch((error) => this.#logError(error)));
       return result;
     });
+    route('POST', '/api/v1/messages/:id:retry', async (ctx) => {
+      const message = this.database.getMessage(ctx.params.id);
+      invariant(message, 'WS_NOT_FOUND', 'Message not found.', 404);
+      invariant(!['adapter_accepted', 'replied'].includes(message.delivery?.state),
+        'WS_MESSAGE_DELIVERED', 'This message has already been accepted by the agent.', 409);
+      await this.#dispatchMessage(message.id);
+      return this.database.getMessage(message.id);
+    });
 
     route('GET', '/api/v1/tasks', async (ctx) => {
       const activeProjects = new Set(this.database.listProjects().map((project) => project.id));
@@ -2919,29 +2929,61 @@ export class Hub {
       this.database.updateMessageDelivery(messageId, 'queued');
       return;
     }
+    const previous = this.database.previousInboundMessage(message.thread_id, message.sequence);
+    const elapsedMs = previous
+      ? Math.max(0, new Date(message.created_at).getTime() - new Date(previous.created_at).getTime())
+      : null;
+    const quota = agent.orchestration_role === 'main'
+      ? accountQuotaContext(this.database.accountUsageStatus())
+      : undefined;
+    const deliveryContext = {
+      message_timestamp_utc: message.created_at,
+      delivered_at_utc: nowISO(),
+      previous_message_timestamp_utc: previous?.created_at || null,
+      elapsed_since_previous_message_ms: elapsedMs,
+      source: message.display_sender,
+      account_quota: quota,
+    };
     try {
-      const previous = this.database.previousInboundMessage(message.thread_id, message.sequence);
-      const elapsedMs = previous
-        ? Math.max(0, new Date(message.created_at).getTime() - new Date(previous.created_at).getTime())
-        : null;
-      const quota = agent.orchestration_role === 'main'
-        ? accountQuotaContext(this.database.accountUsageStatus())
-        : undefined;
-      const receipt = await this.broker.request(agent.node_id, 'message.deliver', {
+      let receipt;
+      try {
+        receipt = await this.broker.request(agent.node_id, 'message.deliver', {
         agent_instance_id: agent.id,
         message,
         document_root_id: message.content_parts.some((part) => part.type === 'document')
           ? this.database.listAgentRoots(agent.id)[0]?.node_root_id
           : undefined,
-        delivery_context: {
-          message_timestamp_utc: message.created_at,
-          delivered_at_utc: nowISO(),
-          previous_message_timestamp_utc: previous?.created_at || null,
-          elapsed_since_previous_message_ms: elapsedMs,
-          source: message.display_sender,
-          account_quota: quota,
-        },
-      }, { idempotencyKey: message.id });
+        delivery_context: deliveryContext,
+        }, { idempotencyKey: message.id });
+      } catch (error) {
+        const node = this.database.getNode(agent.node_id);
+        const version = node?.capabilities?.webspider_version;
+        const profile = this.database.getProfile(agent.profile_id);
+        const plannedArgv = profile
+          ? [profile.executable, ...agentLaunchArguments(profile.executable, profile.arguments)]
+          : [];
+        const legacyProtectedSession = error.code === 'WS_AGENT_RESTART_REQUIRED'
+          && !webSpiderVersionAtLeast(version, '0.6.49')
+          && message.content_parts.every((part) => part.type === 'text')
+          && hasStableCodexModelArguments(plannedArgv);
+        if (!legacyProtectedSession) throw error;
+        const text = formatInboundMessage(message, deliveryContext);
+        const bytes = automatedMessagePayload({
+          argv: plannedArgv,
+          agentInstanceId: agent.id,
+          terminalId: agent.terminal_id,
+        }, text);
+        const direct = await this.broker.request(agent.node_id, 'terminal.input', {
+          terminal_id: agent.terminal_id,
+          data: bytes.toString('base64'),
+        }, { idempotencyKey: `${message.id}:legacy-protected-session` });
+        receipt = {
+          ...direct,
+          message_id: message.id,
+          adapter: 'pty-legacy-compat',
+          certainty: 'best_effort',
+        };
+      }
       this.database.updateMessageDelivery(messageId, 'adapter_accepted', receipt);
       this.database.appendEvent('thread', message.thread_id, 'message.delivered.v1', `node:${agent.node_id}`, messageId, {
         message_id: messageId,
