@@ -50,6 +50,11 @@ test('automated Codex delivery cannot accept a model-switch popup', () => {
   };
   assert.equal(automatedMessagePayload(protectedRuntime, 'check progress').toString(),
     '\u001b[200~check progress\u001b[201~\u001b[13;5u');
+  assert.equal(automatedMessagePayload({
+    ...protectedRuntime,
+    argv: ['codex', '-c', 'notice.hide_rate_limit_model_nudge=true'],
+  }, 'older protected session').toString(),
+  '\u001b[200~older protected session\u001b[201~\u001b[13;5u');
   assert.throws(
     () => automatedMessagePayload({ ...protectedRuntime, argv: ['codex'] }, 'unsafe'),
     (error) => error.code === 'WS_AGENT_RESTART_REQUIRED' && error.status === 409,

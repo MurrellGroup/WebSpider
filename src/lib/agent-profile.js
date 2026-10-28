@@ -44,8 +44,12 @@ function withoutOverriddenCodexConfig(argumentsList) {
 
 export function hasStableCodexModelArguments(argumentsList = []) {
   const configured = Array.isArray(argumentsList) ? argumentsList : [];
-  return configured.some((argument, start) => argument === CODEX_STABLE_MODEL_ARGUMENTS[0]
-    && CODEX_STABLE_MODEL_ARGUMENTS.every((expected, offset) => configured[start + offset] === expected));
+  // Message injection only needs the rate-limit model-switch prompt disabled.
+  // Other managed Codex defaults may be added over time; requiring the entire
+  // current default bundle would incorrectly fence sessions launched by an
+  // older, otherwise compatible WebSpider node.
+  return configured.some((argument, index) => ['-c', '--config'].includes(argument)
+    && configured[index + 1] === 'notice.hide_rate_limit_model_nudge=true');
 }
 
 export function agentLaunchArguments(executable, argumentsList = []) {
