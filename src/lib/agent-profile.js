@@ -11,6 +11,8 @@ export const CODEX_STABLE_MODEL_ARGUMENTS = Object.freeze([
   '-c',
   'notice.hide_rate_limit_model_nudge=true',
   '-c',
+  'check_for_update_on_startup=false',
+  '-c',
   'tui.keymap.composer.submit=["enter","ctrl-enter"]',
   '-c',
   'tui.alternate_screen="never"',
@@ -18,6 +20,7 @@ export const CODEX_STABLE_MODEL_ARGUMENTS = Object.freeze([
 
 const CODEX_STABLE_MODEL_KEYS = new Set([
   'notice.hide_rate_limit_model_nudge',
+  'check_for_update_on_startup',
   'tui.keymap.composer.submit',
   'tui.alternate_screen',
 ]);
