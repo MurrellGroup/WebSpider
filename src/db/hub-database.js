@@ -1952,6 +1952,22 @@ export class HubDatabase extends EventEmitter {
     return this.getAgent(id);
   }
 
+  setAgentProfile(id, profileId, actor = 'owner:local') {
+    const agent = this.getAgent(id);
+    const profile = this.getProfile(profileId);
+    invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);
+    invariant(profile, 'WS_NOT_FOUND', 'Agent profile not found.', 404);
+    invariant(['stopped', 'failed', 'hibernated'].includes(agent.state), 'WS_AGENT_RUNNING',
+      'Stop the agent before changing its launch profile.', 409);
+    this.db.prepare('UPDATE agent_instances SET profile_id = ? WHERE id = ?').run(profile.id, agent.id);
+    this.appendEvent('agent', agent.id, 'agent.profile.changed.v1', actor, profile.id, {
+      previous_profile_id: agent.profile_id,
+      profile_id: profile.id,
+      executable: profile.executable,
+    });
+    return this.getAgent(agent.id);
+  }
+
   setAgentCodexSession(id, session, actor = 'owner:local') {
     const agent = this.getAgent(id);
     invariant(agent, 'WS_NOT_FOUND', 'Agent instance not found.', 404);

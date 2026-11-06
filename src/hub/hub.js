@@ -391,6 +391,13 @@ export class Hub {
       queueMicrotask(() => this.#drainAllDeliveries());
       return this.#fleetUpdateView(cancelled);
     });
+    route('POST', '/api/v1/nodes/:id:update-package', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      invariant(body.confirmation === ctx.params.id, 'WS_VALIDATION', 'Confirm the exact node before updating it.');
+      invariant(ctx.params.id !== 'nod_local', 'WS_VALIDATION', 'Use the Hub installer to update the local Hub.');
+      const task = await this.#launchStandaloneNodeUpdate(ctx.params.id, this.version, ctx.principal.principal_id);
+      return { node_id: ctx.params.id, target_version: this.version, task };
+    });
     route('GET', '/api/v1/account-usage', async () => this.database.accountUsageStatus());
     route('GET', '/api/v1/system/policy', async () => this.database.getSystemPolicy());
     route('PATCH', '/api/v1/system/policy', async (ctx) => {
@@ -1597,6 +1604,19 @@ export class Hub {
       };
     });
     route('POST', '/api/v1/agent-instances/:id:wake', async (ctx) => this.#wakeAgent(ctx.params.id, ctx.principal.principal_id));
+    route('POST', '/api/v1/agent-instances/:id:switch-profile', async (ctx) => {
+      const body = await readJSON(ctx.request, 16_384);
+      const previous = this.database.getAgent(ctx.params.id);
+      const agent = this.database.setAgentProfile(ctx.params.id, body.profile_id, ctx.principal.principal_id);
+      this.database.audit({
+        actorId: ctx.principal.principal_id,
+        action: 'agent.profile.change',
+        targetType: 'agent_instance', targetId: agent.id, projectId: agent.project_id,
+        previousState: { profile_id: previous?.profile_id },
+        newState: { profile_id: agent.profile_id, profile_name: agent.profile_name },
+      });
+      return agent;
+    });
     route('POST', '/api/v1/agent-instances/:id:refresh-control', async (ctx) =>
       this.#refreshAgentControl(ctx.params.id, ctx.principal.principal_id));
     route('POST', '/api/v1/agent-instances/:id:resume-codex', async (ctx) => {
@@ -3412,6 +3432,55 @@ export class Hub {
     }
     this.database.setTerminalState(terminal.id, 'attached');
     return this.database.setTaskState(task.id, 'running', null, `system:fleet-update:${update.id}`);
+  }
+
+  async #launchStandaloneNodeUpdate(nodeId, targetVersion, actor) {
+    const node = this.database.getNode(nodeId, true);
+    invariant(node, 'WS_NOT_FOUND', 'Node not found.', 404);
+    invariant(this.broker.isOnline(nodeId), 'WS_NODE_OFFLINE', 'Reconnect the node before updating it.', 503);
+    invariant(!webSpiderVersionAtLeast(node.capabilities?.webspider_version, targetVersion),
+      'WS_UPDATE_NOT_REQUIRED', 'This node already has the requested WebSpider version.', 409);
+    const agent = this.database.listAgents().find((candidate) => candidate.node_id === nodeId && !candidate.project_archived_at);
+    invariant(agent, 'WS_UPDATE_NODE_EMPTY', `Node ${node.display_name} has no active project root for its updater.`, 409);
+    const root = this.database.listAgentRoots(agent.id)[0];
+    invariant(root, 'WS_ROOT_NOT_FOUND', `Node ${node.display_name} has no registered project root.`, 404);
+    const task = this.database.createTask({
+      projectId: agent.project_id,
+      type: 'command',
+      title: `Update ${node.display_name} control service to WebSpider ${targetVersion}`,
+      specification: { node_package_update: true, target_version: targetVersion, notify_target: 'none' },
+      assignedAgentInstanceId: agent.id,
+      nodeId,
+      createdBy: actor,
+    });
+    const terminal = this.database.createTaskTerminal(agent.id, task.title);
+    this.database.createTaskAttempt(task.id, nodeId, agent.id, this.broker.connectionEpoch(nodeId), randomToken('lease'));
+    const payload = {
+      task_id: task.id,
+      agent_instance_id: agent.id,
+      terminal_id: terminal.id,
+      root_id: root.node_root_id,
+      version: targetVersion,
+      role: 'node',
+    };
+    if (Number(node.capabilities?.fleet_update_protocol || 0) >= WEBSPIDER_UPDATE_PROTOCOL) {
+      await this.broker.request(nodeId, 'system.update', payload);
+    } else {
+      await this.broker.request(nodeId, 'task.start', {
+        task_id: task.id,
+        agent_instance_id: agent.id,
+        terminal_id: terminal.id,
+        root_id: root.node_root_id,
+        argv: fleetUpdateArgv({ version: targetVersion, role: 'node', hubURL: this.url }),
+        environment: {},
+      });
+    }
+    this.database.setTerminalState(terminal.id, 'attached');
+    this.database.audit({
+      actorId: actor, action: 'node.package_update.start', targetType: 'node', targetId: nodeId,
+      newState: { task_id: task.id, from_version: node.capabilities?.webspider_version, target_version: targetVersion },
+    });
+    return this.database.setTaskState(task.id, 'running', null, actor);
   }
 
   async #failFleetUpdate(error) {

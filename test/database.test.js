@@ -39,6 +39,21 @@ test('browser sessions remain valid until explicitly revoked', (t) => {
   assert.equal(database.getSession('browser-secret'), null);
 });
 
+test('a stopped agent can switch launch profiles without replacing its identity', (t) => {
+  const { database, agent } = databaseFixture(t);
+  const replacement = database.createProfile({
+    id: 'apf_replacement', name: 'Replacement Codex', adapterKind: 'pty', executable: 'codex',
+  });
+  const changed = database.setAgentProfile(agent.id, replacement.id, 'owner:test');
+  assert.equal(changed.id, agent.id);
+  assert.equal(changed.profile_id, replacement.id);
+  assert.equal(changed.active_thread_id, agent.active_thread_id);
+  assert.equal(changed.terminal_id, agent.terminal_id);
+  database.setAgentState(agent.id, 'ready');
+  assert.throws(() => database.setAgentProfile(agent.id, 'apf_test'),
+    (error) => error.code === 'WS_AGENT_RUNNING');
+});
+
 test('agent control tokens follow the managed process lifecycle and migrate active sessions', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webspider-agent-token-lifecycle-'));
   const file = path.join(directory, 'hub.db');

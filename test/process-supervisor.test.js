@@ -485,6 +485,11 @@ test('agent launch materializes the inherited project agreement without workspac
   fs.writeFileSync(path.join(inheritedCodexHome, 'config.toml'), inheritedConfig);
   const managedHome = path.join(directory, 'agent-context', 'agt_context', 'codex-home');
   fs.mkdirSync(managedHome, { recursive: true });
+  const staleCodexHome = path.join(directory, 'stale-codex-home');
+  fs.mkdirSync(staleCodexHome);
+  fs.writeFileSync(path.join(staleCodexHome, 'auth.json'), '{"account":"stale"}');
+  fs.writeFileSync(path.join(inheritedCodexHome, 'auth.json'), '{"account":"current"}');
+  fs.symlinkSync(path.join(staleCodexHome, 'auth.json'), path.join(managedHome, 'auth.json'));
   // Older WebSpider releases linked the user config into this isolated home.
   fs.symlinkSync(path.join(inheritedCodexHome, 'config.toml'), path.join(managedHome, 'config.toml'));
   const fakeCodex = path.join(directory, 'codex');
@@ -532,6 +537,7 @@ test('agent launch materializes the inherited project agreement without workspac
   ), true);
   assert.equal(fs.statSync(managedConfigPath).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(path.join(inheritedCodexHome, 'config.toml'), 'utf8'), inheritedConfig);
+  assert.equal(fs.realpathSync(path.join(managedHome, 'auth.json')), path.join(inheritedCodexHome, 'auth.json'));
   assert.match(fs.readFileSync(path.join(workspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'), /Master Spider/);
   const controlScriptPath = path.join(directory, 'agent-context', 'agt_context', 'webspider-control');
   const controlScript = fs.readFileSync(controlScriptPath, 'utf8');

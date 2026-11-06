@@ -174,7 +174,24 @@ function materializeCodexHome(contextDirectory, renderedInstructions, environmen
     for (const entry of fs.readdirSync(inheritedHome, { withFileTypes: true })) {
       if (['AGENTS.md', 'AGENTS.override.md', 'config.toml', 'sessions', 'logs', 'tmp'].includes(entry.name)) continue;
       const destination = path.join(managedHome, entry.name);
-      if (fs.existsSync(destination)) continue;
+      if (fs.existsSync(destination)) {
+        // Managed homes survive agent restarts so their sessions remain
+        // resumable. If the owner switches the profile to another Codex
+        // account, refresh package-created links to the newly inherited home
+        // without touching managed sessions or real files.
+        try {
+          const destinationStat = fs.lstatSync(destination);
+          if (destinationStat.isSymbolicLink()) {
+            const current = path.resolve(path.dirname(destination), fs.readlinkSync(destination));
+            const expected = path.join(inheritedHome, entry.name);
+            if (current !== expected) {
+              fs.unlinkSync(destination);
+              fs.symlinkSync(expected, destination, entry.isDirectory() ? 'dir' : 'file');
+            }
+          }
+        } catch { /* preserve the existing managed-home entry on refresh failure */ }
+        continue;
+      }
       try {
         fs.symlinkSync(path.join(inheritedHome, entry.name), destination, entry.isDirectory() ? 'dir' : 'file');
       } catch { /* optional state remains available through the inherited process environment */ }
