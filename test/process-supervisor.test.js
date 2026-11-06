@@ -537,7 +537,8 @@ test('agent launch materializes the inherited project agreement without workspac
   ), true);
   assert.equal(fs.statSync(managedConfigPath).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(path.join(inheritedCodexHome, 'config.toml'), 'utf8'), inheritedConfig);
-  assert.equal(fs.realpathSync(path.join(managedHome, 'auth.json')), path.join(inheritedCodexHome, 'auth.json'));
+  assert.equal(fs.realpathSync(path.join(managedHome, 'auth.json')),
+    fs.realpathSync(path.join(inheritedCodexHome, 'auth.json')));
   assert.match(fs.readFileSync(path.join(workspace, '.webspider', 'WEBSPIDER_USER_GUIDE.txt'), 'utf8'), /Master Spider/);
   const controlScriptPath = path.join(directory, 'agent-context', 'agt_context', 'webspider-control');
   const controlScript = fs.readFileSync(controlScriptPath, 'utf8');
